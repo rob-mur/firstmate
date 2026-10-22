@@ -1,0 +1,14 @@
+## BASE 9fe25bc: no-CI repo, zero statuses -> reproduces reported refusal
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/nocic-base/pulls/1 
+armed: state/task-x1.check.sh
+error: refusing to merge https://localhost/labadmin/nocic-base/pulls/1
+  - the combined commit status is "none", not success
+exit=1
+forge: {"state":"open","merged":false}
+
+## TARGET bc72333: same PR -> merges
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/nocic-base/pulls/1 
+armed: state/task-x1.check.sh
+verified: https://localhost/labadmin/nocic-base/pulls/1 is open and mergeable at head 641c22c645293b9a9d8cab839231a3ef9962a334, with no commit status and no Actions workflow at the head or base tip
+exit=0
+forge: {"state":"closed","merged":true}

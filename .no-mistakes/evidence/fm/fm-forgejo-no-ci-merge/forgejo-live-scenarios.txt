@@ -1,0 +1,47 @@
+## S2 workflow dir on base (.forgejo/workflows), zero statuses -> refuse
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/withci/pulls/1 
+armed: state/task-x1.check.sh
+error: refusing to merge https://localhost/labadmin/withci/pulls/1
+  - the combined commit status is "none", not success, and c37398d503460d6c83ea8b32c3b55a9e0ceb1ca9 carries .forgejo/workflows, so CI has not reported yet
+exit=1
+forge: {"state":"open","merged":false}
+
+## S3 workflow dir only on head (.github/workflows), zero statuses -> refuse
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/headci/pulls/1 
+armed: state/task-x1.check.sh
+error: refusing to merge https://localhost/labadmin/headci/pulls/1
+  - the combined commit status is "none", not success, and 5294e4e0fb5eb300380c0115db044ad2ab013c50 carries .github/workflows, so CI has not reported yet
+exit=1
+forge: {"state":"open","merged":false}
+
+## S4 red status present on no-CI repo, even with --allow-no-pipeline -> refuse
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/nocic-red/pulls/1 --allow-no-pipeline
+armed: state/task-x1.check.sh
+error: refusing to merge https://localhost/labadmin/nocic-red/pulls/1
+  - the combined commit status is "failure", not success
+exit=1
+forge: {"state":"open","merged":false}
+
+## S5 green status -> merge
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/nocic-green/pulls/1 
+armed: state/task-x1.check.sh
+verified: https://localhost/labadmin/nocic-green/pulls/1 is open and mergeable, with a successful combined status at head 157afdf97818bd61142d984663973b6a00e15841
+exit=0
+forge: {"state":"closed","merged":true}
+
+## S6 attended --allow-no-pipeline waives zero statuses with workflow dir (.gitea/workflows)
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/withci-waive/pulls/1 --allow-no-pipeline
+armed: state/task-x1.check.sh
+verified: https://localhost/labadmin/withci-waive/pulls/1 is open and mergeable at head d2b0f20602e1fcbfdc6ba62dcf973ad8c6ca3425, with no commit status, waived by --allow-no-pipeline
+exit=0
+forge: {"state":"closed","merged":true}
+
+## S7 (INVALID: driver failed to record away posture; re-driven in forgejo-live-away.txt)
+Usage:
+  fm-afk-contract.sh enter [--words-file <path> | --words <text>]
+      [--expected-return <UTC ISO 8601>] [--spend <n>]
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/nocic-away/pulls/1 --allow-no-pipeline
+armed: state/task-x1.check.sh
+verified: https://localhost/labadmin/nocic-away/pulls/1 is open and mergeable at head 2d1121556b29aeb106870e28e03892cf4d001d9e, with no commit status, waived by --allow-no-pipeline
+exit=0
+forge: {"state":"closed","merged":true}

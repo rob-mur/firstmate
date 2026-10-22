@@ -1,0 +1,18 @@
+## S7 away posture + --allow-no-pipeline -> refuse
+Away posture recorded at 2026-10-22T12:48:25Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-10-22T12:48:25Z
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/nocic-away2/pulls/1 --allow-no-pipeline
+error: --allow-no-pipeline is attended-only; while the away-posture record exists a GitLab merge requires a successful head pipeline and a Forgejo merge requires a successful combined status or a repository with no CI
+exit=2
+forge: {"state":"open","merged":false}
+
+## S8 away posture (yolo), no-CI repo, no flag -> merge
+Away posture recorded at 2026-10-22T12:48:25Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-10-22T12:48:25Z
+$ fm-pr-merge.sh task-x1 https://localhost/labadmin/nocic-away3/pulls/1 
+armed: state/task-x1.check.sh
+verified: https://localhost/labadmin/nocic-away3/pulls/1 is open and mergeable at head 641c22c645293b9a9d8cab839231a3ef9962a334, with no commit status and no Actions workflow at the head or base tip
+exit=0
+forge: {"state":"closed","merged":true}
