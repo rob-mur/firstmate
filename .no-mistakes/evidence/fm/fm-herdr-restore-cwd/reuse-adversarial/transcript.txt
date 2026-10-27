@@ -1,0 +1,15 @@
+1. fresh spawn exit=0
+[after fresh spawn + uncommitted work] meta worktree=/home/rob/.treehouse/demo-98d4e5/1/demo
+[after fresh spawn + uncommitted work] work.txt in /home/rob/.treehouse/demo-98d4e5/1/demo: uncommitted task work
+[after fresh spawn + uncommitted work] slot claim: task=bt home=/tmp/fm-lab.vvb8aK 
+[after fresh spawn + uncommitted work] treehouse: [{"path":"/home/rob/.treehouse/demo-98d4e5/1/demo","status":"leased","lease_holder":"bt"}]
+[after fresh spawn + uncommitted work] all leases held by bt: ["/home/rob/.treehouse/demo-98d4e5/1/demo"]
+2. lab Herdr session stopped (server down): session list running=false
+2. same-id re-spawn with Herdr down exit=0
+2. session running after re-spawn=true
+[after re-spawn with server down] meta worktree=/home/rob/.treehouse/demo-98d4e5/1/demo
+[after re-spawn with server down] work.txt in /home/rob/.treehouse/demo-98d4e5/1/demo: uncommitted task work
+[after re-spawn with server down] slot claim: task=bt home=/tmp/fm-lab.vvb8aK 
+[after re-spawn with server down] treehouse: [{"path":"/home/rob/.treehouse/demo-98d4e5/1/demo","status":"leased","lease_holder":"bt"}]
+[after re-spawn with server down] all leases held by bt: ["/home/rob/.treehouse/demo-98d4e5/1/demo"]
+3. lab restarted; re-spawn same id with injected failure after record publication

@@ -1,0 +1,22 @@
+claude --resume eb2361ba-28a3-480a-b609-e0bf11f38eaf
+➜  demo claude --resume eb2361ba-28a3-480a-b609-e0bf11f38eaf                                            git:(b056939|)
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Opus 5.5 · Claude Team
+ ▝▝   ▝▝   ~/.treehouse/demo-753a40/1/demo
+
+
+❯ : Firstmate operational input waiting: read
+  '/tmp/fm-lab.Ay2MUE/state/operational-inbox/1793114329-1d73c3ec9973b66e.msg' and handle its contents as Firstmate
+  operational input.
+
+  Read 1 file (ctrl+o to expand)
+
+● READY
+
+✻ Worked for 2s · done 16:18
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  📄 ctx:2% (18k)
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent

@@ -1,0 +1,29 @@
+cd -- '/home/rob/.treehouse/demo-24f1c3/1/demo'
+➜  demo cd -- '/home/rob/.treehouse/demo-24f1c3/1/demo'                                                git:(4b2a84a|)
+➜  demo git:(4b2a84a) export GOTMPDIR=/tmp/fm-cwdtask/gotmp                                            git:(4b2a84a|)
+export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=cwdtask
+➜  demo git:(4b2a84a) export COMPACT_ADVISER_DISABLE=1                                                 git:(4b2a84a|)
+➜  demo git:(4b2a84a) export FM_TASK_ID=cwdtask                                                        git:(4b2a84a|)
+➜  demo git:(4b2a84a) . '/tmp/fm-cwdtask+63d68df4910ab20cb498403711c2d0a7c2527036f0bb2bfb122a8ac019d9a26f/launch.s17931
+15674.2213782.11498.sh'
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Opus 5.5 · Claude Team
+ ▝▝   ▝▝   ~/.treehouse/demo-24f1c3/1/demo
+
+
+❯ : Firstmate operational input waiting: read
+  '/tmp/fm-lab.sXlJp0/state/operational-inbox/1793115675-2b6d0cb3d3e0b9ee.msg' and handle its contents as Firstmate
+  operational input.
+
+  Thought for 2s, read 1 file (ctrl+o to expand)
+
+● READY
+
+✻ Crunched for 4s · done 16:41
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  📄 ctx:2% (18k) ⏱ 5h:24% 📅 7d:5% 📊 burndown:+3%
+  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent

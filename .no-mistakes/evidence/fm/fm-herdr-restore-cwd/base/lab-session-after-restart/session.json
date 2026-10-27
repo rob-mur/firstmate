@@ -1,0 +1,46 @@
+{
+  "version": 3,
+  "workspaces": [
+    {
+      "id": "w1",
+      "custom_name": "firstmate",
+      "identity_cwd": "/tmp/fm-lab.nT3s04/projects/demo",
+      "public_pane_numbers": {
+        "2": 2
+      },
+      "next_public_pane_number": 3,
+      "public_tab_numbers": [
+        2
+      ],
+      "next_public_tab_number": 3,
+      "tabs": [
+        {
+          "custom_name": "fm-cwdtask",
+          "layout": {
+            "Pane": 2
+          },
+          "panes": {
+            "2": {
+              "cwd": "/tmp/fm-lab.nT3s04/projects/demo",
+              "agent_session": {
+                "source": "herdr:claude",
+                "agent": "claude",
+                "kind": "id",
+                "value": "8d9b6f6c-0566-4017-9962-94961f0c328a"
+              }
+            }
+          },
+          "zoomed": false,
+          "focused": 2,
+          "root_pane": 2
+        }
+      ],
+      "active_tab": 0
+    }
+  ],
+  "active": 0,
+  "selected": 0,
+  "sidebar_width": null,
+  "sidebar_section_split": null,
+  "collapsed_space_keys": []
+}

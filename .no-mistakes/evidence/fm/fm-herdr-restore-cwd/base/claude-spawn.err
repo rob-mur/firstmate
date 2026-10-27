@@ -1,0 +1,4 @@
+warning: /tmp/fm-lab.nT3s04/data/cwdtask/launch-brief.md records no ship branch; defaulting to legacy branch fm/cwdtask
+warning: /tmp/fm-lab.nT3s04/data/cwdtask/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode local-only - confirm its definition of done matches
+notice: cwdtask ships mode=local-only while the standing posture for demo is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state
+warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection

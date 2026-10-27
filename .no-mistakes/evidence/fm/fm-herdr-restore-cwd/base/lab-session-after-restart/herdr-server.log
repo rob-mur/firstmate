@@ -1,0 +1,49 @@
+2026-10-27T15:23:09.564159Z  INFO herdr::api::server: api server listening path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/herdr.sock
+2026-10-27T15:23:09.565432Z  INFO herdr::persist::io: session file is missing event="persist.restore" subsystem="persist" outcome="missing" path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/session.json
+2026-10-27T15:23:09.565501Z  INFO herdr::app: using pane scrollback configuration pane_scrollback_limit_bytes=10000000
+2026-10-27T15:23:09.641989Z  INFO herdr::logging: checking for updates event="update.check.start" subsystem="update" outcome="started"
+2026-10-27T15:23:09.642425Z  INFO herdr::server::headless: client protocol socket listening path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/herdr-client.sock
+2026-10-27T15:23:09.642466Z  INFO herdr::server::headless::bootstrap: herdr server started api_socket=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/herdr.sock client_socket=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/herdr-client.sock
+2026-10-27T15:23:09.642496Z  INFO herdr::logging: herdr starting event="app.startup" subsystem="server" outcome="started" pid=1894081
+2026-10-27T15:23:10.689563Z  INFO herdr::logging: api request received event="api.request.start" subsystem="api" outcome="started" request_id="cli:workspace:create" method="workspace.create" changes_ui=true
+2026-10-27T15:23:10.689714Z  INFO herdr::logging: spawning pane terminal event="pane.spawn.start" subsystem="pane" outcome="started" pane_id=1 rows=40 cols=119 scrollback_limit_bytes=10000000
+2026-10-27T15:23:10.690407Z  INFO herdr::logging: pane child spawned event="pane.spawned" subsystem="pane" outcome="ok" pane_id=1 pid=1894581
+2026-10-27T15:23:10.690525Z  INFO herdr::logging: workspace created event="workspace.create" subsystem="workspace" outcome="ok" workspace_id="w1" pane_id=1
+2026-10-27T15:23:10.690528Z  INFO herdr::logging: workspace focused event="workspace.focus" subsystem="workspace" outcome="ok" workspace_id="w1"
+2026-10-27T15:23:10.690530Z  INFO herdr::logging: tab focused event="tab.focus" subsystem="tab" outcome="ok" workspace_id="w1" tab_id="w1:t1"
+2026-10-27T15:23:10.690532Z  INFO herdr::logging: workspace renamed event="workspace.rename" subsystem="workspace" outcome="ok" workspace_id="w1"
+2026-10-27T15:23:10.690665Z  INFO herdr::logging: api request completed event="api.request.complete" subsystem="api" outcome="ok" request_id="cli:workspace:create" method="workspace.create"
+2026-10-27T15:23:10.714020Z  INFO herdr::logging: api request received event="api.request.start" subsystem="api" outcome="started" request_id="cli:tab:create" method="tab.create" changes_ui=true
+2026-10-27T15:23:10.714146Z  INFO herdr::logging: spawning pane terminal event="pane.spawn.start" subsystem="pane" outcome="started" pane_id=2 rows=40 cols=119 scrollback_limit_bytes=10000000
+2026-10-27T15:23:10.714765Z  INFO herdr::logging: pane child spawned event="pane.spawned" subsystem="pane" outcome="ok" pane_id=2 pid=1894603
+2026-10-27T15:23:10.714849Z  INFO herdr::logging: tab renamed event="tab.rename" subsystem="tab" outcome="ok" workspace_id="w1" tab_id="w1:t2"
+2026-10-27T15:23:10.714946Z  INFO herdr::logging: api request completed event="api.request.complete" subsystem="api" outcome="ok" request_id="cli:tab:create" method="tab.create"
+2026-10-27T15:23:10.742612Z  INFO herdr::logging: api request completed event="api.request.complete" subsystem="api" outcome="error" request_id="cli:agent:get" method="agent.get"
+2026-10-27T15:23:10.750340Z  INFO herdr::logging: api request received event="api.request.start" subsystem="api" outcome="started" request_id="cli:pane:close" method="pane.close" changes_ui=true
+2026-10-27T15:23:10.752765Z  INFO herdr::logging: pane child exited event="pane.exit" subsystem="pane" outcome="completed" pane_id=1 status="ExitStatus { code: 1, signal: None }"
+2026-10-27T15:23:10.752973Z  INFO herdr::pane: pane session terminated pane=1 pid=1894581 signal=Hangup
+2026-10-27T15:23:10.753043Z  WARN herdr::app::actions: PaneDied for unknown pane pane=1
+2026-10-27T15:23:10.753049Z  INFO herdr::logging: api request completed event="api.request.complete" subsystem="api" outcome="ok" request_id="cli:pane:close" method="pane.close"
+2026-10-27T15:23:15.785408Z  INFO herdr::persist::writer: preserved session recovery copy event="persist.backup" subsystem="persist" outcome="ok" path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/session.json backup_path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/session-snapshots/session-000000000000000000001793114595774476328-1894081-0.json
+2026-10-27T15:23:15.785508Z  INFO herdr::logging: session saved event="persist.save" subsystem="persist" outcome="ok" path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/session.json workspaces=1
+2026-10-27T15:23:15.865328Z  INFO herdr::logging: api request completed event="api.request.complete" subsystem="api" outcome="error" request_id="cli:agent:get" method="agent.get"
+2026-10-27T15:23:16.284475Z  INFO herdr::pane: agent changed pane=2 previous_agent=None agent=Some(Claude) process=claude pgid=Some(1896163)
+2026-10-27T15:23:21.279466Z  INFO herdr::logging: session saved event="persist.save" subsystem="persist" outcome="ok" path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/session.json workspaces=1
+2026-10-27T15:26:18.891721Z  INFO herdr::server::headless::lifecycle: server shutdown initiated reason=server.stop request from pid 1943771 (herdr), parent pid 1943748 (bash)
+2026-10-27T15:26:18.941889Z  INFO herdr::server::headless::lifecycle: completing server shutdown
+2026-10-27T15:26:18.962038Z  INFO herdr::logging: session saved event="persist.save" subsystem="persist" outcome="ok" path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/session.json workspaces=1
+2026-10-27T15:26:18.962068Z  INFO herdr::server::headless: headless server exiting
+2026-10-27T15:26:18.965137Z  INFO herdr::logging: pane child exited event="pane.exit" subsystem="pane" outcome="completed" pane_id=2 status="ExitStatus { code: 1, signal: None }"
+2026-10-27T15:26:19.512261Z  INFO herdr::pane: pane session terminated pane=2 pid=1894603 signal=Kill
+2026-10-27T15:26:19.512684Z  INFO herdr::logging: herdr exiting event="app.shutdown" subsystem="server" outcome="completed" pid=1894081
+2026-10-27T15:26:19.555890Z  INFO herdr::api::server: api server listening path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/herdr.sock
+2026-10-27T15:26:19.557012Z  INFO herdr::logging: session restore evaluated event="persist.restore" subsystem="persist" outcome="ok" workspaces=1
+2026-10-27T15:26:19.557037Z  INFO herdr::app: using pane scrollback configuration pane_scrollback_limit_bytes=10000000
+2026-10-27T15:26:19.625028Z  INFO herdr::logging: checking for updates event="update.check.start" subsystem="update" outcome="started"
+2026-10-27T15:26:19.625492Z  INFO herdr::server::headless: client protocol socket listening path=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/herdr-client.sock
+2026-10-27T15:26:19.625540Z  INFO herdr::server::headless::bootstrap: herdr server started api_socket=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/herdr.sock client_socket=/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-1894030-12917/herdr-client.sock
+2026-10-27T15:26:19.625597Z  INFO herdr::logging: herdr starting event="app.startup" subsystem="server" outcome="started" pid=1944278
+2026-10-27T15:26:19.805222Z  INFO herdr::logging: api request completed event="api.request.complete" subsystem="api" outcome="error" request_id="cli:pane:process_info" method="pane.process_info"
+2026-10-27T15:26:20.393766Z  INFO herdr::logging: spawning pane terminal event="pane.spawn.start" subsystem="pane" outcome="started" pane_id=1 rows=40 cols=120 scrollback_limit_bytes=10000000
+2026-10-27T15:26:20.394572Z  INFO herdr::logging: pane child spawned event="pane.spawned" subsystem="pane" outcome="ok" pane_id=1 pid=1944602
+2026-10-27T15:26:20.946427Z  INFO herdr::pane: agent changed pane=1 previous_agent=None agent=Some(Claude) process=claude pgid=Some(1944949)

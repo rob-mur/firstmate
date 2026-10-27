@@ -1,0 +1,23 @@
+lab home=/tmp/fm-lab.Ay2MUE session=fm-lab-claude-cwd-1830780-7559 project=/tmp/fm-lab.Ay2MUE/projects/demo resume=resume_agents_on_restore = true
+spawn exit=0
+recorded worktree=/home/rob/.treehouse/demo-753a40/1/demo pane=w1:p2
+agent status before restart: 
+before restart pane: {"cwd":"/home/rob/.treehouse/demo-753a40/1/demo","foreground_cwd":"/home/rob/.treehouse/demo-753a40/1/demo"}
+saved panes: [{"cwd":"/home/rob/.treehouse/demo-753a40/1/demo","agent_session":{"source":"herdr:claude","agent":"claude","kind":"id","value":"eb2361ba-28a3-480a-b609-e0bf11f38eaf"}}]
+after restart pane: {"cwd":"/home/rob/.treehouse/demo-753a40/1/demo","foreground_cwd":"/home/rob/.treehouse/demo-753a40/1/demo"}
+resumed agent pid=1878941 cmd=/home/rob/.nix-profile/bin/claude --resume eb2361ba-28a3-480a-b609-e0bf11f38eaf 
+resumed agent cwd=/home/rob/.treehouse/demo-753a40/1/demo
+SCREEN: no external-import or direnv prompt
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /tmp/fm-lab.Ay2MUE
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+warning: lsof is unavailable; cannot resolve a process-group fallback for herdr task cwdtask
+🌳 Terminated lingering processes: zsh (1878801), .claude-wrapped (1878941)
+🌳 Worktree returned to pool.
+teardown cwdtask complete (window fm-lab-claude-cwd-1830780-7559:w1:p2, worktree /home/rob/.treehouse/demo-753a40/1/demo)
+Backlog: cwdtask just finished (this home keeps no markdown backlog at /tmp/fm-lab.Ay2MUE/data/backlog.md). Update /tmp/fm-lab.Ay2MUE/data/backlog.md - move cwdtask to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.

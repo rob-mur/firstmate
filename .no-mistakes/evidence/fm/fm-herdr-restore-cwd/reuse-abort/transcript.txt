@@ -1,0 +1,18 @@
+1. fresh spawn exit=0
+[after fresh spawn + uncommitted work] meta present=yes worktree=/home/rob/.treehouse/demo-ff82eb/1/demo
+[after fresh spawn + uncommitted work] work.txt in /home/rob/.treehouse/demo-ff82eb/1/demo: uncommitted task work
+[after fresh spawn + uncommitted work] slot claim: task=bt home=/tmp/fm-lab.R9ungk 
+[after fresh spawn + uncommitted work] leases held by bt: [{"path":"/home/rob/.treehouse/demo-ff82eb/1/demo","status":"leased"}]
+2. Herdr lab session restarted (resume_agents_on_restore off in lab config -> restored pane holds no agent)
+3. same-id re-spawn with fault after record publication exit=1
+3. stderr tail: notice: bt ships mode=local-only while the standing posture for demo is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state|fault-injected shasum failure (after record publication)|error: could not derive a home identity for the staged launch file|
+[after aborted recovery] meta present=no worktree=<none>
+[after aborted recovery] work.txt in /home/rob/.treehouse/demo-ff82eb/1/demo: uncommitted task work
+[after aborted recovery] slot claim: task=bt home=/tmp/fm-lab.R9ungk 
+[after aborted recovery] leases held by bt: [{"path":"/home/rob/.treehouse/demo-ff82eb/1/demo","status":"leased"}]
+4. same-id re-spawn without fault exit=0 out=spawned bt harness=sh kind=ship mode=local-only yolo=off window=fm-lab-reuse-abort-2202585-21295:w2:p2 worktree=/home/rob/.treehouse/demo-ff82eb/2/demo
+[after successful recovery] meta present=yes worktree=/home/rob/.treehouse/demo-ff82eb/2/demo
+[after successful recovery] work.txt in /home/rob/.treehouse/demo-ff82eb/1/demo: uncommitted task work
+[after successful recovery] slot claim: task=bt home=/tmp/fm-lab.R9ungk 
+[after successful recovery] leases held by bt: [{"path":"/home/rob/.treehouse/demo-ff82eb/1/demo","status":"leased"},{"path":"/home/rob/.treehouse/demo-ff82eb/2/demo","status":"leased"}]
+4. recovered pane cwd: {"cwd":"/home/rob/.treehouse/demo-ff82eb/2/demo","foreground_cwd":"/home/rob/.treehouse/demo-ff82eb/2/demo"}

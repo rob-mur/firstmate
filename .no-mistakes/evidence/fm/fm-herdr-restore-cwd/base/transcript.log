@@ -1,0 +1,10 @@
+lab home=/tmp/fm-lab.nT3s04 session=fm-lab-claude-cwd-1894030-12917 project=/tmp/fm-lab.nT3s04/projects/demo resume=resume_agents_on_restore = true
+spawn exit=0
+recorded worktree=/home/rob/.treehouse/demo-5d7447/1/demo pane=w1:p2
+agent status before restart: 
+before restart pane: {"cwd":"/tmp/fm-lab.nT3s04/projects/demo","foreground_cwd":"/home/rob/.treehouse/demo-5d7447/1/demo"}
+saved panes: [{"cwd":"/tmp/fm-lab.nT3s04/projects/demo","agent_session":{"source":"herdr:claude","agent":"claude","kind":"id","value":"8d9b6f6c-0566-4017-9962-94961f0c328a"}}]
+after restart pane: {"cwd":"/tmp/fm-lab.nT3s04/projects/demo","foreground_cwd":"/tmp/fm-lab.nT3s04/projects/demo"}
+resumed agent pid=1944949 cmd=/home/rob/.nix-profile/bin/claude --resume 8d9b6f6c-0566-4017-9962-94961f0c328a 
+resumed agent cwd=/tmp/fm-lab.nT3s04/projects/demo
+SCREEN: no external-import or direnv prompt

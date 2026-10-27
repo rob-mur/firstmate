@@ -1,0 +1,7 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /tmp/fm-lab.vvb8aK
+warning: /tmp/fm-lab.vvb8aK/data/bt/launch-brief.md records no ship branch; defaulting to legacy branch fm/bt
+warning: /tmp/fm-lab.vvb8aK/data/bt/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode local-only - confirm its definition of done matches
+notice: bt ships mode=local-only while the standing posture for demo is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state
+🌳 Setting up worktree...
+🌳 Leased worktree at ~/.treehouse/demo-98d4e5/1/demo. Run 'treehouse return ~/.treehouse/demo-98d4e5/1/demo' to release it.
+warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection
