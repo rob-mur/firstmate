@@ -74,6 +74,11 @@
 #   - The store is written BEFORE the outcome is delivered to main
 #     (store-first durability): nothing about a handled event depends on
 #     conversation memory.
+#   - Phone notice: after a non-silent captain row is stored and the lock is
+#     released, append hands its summary to bin/fm-phone-channel.sh
+#     away-outcome, which sends it only while an away record names the phone
+#     channel. The send is bounded and best-effort: its failure never changes
+#     append's result or output, and the stored row is untouched either way.
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
@@ -558,6 +563,9 @@ case "$CMD" in
     fi
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
+    if [ "$VERDICT" = captain ] && [ "$SILENT" = false ]; then
+      FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-phone-channel.sh" away-outcome --summary "$SUMMARY" </dev/null >/dev/null 2>&1 || true
+    fi
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
