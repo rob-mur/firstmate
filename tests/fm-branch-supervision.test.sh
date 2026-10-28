@@ -109,6 +109,48 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
   pass "emitted branch prompt routes completed scouts through existing policies and leased cleanup, preserving unfinished work"
 }
 
+# While an away record names the phone channel, each non-silent captain row is
+# also sent there after it is stored; the store, its seq output, and a failed
+# send never depend on each other (bin/fm-phone-channel.sh owns the channel).
+test_outcome_append_sends_captain_rows_to_the_phone_channel_while_away() {
+  local home stub seq out
+  home="$TMP_ROOT/phone-outcome-home"
+  mkdir -p "$home/state" "$home/config"
+  stub="$home/phone-stub.sh"
+  cat > "$stub" <<EOF
+#!/bin/sh
+printf '%s\n' "\$1" >> "$home/phone.args"
+EOF
+  chmod +x "$stub"
+  printf 'name: Telegram\ncommand: %s\n' "$stub" > "$home/config/phone-channel"
+
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict captain --summary 'attended decision') || fail "attended append failed"
+  [ "$seq" = 1 ] || fail "attended append printed $seq"
+  [ ! -e "$home/phone.args" ] || fail "an attended captain row was sent to the phone channel"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'away' >/dev/null 2>&1 \
+    || fail "away entry failed"
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict captain --summary 'PR ready for review: https://example.com/pr/4') || fail "away captain append failed"
+  [ "$seq" = 2 ] || fail "away captain append printed '$seq', not only its seq"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict routine --summary 'routine note' >/dev/null \
+    || fail "routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict routine --summary 'silent note' --silent true >/dev/null \
+    || fail "silent append failed"
+  [ "$(cat "$home/phone.args")" = 'Firstmate needs you: PR ready for review: https://example.com/pr/4' ] \
+    || fail "the phone channel did not get exactly the away captain row: $(cat "$home/phone.args")"
+
+  printf 'command: exit 9\n' > "$home/config/phone-channel"
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict captain --summary 'credential needed') || fail "a failed phone send failed the append"
+  [ "$seq" = 5 ] || fail "append with a failing phone send printed '$seq'"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 5) || fail "lookup after a failed send failed"
+  assert_contains "$out" '"summary":"credential needed"' 'a failed send loses the stored outcome'
+  assert_contains "$(cat "$home/state/phone-channel.log")" 'command exited 9' 'the failed send is logged'
+  pass "away captain rows reach the phone channel after they are stored, and a failed send changes nothing about the append"
+}
+
 # --- append-only outcome store ------------------------------------------------
 
 test_outcome_store_is_append_only_with_cursor_reads() {
@@ -1617,6 +1659,7 @@ test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget
 test_outcome_seed_tail_creates_only_an_absent_display_tail
+test_outcome_append_sends_captain_rows_to_the_phone_channel_while_away
 test_outcome_seed_tail_only_reads_bounded_suffix
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier

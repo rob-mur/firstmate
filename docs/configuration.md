@@ -724,6 +724,29 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Away-mode phone channel (config/phone-channel)
+
+The optional local, gitignored `config/phone-channel` gives away mode a real phone channel.
+It is not inherited by secondmate homes.
+
+```text
+name: Telegram
+command: /absolute/path/to/notify.sh
+```
+
+`command:` is required exactly once and uses the `command:<cmd>` form of `config/wedge-alarm`.
+A single word runs that executable with the text as its one argument; anything longer runs via `sh -c` with the text as `$1`; the text is also on stdin either way.
+`name:` is optional and names the channel in announcements; it defaults to the command's file name.
+Blank lines and `#` comments are ignored, and any other line, a repeated directive, or an empty value makes the file malformed.
+
+An away entry that finds the channel configured records it and names it in the entry announcement and read-back.
+While that away record stands, each non-silent outcome the away session stores with the captain verdict is also sent to the command as one line, `Firstmate needs you: <summary>`: decisions, review-ready PRs, blockers, and credential needs.
+The outcome is stored before the send, so a failed or slow send never loses it, and it still waits for the captain's return.
+An absent file keeps the hold-for-return announcement that says no phone channel is configured; a malformed one keeps that announcement and entry prints what is wrong.
+A refresh leaves the record untouched, so an entry says when the channel no longer matches it; entering `/afk` again with words picks the change up.
+Quiet mode never uses the channel.
+`bin/fm-phone-channel.sh` owns the format, the one-line shaping, redaction, length cap, and send timeout, and its failure log `state/phone-channel.log`, which never records the command.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
