@@ -664,6 +664,179 @@ test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
   pass "entry without --spend records the live worker count, never below the default floor, and an explicit --spend still wins"
 }
 
+# --- the optional phone channel (bin/fm-phone-channel.sh) --------------------
+
+PHONE="$ROOT/bin/fm-phone-channel.sh"
+
+phone() {  # <home> <args...>
+  local home=$1
+  shift
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PHONE" "$@"
+}
+
+# A stub phone command: records its first argument and its stdin, one call per
+# line, so no test ever reaches a real phone channel.
+write_phone_stub() {  # <home> -> prints the stub path
+  local home=$1 stub="$1/phone-stub.sh"
+  cat > "$stub" <<EOF
+#!/bin/sh
+printf '%s\n' "\$1" >> "$home/phone.args"
+cat >> "$home/phone.stdin"
+printf '\n' >> "$home/phone.stdin"
+EOF
+  chmod +x "$stub"
+  printf '%s\n' "$stub"
+}
+
+write_phone_config() {  # <home> <line>...
+  local home=$1
+  shift
+  mkdir -p "$home/config"
+  printf '%s\n' "$@" > "$home/config/phone-channel"
+}
+
+test_configured_phone_channel_is_named_in_the_entry_and_record() {
+  local home stub out
+  home=$(make_home phone-configured)
+  stub=$(write_phone_stub "$home")
+  write_phone_config "$home" '# the captain phone' 'name: Telegram' "command: $stub"
+  out=$(contract "$home" enter --words 'merge it when green' 2>&1) || fail "enter with a phone channel failed: $out"
+  [ "$(contract "$home" field reach_channels)" = phone ] || fail "a configured channel did not record reach_channels: phone"
+  assert_contains "$out" 'hold-for-return, with phone notices. Each outcome that needs your verdict - a decision, a PR ready for review, a blocker, or a credential need - is also sent to your phone channel (Telegram) as one short line' 'announcement names the channel and what is sent'
+  assert_not_contains "$out" 'No phone channel is configured' 'a configured channel must not be announced as absent'
+  assert_not_contains "$out" 'Phone channel not used' 'a valid config must not be reported as a problem'
+  assert_contains "$(contract "$home" readback)" '  reach: hold-for-return, with phone notices. ' 'read-back names the phone reach'
+  contract "$home" validate || fail "a phone record does not validate"
+  [ ! -e "$home/phone.args" ] || fail "entry itself sent something to the phone channel"
+
+  home=$(make_home phone-default-label)
+  stub=$(write_phone_stub "$home")
+  write_phone_config "$home" "command:$stub"
+  out=$(contract "$home" enter 2>&1) || fail "enter with an unnamed channel failed: $out"
+  assert_contains "$out" 'phone channel (phone-stub.sh)' 'an unnamed channel is called by its command name'
+  pass "a configured phone channel is recorded and named in the announcement and read-back"
+}
+
+test_malformed_phone_channel_keeps_hold_for_return_and_reports_it() {
+  local home out bad
+  for bad in 'bogus' 'name: Telegram' 'command:' $'command: /a\ncommand: /b'; do
+    home=$(make_home "phone-malformed-$RANDOM")
+    write_phone_config "$home" "$bad"
+    out=$(contract "$home" enter --words 'hold it' 2>&1) || fail "enter with a malformed channel failed: $out"
+    [ "$(contract "$home" field reach_channels)" = none ] || fail "a malformed channel recorded a reach: $bad"
+    assert_contains "$out" 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' 'malformed config keeps the hold-for-return text'
+    assert_contains "$out" 'Phone channel not used: config/phone-channel is malformed (' 'malformed config is reported, not ignored'
+    set +e
+    out=$(phone "$home" status)
+    [ "$?" -eq 3 ] || fail "status did not exit 3 for malformed config: $bad"
+    set -e
+    assert_contains "$out" 'malformed' 'status names the malformation'
+  done
+  pass "a malformed phone channel keeps the hold-for-return announcement and says what is wrong"
+}
+
+test_refresh_says_when_the_phone_channel_no_longer_matches_the_record() {
+  local home stub out
+  home=$(make_home phone-refresh)
+  contract "$home" enter --words 'hold it' >/dev/null 2>&1 || fail "first entry failed"
+  stub=$(write_phone_stub "$home")
+  write_phone_config "$home" 'name: Telegram' "command: $stub"
+  out=$(contract "$home" enter 2>&1) || fail "refresh failed: $out"
+  [ "$(contract "$home" field reach_channels)" = none ] || fail "a refresh changed the standing record"
+  assert_contains "$out" 'config/phone-channel is configured now, but this standing record predates it, so nothing is sent to your phone; enter /afk again with your words to use it.' 'refresh names the newer channel'
+  out=$(contract "$home" enter --words 'hold it' 2>&1) || fail "replacement failed: $out"
+  [ "$(contract "$home" field reach_channels)" = phone ] || fail "new words did not pick up the channel"
+  rm -f "$home/config/phone-channel"
+  out=$(contract "$home" enter 2>&1) || fail "second refresh failed: $out"
+  assert_contains "$out" 'config/phone-channel is no longer configured, so nothing is sent to your phone' 'refresh says the named channel is gone'
+  pass "a refresh leaves the record alone and says when the phone channel no longer matches it"
+}
+
+test_quiet_entry_never_records_the_phone_channel() {
+  local home stub out
+  home=$(make_home phone-quiet)
+  stub=$(write_phone_stub "$home")
+  write_phone_config "$home" "command: $stub"
+  out=$(FM_AFK_MODE=quiet contract "$home" enter 2>&1) || fail "quiet entry failed: $out"
+  [ "$(contract "$home" field reach_channels)" = none ] || fail "a quiet record recorded the phone channel"
+  assert_not_contains "$out" 'Phone channel' 'quiet entry must not talk about the phone channel'
+  pass "quiet mode never records the phone channel"
+}
+
+test_phone_send_is_one_bounded_redacted_line() {
+  local home stub out rc long
+  home=$(make_home phone-send)
+  set +e
+  phone "$home" send 'hello' 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "send without a config did not exit 3 (rc=$rc)"
+
+  stub=$(write_phone_stub "$home")
+  write_phone_config "$home" "command: $stub"
+  phone "$home" send $'PR ready\nfor review: https://github.com/o/r/pull/9 token=abc123 ghp_abcdefghijklmnopqrstuvwxyz0123 Bearer xyz' \
+    || fail "send to the stub failed"
+  out=$(cat "$home/phone.args")
+  [ "$out" = 'PR ready for review: https://github.com/o/r/pull/9 token=[redacted] [redacted] Bearer [redacted]' ] \
+    || fail "the sent line was not collapsed and redacted: $out"
+  assert_contains "$(cat "$home/phone.stdin")" 'PR ready for review: https://github.com/o/r/pull/9' 'the line is also on stdin'
+
+  rm -f "$home/phone.args"
+  long=$(printf 'x%.0s' $(seq 1 400))
+  phone "$home" send "decision needed $long https://example.com/pr/7" || fail "long send failed"
+  out=$(cat "$home/phone.args")
+  [ "${#out}" -le 300 ] || fail "the sent line exceeds 300 characters: ${#out}"
+  assert_contains "$out" ' ... https://example.com/pr/7' 'the cut keeps the link'
+
+  write_phone_config "$home" "command: printf '%s' \"\$1\" > '$home/phone.shell'"
+  phone "$home" send 'shell form' || fail "shell-form send failed"
+  [ "$(cat "$home/phone.shell")" = 'shell form' ] || fail "the shell form did not get the line as \$1"
+
+  write_phone_config "$home" "command: exit 7 # SECRET-COMMAND"
+  set +e
+  phone "$home" send 'fails' 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "a failing command did not exit 1 (rc=$rc)"
+  assert_contains "$(cat "$home/state/phone-channel.log")" 'command exited 7' 'the failure is logged'
+  assert_not_contains "$(cat "$home/state/phone-channel.log")" 'SECRET-COMMAND' 'the command is never logged'
+
+  cat > "$home/slow.sh" <<EOF
+#!/bin/sh
+sleep 30 &
+echo \$! > "$home/slow.child"
+wait
+EOF
+  chmod +x "$home/slow.sh"
+  write_phone_config "$home" "command: $home/slow.sh"
+  set +e
+  FM_PHONE_CHANNEL_TIMEOUT_SECS=1 phone "$home" send 'slow' 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "a hung command did not time out (rc=$rc)"
+  sleep 0.3
+  ! kill -0 "$(cat "$home/slow.child")" 2>/dev/null || fail "the timeout left the command's child running"
+  assert_contains "$(cat "$home/state/phone-channel.log")" 'timed out after 1s' 'the timeout is logged'
+  pass "a phone send is one collapsed, redacted, bounded line, and failures and timeouts are logged without the command"
+}
+
+test_phone_away_outcome_sends_only_under_a_phone_away_record() {
+  local home stub
+  home=$(make_home phone-away-outcome)
+  stub=$(write_phone_stub "$home")
+  write_phone_config "$home" "command: $stub"
+  phone "$home" away-outcome --summary 'no record' || fail "away-outcome without a record failed"
+  [ ! -e "$home/phone.args" ] || fail "away-outcome sent with no away record"
+  FM_AFK_MODE=quiet contract "$home" enter >/dev/null 2>&1 || fail "quiet entry failed"
+  phone "$home" away-outcome --summary 'quiet' || fail "away-outcome under quiet failed"
+  [ ! -e "$home/phone.args" ] || fail "away-outcome sent under a quiet record"
+  contract "$home" enter --words 'go' >/dev/null 2>&1 || fail "away entry failed"
+  phone "$home" away-outcome --summary 'PR ready: https://example.com/pr/3' || fail "away-outcome send failed"
+  [ "$(cat "$home/phone.args")" = 'Firstmate needs you: PR ready: https://example.com/pr/3' ] \
+    || fail "away-outcome sent the wrong line: $(cat "$home/phone.args")"
+  pass "away-outcome sends only while an away record names the phone channel"
+}
+
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
@@ -685,3 +858,9 @@ test_version_1_record_is_replaced_by_a_version_2_record
 test_record_changes_refuse_while_a_reader_holds_the_lock
 test_quiet_record_reads_as_a_present_captain_holding_nothing
 test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away
+test_configured_phone_channel_is_named_in_the_entry_and_record
+test_malformed_phone_channel_keeps_hold_for_return_and_reports_it
+test_refresh_says_when_the_phone_channel_no_longer_matches_the_record
+test_quiet_entry_never_records_the_phone_channel
+test_phone_send_is_one_bounded_redacted_line
+test_phone_away_outcome_sends_only_under_a_phone_away_record
