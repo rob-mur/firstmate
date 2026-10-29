@@ -29,4 +29,5 @@ warning: 2 exact herdr presentation token matches for duplicate1 are quarantined
 error: quarantined herdr presentation for duplicate1 has a stale-agent pane; refusing duplicate launch
 ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
 ok - real Herdr lab validation completed on Herdr 0.9.5 with the default-session tripwire intact
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh   138.73s user 120.37s system 73% cpu 5:51.50 total
 exit=0

@@ -1,0 +1,61 @@
+95:resume_agents_on_restore = true
+== spawn real claude crewmate (session fm-lab-claude-cwd-3926016-19592, home /tmp/fm-lab.GJZ3cX)
+spawn exit=0
+notice: cwdlive ships mode=local-only while the standing posture for demo is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state
+🌳 Setting up worktree...
+🌳 Leased worktree at ~/.treehouse/demo-a166f9/1/demo. Run 'treehouse return ~/.treehouse/demo-a166f9/1/demo' to release it.
+warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection
+spawned cwdlive harness=claude kind=ship mode=local-only yolo=off window=fm-lab-claude-cwd-3926016-19592:w1:p2 worktree=/home/rob/.treehouse/demo-a166f9/1/demo
+recorded worktree=/home/rob/.treehouse/demo-a166f9/1/demo pane=w1:p2 project=/tmp/fm-lab.GJZ3cX/projects/demo
+== before restart
+{"pane_id":"w1:p2","cwd":"/home/rob/.treehouse/demo-a166f9/1/demo","foreground_cwd":"/home/rob/.treehouse/demo-a166f9/1/demo","agent":"claude","agent_status":"idle"}
+❯ : Firstmate operational input waiting: read
+  '/tmp/fm-lab.GJZ3cX/state/operational-inbox/1793263223-8a10df99dfeb4b44.msg' and handle its contents as Firstmate
+  operational input.
+
+  Read 1 file (ctrl+o to expand)
+
+● READY
+
+✻ Churned for 3s · done 9:40
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  📄 ctx:2% (17k) ⏱ 5h:6% 📅 7d:27% 📊 burndown:+0%                                                ◐ medium · /effort
+  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
+== saved session.json (/home/rob/.config/herdr/sessions/fm-lab-claude-cwd-3926016-19592/session.json)
+[{"cwd":"/home/rob/.treehouse/demo-a166f9/1/demo","agent_session":{"source":"herdr:claude","agent":"claude","kind":"id","value":"b1c531ea-c54e-4f74-9128-0b911c5dfc1f"}}]
+== after restart (resume_agents_on_restore=true)
+{"pane_id":"w1:p2","cwd":"/home/rob/.treehouse/demo-a166f9/1/demo","foreground_cwd":"/home/rob/.treehouse/demo-a166f9/1/demo","agent":"claude","agent_status":"idle"}
+{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":3945612,"foreground_processes":[{"argv":["/home/rob/.nix-profile/bin/claude","--resume","b1c531ea-c54e-4f74-9128-0b911c5dfc1f"],"cmdline":"/home/rob/.nix-profile/bin/claude --resume b1c531ea-c54e-4f74-9128-0b911c5dfc1f","cwd":"/home/rob/.treehouse/demo-a166f9/1/demo","name":".claude-wrapped","pid":3945612}],"pane_id":"w1:p2","shell_pid":3945041},"type":"pane_process_info"}}
+resumed pid=3945612 cmd=/home/rob/.nix-profile/bin/claude --resume b1c531ea-c54e-4f74-9128-0b911c5dfc1f  cwd=/home/rob/.treehouse/demo-a166f9/1/demo
+RESULT: PASS restored pane cwd is the worktree
+claude --resume b1c531ea-c54e-4f74-9128-0b911c5dfc1f
+➜  demo claude --resume b1c531ea-c54e-4f74-9128-0b911c5dfc1f                                            git:(550844c|)
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Opus 5.5 (1M context) · Claude Team
+ ▝▝   ▝▝   ~/.treehouse/demo-a166f9/1/demo
+
+
+❯ : Firstmate operational input waiting: read
+  '/tmp/fm-lab.GJZ3cX/state/operational-inbox/1793263223-8a10df99dfeb4b44.msg' and handle its contents as Firstmate
+  operational input.
+
+  Read 1 file (ctrl+o to expand)
+
+● READY
+
+✻ Churned for 3s · done 9:40
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  📄 ctx:2% (18k)
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent
+== teardown
+teardown exit=0
+🌳 Worktree returned to pool.
+teardown cwdlive complete (window fm-lab-claude-cwd-3926016-19592:w1:p2, worktree /home/rob/.treehouse/demo-a166f9/1/demo)
+Backlog: cwdlive just finished (this home keeps no markdown backlog at /tmp/fm-lab.GJZ3cX/data/backlog.md). Update /tmp/fm-lab.GJZ3cX/data/backlog.md - move cwdlive to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+leased-to-id after teardown: []

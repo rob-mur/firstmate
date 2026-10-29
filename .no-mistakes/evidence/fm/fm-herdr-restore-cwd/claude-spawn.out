@@ -1,0 +1,8 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /tmp/fm-lab.GJZ3cX
+warning: /tmp/fm-lab.GJZ3cX/data/cwdlive/launch-brief.md records no ship branch; defaulting to legacy branch fm/cwdlive
+warning: /tmp/fm-lab.GJZ3cX/data/cwdlive/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode local-only - confirm its definition of done matches
+notice: cwdlive ships mode=local-only while the standing posture for demo is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state
+🌳 Setting up worktree...
+🌳 Leased worktree at ~/.treehouse/demo-a166f9/1/demo. Run 'treehouse return ~/.treehouse/demo-a166f9/1/demo' to release it.
+warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection
+spawned cwdlive harness=claude kind=ship mode=local-only yolo=off window=fm-lab-claude-cwd-3926016-19592:w1:p2 worktree=/home/rob/.treehouse/demo-a166f9/1/demo

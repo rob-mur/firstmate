@@ -1,0 +1,6 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /tmp/fm-lab.GJZ3cX
+warning: lsof is unavailable; cannot resolve a process-group fallback for herdr task cwdlive
+🌳 Terminated lingering processes: no-mistakes (3985288)
+🌳 Worktree returned to pool.
+teardown cwdlive complete (window fm-lab-claude-cwd-3926016-19592:w1:p2, worktree /home/rob/.treehouse/demo-a166f9/1/demo)
+Backlog: cwdlive just finished (this home keeps no markdown backlog at /tmp/fm-lab.GJZ3cX/data/backlog.md). Update /tmp/fm-lab.GJZ3cX/data/backlog.md - move cwdlive to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
