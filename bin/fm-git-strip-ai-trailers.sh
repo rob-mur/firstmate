@@ -31,6 +31,12 @@
 #       the pre-push wrapper run bin/fm-git-push-guard.sh on it first, with
 #       git's arguments and ref lines, chaining to the repository's pre-push
 #       hook only when the guard passes (that script owns the rules).
+#       Also writes fm-devenv, which is not a hook name: a launcher that removes
+#       the same entry and then execs the devenv found on PATH, so devenv's own
+#       git-hooks install task (prek, pre-commit) sees the repository's hooks
+#       configuration rather than this directory and installs there. prek
+#       refuses outright while any core.hooksPath comes from outside the
+#       repository's own config, and GIT_CONFIG_* is outside it.
 #   fm-git-strip-ai-trailers.sh env-file <hooks-dir> <out-file>
 #       Write <out-file> as one plain export statement that appends
 #       core.hooksPath=<hooks-dir> after the GIT_CONFIG_COUNT entries this
@@ -39,6 +45,12 @@
 #       while the pane shell (fish included) only parses a simple command, &&,
 #       || and an export list. A count that is not a decimal number, or that
 #       leaves no room in git's signed-int count, exits nonzero with an error.
+#       When <hooks-dir> has fm-devenv, the same statement sets DEVENV_BIN to
+#       it, which devenv's direnv integration (use devenv) runs in place of
+#       devenv; the command that direnv exec or the loaded shell runs keeps the
+#       override, so its commits still strip and chain. An inherited DEVENV_BIN
+#       is kept unless it names an earlier launch's fm-devenv. A plain devenv
+#       shell does not go through DEVENV_BIN and still meets prek's refusal.
 #
 # WHY THIS EXISTS. Claude launches already carry attribution-off in their
 # per-launch --settings JSON. Cursor and other non-Claude runtimes inject a
@@ -70,9 +82,10 @@
 # (lefthook's npm postinstall, pre-commit install) targets it and would
 # displace the strip. install leaves the directory and every hook in it
 # read-only, so such a manager fails loudly instead of silently winning. Hook
-# managers therefore cannot install from inside fleet panes until a registered
-# project genuinely needs it. Whoever removes the directory restores the owner
-# write bit first.
+# managers therefore cannot install from inside fleet panes, except devenv's
+# git-hooks task when it runs through fm-devenv, which installs into the
+# repository's own hooks directory that the wrappers chain. Whoever removes
+# the directory restores the owner write bit first.
 set -u
 unset CDPATH
 
@@ -186,8 +199,9 @@ write_executable() {
 # point here, so the wrapper cannot recurse into itself. An empty
 # core.hooksPath makes that lookup fail, but plain git reads it as "no hooks",
 # so the wrapper runs none; any other failure reruns the lookup to show git's
-# error and refuses.
-runtime_chain_body() {
+# error and refuses. The removal step alone is also the fm-devenv launcher's
+# whole environment change.
+drop_own_entry_body() {
   local ours=$1
   cat <<EOF
 ours=$(quote_for_hook "$ours")
@@ -206,6 +220,12 @@ case \${GIT_CONFIG_COUNT:-} in
   export GIT_CONFIG_COUNT=\$kept
   ;;
 esac
+EOF
+}
+
+runtime_chain_body() {
+  drop_own_entry_body "$1"
+  cat <<EOF
 name=\${0##*/}
 orig=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
   if hooks_path=\$(unset GIT_CONFIG_PARAMETERS; git config --get --type=path core.hooksPath 2>/dev/null) && [ -z "\$hooks_path" ]; then
@@ -253,7 +273,7 @@ pre-merge-commit prepare-commit-msg post-commit pre-rebase post-checkout
 post-merge pre-push post-rewrite pre-auto-gc sendemail-validate'
 
 write_env_file() {
-  local hooks_dir=$1 out=$2 count=${GIT_CONFIG_COUNT:-0} tmp
+  local hooks_dir=$1 out=$2 count=${GIT_CONFIG_COUNT:-0} tmp devenv_export=
   [ -n "$hooks_dir" ] && [ -n "$out" ] || usage
   # Wrappers drop only an entry naming their own install path, which install
   # canonicalizes; write the same spelling so a symlinked path still matches.
@@ -273,9 +293,14 @@ write_env_file() {
     echo "error: inherited GIT_CONFIG_COUNT cannot be extended" >&2
     return 1
   fi
+  # A DEVENV_BIN the worker inherits is kept unless it is a launcher an earlier
+  # launch in this pane left, which would drop a different entry.
+  if [ -x "$hooks_dir/fm-devenv" ] && { [ -z "${DEVENV_BIN:-}" ] || [ "${DEVENV_BIN##*/}" = fm-devenv ]; }; then
+    devenv_export=" DEVENV_BIN=$(quote_for_hook "$hooks_dir/fm-devenv")"
+  fi
   tmp=$(mktemp "$out.XXXXXX") || return 1
-  if ! printf 'export GIT_CONFIG_KEY_%s=core.hooksPath GIT_CONFIG_VALUE_%s=%s GIT_CONFIG_COUNT=%s\n' \
-    "$count" "$count" "$(quote_for_hook "$hooks_dir")" "$((count + 1))" >"$tmp" || ! mv -f "$tmp" "$out"; then
+  if ! printf 'export GIT_CONFIG_KEY_%s=core.hooksPath GIT_CONFIG_VALUE_%s=%s GIT_CONFIG_COUNT=%s%s\n' \
+    "$count" "$count" "$(quote_for_hook "$hooks_dir")" "$((count + 1))" "$devenv_export" >"$tmp" || ! mv -f "$tmp" "$out"; then
     rm -f "$tmp"
     return 1
   fi
@@ -340,6 +365,22 @@ set -u
 $(runtime_chain_body "$hooks_dir")
 EOF
   done
+
+  # Not a git hook name, so git never runs it; env-file points DEVENV_BIN here.
+  write_executable "$hooks_dir/fm-devenv" <<EOF
+#!/usr/bin/env bash
+set -u
+$(drop_own_entry_body "$hooks_dir")
+real=\$(type -P devenv) || {
+  echo "fm-devenv: command not found: devenv" >&2
+  exit 127
+}
+if [ "\$real" -ef "\$0" ]; then
+  echo "fm-devenv: devenv on PATH is this launcher; add the real devenv to PATH" >&2
+  exit 127
+fi
+exec "\$real" "\$@"
+EOF
   chmod 500 "$hooks_dir"
 }
 
