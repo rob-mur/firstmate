@@ -500,9 +500,10 @@ test_active_dispatch_profile_allows_positional_harness() {
 # scoped HTTPS credential helper. Execute the real emitted launch and ask Git,
 # rather than inspecting command text, to catch that credential widening. Every
 # pane shell runs with its startup files pointed at the case directory, so a
-# developer's rc file cannot prompt, exec a multiplexer or export GIT_CONFIG_*.
+# developer's rc file cannot prompt, exec a multiplexer or export GIT_CONFIG_*,
+# and a developer's DEVENV_BIN cannot keep the launch from selecting fm-devenv.
 isolated_pane_env() {  # <assignment-or-command...>
-  env HOME="$CASE_DIR" ZDOTDIR="$CASE_DIR" XDG_CONFIG_HOME="$CASE_DIR" ENV= BASH_ENV= "$@"
+  env -u DEVENV_BIN HOME="$CASE_DIR" ZDOTDIR="$CASE_DIR" XDG_CONFIG_HOME="$CASE_DIR" ENV= BASH_ENV= "$@"
 }
 
 test_launch_preserves_inherited_git_config() {
@@ -510,13 +511,14 @@ test_launch_preserves_inherited_git_config() {
   rec=$(make_spawn_case "$id" codex "$id")
   read_case_record "$rec"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness 'echo WORKER-RAN >&2; git config --get-all credential.helper; git config --get core.hooksPath')
+    "$id" "$PROJ_DIR" --harness 'echo WORKER-RAN >&2; git config --get-all credential.helper; git config --get core.hooksPath; printenv DEVENV_BIN')
   status=$?
   expect_code 0 "$status" "Git configuration probe should spawn: $out"
   launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
   launch_file="$CASE_DIR/git-config-launch.sh"
   printf '%s\n' "$launch" > "$launch_file"
   expected=$'\n!gh auth git-credential\n'"$(cd "$HOME_DIR/state" && pwd -P)/$id.git-hooks"
+  expected="$expected"$'\n'"$(cd "$HOME_DIR/state" && pwd -P)/$id.git-hooks/fm-devenv"
   for pane_shell in /bin/sh /bin/bash /bin/zsh; do
     [ -x "$pane_shell" ] || continue
     for count in 2 02; do
