@@ -430,6 +430,108 @@ SH
   pass "env-file writes the canonical hooks path so wrappers still chain the repository hook"
 }
 
+# A fake devenv whose install step follows prek's rule: refuse while any
+# core.hooksPath comes from outside the repository's own config, otherwise
+# install a commit-msg hook into the directory git names. It records its
+# arguments and the credential helpers it inherited.
+write_fake_devenv() {  # <bin-dir> <record-dir>
+  local bin=$1 record=$2
+  mkdir -p "$bin"
+  cat >"$bin/devenv" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$record/devenv.args"
+git config --get-all credential.helper >"$record/devenv.credential"
+if git config --includes --get core.hooksPath >/dev/null && ! git config --includes --local --get core.hooksPath >/dev/null; then
+  echo "error: Refusing to install hooks because core.hooksPath is configured outside this repository." >&2
+  exit 1
+fi
+dir=\$(git rev-parse --path-format=absolute --git-path hooks) || exit 1
+printf '#!/usr/bin/env bash\nprintf ran >"%s"\n' "$record/manager-commit-msg.ran" >"\$dir/commit-msg"
+chmod 700 "\$dir/commit-msg"
+SH
+  chmod 700 "$bin/devenv"
+}
+
+# devenv's git-hooks task runs prek, which refuses to install while the pane's
+# GIT_CONFIG core.hooksPath is set. DEVENV_BIN from env-file runs devenv
+# without that one entry, so the install lands in the repository's hooks
+# directory, and a later commit in the pane still strips and chains to it.
+test_devenv_launcher_lets_the_repository_hooks_install_and_chain() {
+  local repo hooks env_file bin record out rc body
+  repo="$TMP_ROOT/devenv-launcher"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-devenv-launcher"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  env_file="$TMP_ROOT/devenv-launcher.env"
+  GIT_CONFIG_COUNT=1 "$STRIP" env-file "$hooks" "$env_file" || fail "env-file should succeed"
+  bin="$TMP_ROOT/devenv-launcher-bin"
+  record="$TMP_ROOT/devenv-launcher-record"
+  mkdir -p "$record"
+  write_fake_devenv "$bin" "$record"
+  # shellcheck disable=SC2016 # The child shell expands its own arguments.
+  out=$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='!gh auth git-credential' \
+    PATH="$bin:$PATH" sh -c '. "$1" && cd "$2" && devenv shell' _ "$env_file" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the fake devenv did not refuse under the pane override, so this case proves nothing"
+  assert_contains "$out" "Refusing to install hooks" "the fake devenv refused for another reason: $out"
+  # shellcheck disable=SC2016 # The child shell expands its own arguments.
+  out=$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='!gh auth git-credential' \
+    PATH="$bin:$PATH" sh -c '. "$1" && cd "$2" && "$DEVENV_BIN" -P local direnv-export' _ "$env_file" "$repo" 2>&1) ||
+    fail "devenv through DEVENV_BIN still refused to install the repository hooks: $out"
+  assert_equals "-P local direnv-export" "$(cat "$record/devenv.args")" "DEVENV_BIN did not pass devenv its arguments"
+  assert_equals '!gh auth git-credential' "$(cat "$record/devenv.credential")" \
+    "DEVENV_BIN dropped an inherited GIT_CONFIG entry"
+  assert_present "$repo/.git/hooks/commit-msg" "the hook manager did not install into the repository's hooks directory"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  # shellcheck disable=SC2016 # The child shell expands its own arguments.
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='!gh auth git-credential' \
+    sh -c '. "$1" && exec git -C "$2" commit -q --trailer "Co-authored-by: Claude <noreply@anthropic.com>" -m "fix: after devenv"' \
+    _ "$env_file" "$repo" || fail "commit after the devenv install failed"
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "noreply@anthropic.com" "the AI trailer survived a commit after the devenv install"
+  assert_present "$record/manager-commit-msg.ran" "the hook the manager installed did not run through the chain"
+  pass "DEVENV_BIN lets devenv's hook manager install into the repository while commits still strip and chain"
+}
+
+test_env_file_devenv_bin_keeps_an_inherited_devenv() {
+  local hooks plain env_file got
+  hooks="$TMP_ROOT/hooks-devenv-bin"
+  make_repo "$TMP_ROOT/devenv-bin"
+  "$STRIP" install "$hooks" "$TMP_ROOT/devenv-bin" || fail "install should succeed"
+  env_file="$TMP_ROOT/devenv-bin.env"
+  # shellcheck disable=SC2016 # The child shell expands its own arguments.
+  got=$(DEVENV_BIN=/opt/custom/bin/devenv sh -c '"$1" env-file "$2" "$3" && . "$3" && printf %s "$DEVENV_BIN"' \
+    _ "$STRIP" "$hooks" "$env_file") || fail "env-file failed with an inherited DEVENV_BIN"
+  assert_equals /opt/custom/bin/devenv "$got" "env-file replaced a DEVENV_BIN the worker inherited"
+  # shellcheck disable=SC2016 # The child shell expands its own arguments.
+  got=$(DEVENV_BIN=/old/state/t0.git-hooks/fm-devenv sh -c '"$1" env-file "$2" "$3" && . "$3" && printf %s "$DEVENV_BIN"' \
+    _ "$STRIP" "$hooks" "$env_file") || fail "env-file failed with an earlier launch's DEVENV_BIN"
+  assert_equals "$hooks/fm-devenv" "$got" "env-file kept an earlier launch's fm-devenv"
+  plain="$TMP_ROOT/hooks-without-devenv"
+  mkdir -p "$plain"
+  # shellcheck disable=SC2016 # The child shell expands its own arguments.
+  got=$(env -u DEVENV_BIN sh -c '"$1" env-file "$2" "$3" && . "$3" && printf %s "${DEVENV_BIN-unset}"' \
+    _ "$STRIP" "$plain" "$env_file") || fail "env-file failed for a hooks directory without fm-devenv"
+  assert_equals unset "$got" "env-file named an fm-devenv that does not exist"
+  pass "env-file sets DEVENV_BIN only when no other devenv was chosen and the launcher exists"
+}
+
+test_devenv_launcher_reports_a_missing_devenv() {
+  local hooks bin out rc
+  hooks="$TMP_ROOT/hooks-devenv-missing"
+  make_repo "$TMP_ROOT/devenv-missing"
+  "$STRIP" install "$hooks" "$TMP_ROOT/devenv-missing" || fail "install should succeed"
+  bin="$TMP_ROOT/devenv-missing-bin"
+  mkdir -p "$bin"
+  ln -s "$(command -v bash)" "$bin/bash"
+  out=$(PATH="$bin" "$hooks/fm-devenv" shell 2>&1)
+  rc=$?
+  expect_code 127 "$rc" "fm-devenv without devenv on PATH"
+  assert_contains "$out" "command not found: devenv" "fm-devenv did not name the missing devenv"
+  pass "fm-devenv reports a missing devenv instead of running anything else"
+}
+
 test_cortex_attribution_does_not_reach_the_commit_object() {
   local repo hooks body
   repo="$TMP_ROOT/cortex-object"
@@ -537,6 +639,9 @@ test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
 test_repository_hook_keeps_inherited_git_config
 test_env_file_canonicalizes_hooks_dir
+test_devenv_launcher_lets_the_repository_hooks_install_and_chain
+test_env_file_devenv_bin_keeps_an_inherited_devenv
+test_devenv_launcher_reports_a_missing_devenv
 test_cortex_attribution_does_not_reach_the_commit_object
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 test_no_strip_keeps_the_message_and_still_chains
