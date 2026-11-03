@@ -635,7 +635,7 @@ fi
 exit 0
 fi
 
-REPO=${POS[1]}
+REPO=${POS[1]:-}
 
 # Prior-knowledge pointers (header owns the rule). Paths only: nothing here
 # reads a report or learning into the brief.
