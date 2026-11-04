@@ -1514,6 +1514,11 @@ sanitize_field() {  # <text>
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
 }
 
+# A captain's keyed answer is recorded whole: never truncate it.
+sanitize_answer() {  # <text>
+  printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177'
+}
+
 sanitize_reconcile_provenance() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-1024
 }
@@ -1554,7 +1559,7 @@ command_answers() {
     [ -n "${key:-}" ] || continue
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     [ "${#key}" -le 128 ] || continue
-    answer=$(sanitize_field "${answer:-}")
+    answer=$(sanitize_answer "${answer:-}")
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
