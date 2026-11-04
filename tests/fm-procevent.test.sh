@@ -3529,6 +3529,29 @@ if "$ROOT/bin/fm-procevent-lavish.sh" reconciles "$ANS" >/dev/null 2>&1; then
 fi
 pass "answers reads list-form choices and refuses a block it cannot account for"
 
+# A long note is delivered intact in both the versioned and legacy shapes.
+LONG=$(printf 'x%.0s' $(seq 1 2000))
+cat > "$ANS" <<EOF
+session:
+  file: /review.html
+  status: feedback
+prompts[2]:
+  - uid: "1"
+    prompt: "Pick\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"long-v1\",\n  \"selection\": \"\",\n  \"note\": \"$LONG\"\n}"
+    selector: "div#qgrid > form:nth-of-type(1)"
+    tag: choice
+    text: "Pick"
+  - uid: "2"
+    prompt: "Old\n\nContext data:\n{\n  \"question\": \"long-legacy\",\n  \"answer\": \"$LONG\"\n}"
+    selector: "div#qgrid > form:nth-of-type(2)"
+    tag: choice
+    text: "Old"
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$ANS") || fail "answers failed on long notes"
+[ "$out" = "$(printf 'long-v1\t%s\tPick\nlong-legacy\t%s\tOld' "$LONG" "$LONG")" ] \
+  || fail "answers dropped or altered a note longer than 512 characters"
+pass "answers delivers notes longer than 512 characters intact"
+
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
 # every adapter that has no notion of a no-op.

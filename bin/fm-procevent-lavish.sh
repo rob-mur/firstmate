@@ -801,7 +801,6 @@ cmd_choice_rows() {
         next if !defined($key) || ref($key) || !defined($selected) || ref($selected)
           || !defined($note) || ref($note);
         next unless $selected eq "" || $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
-        next unless length($note) <= 512;
         next unless length($selected) || length($note);
         $answer = length($selected) ? $selected : $note;
         $legacy = 0;
@@ -812,7 +811,7 @@ cmd_choice_rows() {
         $key = $data->{question};
         $answer = $data->{answer};
         next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
-        next unless length($answer) && length($answer) <= 512;
+        next unless length($answer);
         next if $answer eq "reconcile" || index($answer, "reconcile - ") == 0;
         $selected = "";
         $note = "";
