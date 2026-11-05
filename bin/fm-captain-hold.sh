@@ -95,7 +95,9 @@
 # not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
-# a mode mismatch is skipped. The command exits nonzero when any key was
+# a mode mismatch is skipped. An answer over `answer-limit` bytes (6000) is
+# refused visibly, never truncated; the label keeps its 512-character cut.
+# The command exits nonzero when any key was
 # skipped. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.
@@ -1510,14 +1512,26 @@ legacy_keyed_decision_text() {  # <source> <key> <answer> <label>
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
 }
 
-sanitize_field() {  # <text>
-  printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
-}
+# The one cap on a captain's free-text keyed answer, in bytes. It sits inside
+# the 8192-byte decision file with room for source, task id and label. The
+# Lavish board refuses above it up front; this intake refuses visibly above it
+# (never truncates), and `answer-limit` publishes it for other callers.
+ANSWER_MAX_BYTES=6000
 
-# A captain's keyed answer is recorded whole: never truncate it.
+# A keyed answer is sanitized exactly like any field, minus the 512 cut.
 sanitize_answer() {  # <text>
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177'
 }
+
+sanitize_field() {  # <text>
+  sanitize_answer "$1" | cut -c1-512
+}
+
+answer_too_long() {  # <sanitized-answer>
+  [ "$(printf '%s' "$1" | LC_ALL=C wc -c | tr -d ' ')" -gt "$ANSWER_MAX_BYTES" ]
+}
+
+command_answer_limit() { printf '%s\n' "$ANSWER_MAX_BYTES"; }
 
 sanitize_reconcile_provenance() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-1024
@@ -1560,7 +1574,14 @@ command_answers() {
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     [ "${#key}" -le 128 ] || continue
     answer=$(sanitize_answer "${answer:-}")
+    answer=${answer#"${answer%%[![:space:]]*}"}
+    answer=${answer%"${answer##*[![:space:]]}"}
     [ -n "$answer" ] || continue
+    if answer_too_long "$answer"; then
+      printf 'refused: %s (answer exceeds %s bytes)\n' "$key" "$ANSWER_MAX_BYTES"
+      skipped=$((skipped + 1))
+      continue
+    fi
     label=$(sanitize_field "${label:-}")
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
       printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key"
@@ -2282,6 +2303,7 @@ case "${1:-}" in
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;
+  answer-limit) shift; command_answer_limit ;;
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
