@@ -42,6 +42,11 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   handle      drain, claim the task's lease, report, acknowledge, release
 #   captain     the same as handle, but report verdict captain naming the rows
 #               the drain presented
+#   inform      the same as captain, but report with --inform true (main has
+#               nothing to do but relay it)
+#   captain-legacy the same as captain, but the receipt is rewritten without its
+#               mark column, as an older writer left it
+#   inform-mixed an informational captain report, then an actionable one
 #   hold-lease  the same, but leave the lease held (the host must release it),
 #               logging its check line while held
 #   return      handle, but the captain returns (the record is archived) before
@@ -106,13 +111,18 @@ verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
+  handle|captain|captain-legacy|inform|inform-mixed|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
     case "$mode" in held|captain-held) read -r _ < "$FM_HOME/stub-release" ;; esac
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     [ "$mode" != hold-lease ] || "$FM_REPO/bin/fm-lease.sh" check "$task" >> "$FM_HOME/engine-lease.log" 2>&1
-    if [ "$mode" = captain ] || [ "$mode" = captain-held ] \
+    if [ "$mode" = inform ] || [ "$mode" = inform-mixed ]; then
+      "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict captain --inform true \
+        --summary "stub finished $task; nothing for main to do" >> "$FM_HOME/engine-report.log" 2>&1
+      [ "$mode" != inform-mixed ] || "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict captain \
+        --summary "stub needs main to act on $task" >> "$FM_HOME/engine-report.log" 2>&1
+    elif [ "$mode" = captain ] || [ "$mode" = captain-legacy ] || [ "$mode" = captain-held ] \
       || [ "$mode" = captain-close-before-return ]; then
       "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict captain \
         --summary "stub escalated: $(printf '%s\n' "$drain" | grep -v '^WAKE_' | tr '\n' ' ' | cut -c1-400)" \
@@ -125,6 +135,10 @@ case "$mode" in
           ;;
       esac
       "$FM_REPO/bin/fm-branch-report.sh" "${report_args[@]}" >> "$FM_HOME/engine-report.log" 2>&1
+    fi
+    if [ "$mode" = captain-legacy ]; then
+      awk -F '\t' 'BEGIN { OFS = "\t" } { print $1, $2, $3, $4 }' "$STATE/.supervision-host-receipts" > "$STATE/.receipts-legacy" \
+        && mv "$STATE/.receipts-legacy" "$STATE/.supervision-host-receipts"
     fi
     if [ "$mode" = return-many ]; then
       awk -v task="$task" 'BEGIN { for (seq = 2; seq <= 1001; seq++)

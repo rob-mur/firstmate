@@ -230,7 +230,7 @@ Each note is appended to the transcript as its own system-notice row, which Clau
 | Line | When |
 | --- | --- |
 | `⛵ <task>: <summary>` | The supervision session recorded a routine outcome that is not silent. |
-| `⚓ [seq N] <task>: <summary>` | It recorded a captain outcome; main still receives and processes it as [`supervision-host.md`](supervision-host.md#captain-outcomes) describes. |
+| `⚓ [seq N] <task>: <summary>` | It recorded a captain outcome, which may be informational and open no main turn; main still receives and processes it as [`supervision-host.md`](supervision-host.md#captain-outcomes) describes. |
 | `⚓ <summary>` | A PR the captain explicitly asked to follow changed state; see [Explicit PR follows](configuration.md#explicit-pr-follows-configpr-follow). |
 | `⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.` | The host's broken-session latch trips. |
 | `⛵ Supervision session recovered after a successful cooldown probe.` | That latch clears. |
