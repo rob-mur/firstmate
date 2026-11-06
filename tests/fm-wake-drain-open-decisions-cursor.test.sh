@@ -14,6 +14,9 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+# These cases assert the fold on every drain; the repeat-print dedup has its own
+# file (fm-wake-drain-open-decisions-dedup.test.sh).
+export FM_OPEN_DECISIONS_FULL=1
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-cursor-tests)
 
