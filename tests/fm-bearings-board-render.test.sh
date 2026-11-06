@@ -297,6 +297,8 @@ EOF
 
 test_full_snapshot_question_reaches_the_rendered_decision
 
+
+
 test_every_card_type_renders_its_links() {
   local home data out
   home=$(make_home card-links)
@@ -344,3 +346,4 @@ test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_every_card_type_renders_its_links
+test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
