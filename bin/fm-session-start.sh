@@ -225,7 +225,20 @@
 #             first, so a harness that spills a large output and shows only its
 #             head still tells the model to read the saved full output.
 #
-#   --source  The native session-open source, supplied only by
+#             COMPACT RE-EMIT: the pane that re-reads this after a clear or a
+#             compaction pays for every byte, so a re-emit prints pointers
+#             instead of bulk. It keeps the wake queue, the compact backlog,
+#             the away posture, the network result, and one line per task
+#             (kind, bounded endpoint probe, last status line). It leaves out
+#             the per-task metadata, the status tails, the curated data/*.md
+#             contents (listed by path and size instead), the supervision
+#             operating block (the exact fm-supervision-instructions.sh command
+#             that renders it is printed instead), and the long read-once and
+#             next-step prose. A status line stays wake-event history, so the
+#             task line points at bin/fm-crew-state.sh for current state. The
+#             normal startup digest is unchanged.
+#
+#   --source The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
 #             session lock records AGENTS.md's SHA-256 baseline only after the
 #             digest completion record is published, keyed to that lock's
@@ -675,18 +688,19 @@ fi
 
 if [ "$REEMIT" -eq 1 ]; then
   # First in the output on purpose: a harness that spills a large hook output
-  # delivers only a short head inline (Claude: about 2,000 characters), and
-  # CONTEXT prints last, so this cue is the part that must survive the spill.
-  printf 'RE-EMIT CUE: if this output ends with "Output too large ... Full output saved to <path>",\n'
-  printf 'read that whole file now, before acting. Otherwise read data/captain.md, data/captain-shared.md,\n'
-  printf 'and data/learnings.md under %s now if any of them is missing below.\n' "$DATA"
+  # delivers only a short head inline (Claude: about 2,000 characters), so the
+  # cue is the part that must survive a spill. The re-emit is a compact digest
+  # (see the COMPACT RE-EMIT note in this file's header), so it usually fits.
+  printf 'RE-EMIT CUE: this is a compact re-emit. If this output ends with "Output too large ... Full output saved to <path>",\n'
+  printf 'read that whole file now, before acting. The curated memory files are listed by path below; read the ones this turn needs.\n'
   section "SESSION START (CONTEXT RE-EMIT) - $FM_HOME"
   printf 'This session already took the helm at its own startup and has only lost its\n'
-  printf 'context. Lock ownership is re-verified and the durable records below are\n'
-  printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
-  printf 'secondmate convergence and liveness, pending remote handoff\n'
-  printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
+  printf 'context. Lock ownership is re-verified, but the sweeps startup already\n'
+  printf 'reconciled - project clone refresh, secondmate convergence and liveness,\n'
+  printf 'pending remote handoff retry, X-mode artifact writes, and stale Herdr child\n'
+  printf 'cleanup - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
+  printf 'This digest is compact: one line per task, and pointers instead of bulk text.\n'
 else
   section "SESSION START - $FM_HOME"
 fi
@@ -878,12 +892,23 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
     fi
   fi
 fi
-"$SCRIPT_DIR/fm-supervision-instructions.sh" \
-  --harness "$PRIMARY_HARNESS" \
-  --read-only "$READ_ONLY" \
-  --afk "$AFK_PRESENT" \
-  --afk-mode "$AFK_MODE" \
-  --x-mode "$X_MODE_PRESENT"
+if [ "$REEMIT" -eq 1 ]; then
+  # Compact re-emit: the full block is about 8 KB and unchanged since startup,
+  # so print the exact command that renders it for this session instead. The
+  # turn-end guard still enforces a live supervision cycle without it.
+  subsection "Supervision operating instructions (not repeated)"
+  printf 'Primary harness: %s. To re-render the full supervision operating instructions, run:\n' "$PRIMARY_HARNESS"
+  printf '  %s/bin/fm-supervision-instructions.sh --harness %s --read-only %s --afk %s --afk-mode %s --x-mode %s\n' \
+    "$FM_ROOT" "$PRIMARY_HARNESS" "$READ_ONLY" "$AFK_PRESENT" "$AFK_MODE" "$X_MODE_PRESENT"
+  printf 'Run it before arming, repairing or ending a supervision cycle, and whenever work is under way and the cycle is not known live.\n'
+else
+  "$SCRIPT_DIR/fm-supervision-instructions.sh" \
+    --harness "$PRIMARY_HARNESS" \
+    --read-only "$READ_ONLY" \
+    --afk "$AFK_PRESENT" \
+    --afk-mode "$AFK_MODE" \
+    --x-mode "$X_MODE_PRESENT"
+fi
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
@@ -893,6 +918,20 @@ fi
 # a stage that never ran, which the truncation banner names by stage.
 stage read-once
 section "READ-ONCE CONTRACT"
+if [ "$REEMIT" -eq 1 ]; then
+cat <<'EOF'
+This compact re-emit prints one line per task and the wake queue; it does not
+print task metadata, status tails, the backlog listing or the curated memory
+files. Read a source directly when this turn needs it:
+  - bin/fm-crew-state.sh <id> for a task's current state (a status line below is
+    wake-event history, not current state),
+  - state/<id>.status for a task's full event log, and state/<id>.meta for its
+    metadata,
+  - bin/fm-tasks-axi.sh list for the queue, or data/backlog.md,
+  - the data/*.md files named under CONTEXT,
+  - or a STARTUP TRUNCATED banner named the stage that would have printed it.
+EOF
+else
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
@@ -917,6 +956,7 @@ Go to a source directly only when:
   - or a context re-emit opened with a read cue because the
     harness cut the digest short.
 EOF
+fi
 
 # --- 6. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
@@ -925,6 +965,52 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
+if [ "$REEMIT" -eq 1 ]; then
+  # Compact re-emit: one line per task - id, kind, endpoint liveness, and the
+  # last status line (wake-EVENT history, capped). Metadata blocks and status
+  # tails are left out; bin/fm-crew-state.sh <id> reads current state.
+  subsection "Work under way (state/*.meta, one line per task)"
+  META_FOUND=0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    META_FOUND=1
+    id=$(basename "$meta" .meta)
+    kind=$(fm_meta_get "$meta" kind)
+    window=$(fm_meta_get "$meta" window)
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$window" ]; then
+      backend=$(fm_backend_of_meta "$meta")
+      endpoint_rc=0
+      fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?
+      if [ "$endpoint_rc" -eq 0 ]; then
+        endpoint=alive
+      elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
+        endpoint=error
+      else
+        endpoint=dead
+      fi
+    else
+      endpoint=unknown
+    fi
+    last=
+    [ ! -f "$STATE/$id.status" ] || last=$(tail -n 1 "$STATE/$id.status" 2>/dev/null || true)
+    [ -n "$last" ] || last='(no status yet)'
+    printf '%s [%s] endpoint: %s | last status: %s\n' "$id" "${kind:-unknown}" "$endpoint" "$(fm_cap_line "$last")"
+  done
+  [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+  printf 'Last status is wake-event history, not current state: bin/fm-crew-state.sh <id> reads current state; state/<id>.status is the full log.\n'
+
+  subsection "Orphan status logs (state/*.status without matching .meta)"
+  ORPHAN_STATUS_FOUND=0
+  for status in "$STATE"/*.status; do
+    [ -f "$status" ] || continue
+    id=$(basename "$status" .status)
+    [ -f "$STATE/$id.meta" ] && continue
+    ORPHAN_STATUS_FOUND=1
+    printf '%s | last status: %s\n' "$id" "$(fm_cap_line "$(tail -n 1 "$status" 2>/dev/null || true)")"
+  done
+  [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+else
 subsection "Work under way (state/*.meta)"
 META_FOUND=0
 for meta in "$STATE"/*.meta; do
@@ -975,6 +1061,7 @@ for status in "$STATE"/*.status; do
   print_status_tail "$status"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+fi
 
 subsection "AFK"
 # The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
@@ -1052,16 +1139,43 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
+if [ "$REEMIT" -eq 1 ]; then
+  # Compact re-emit: the curated memory files are stable and recoverable with
+  # one read each, so list them with their state instead of reprinting them.
+  # An ABSENT file still has to read as absent (AGENTS.md section 3).
+  printf 'Curated memory is not reprinted; read the files this turn needs:\n'
+  for ctx in projects.md secondmates.md captain.md captain-shared.md learnings.md; do
+    if [ ! -f "$DATA/$ctx" ]; then
+      printf '  %s/%s - ABSENT\n' "$DATA" "$ctx"
+    elif [ ! -s "$DATA/$ctx" ]; then
+      printf '  %s/%s - present, empty\n' "$DATA" "$ctx"
+    else
+      printf '  %s/%s - %s bytes\n' "$DATA" "$ctx" "$(wc -c < "$DATA/$ctx" | tr -d ' ')"
+    fi
+  done
+else
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
 section "NEXT STEP"
-if [ "$READ_ONLY" -eq 1 ]; then
+if [ "$REEMIT" -eq 1 ] && [ "$READ_ONLY" -eq 0 ]; then
+  # The compact re-emit does not print the supervision block the startup
+  # closing text points at, so point at the command that renders it.
+  printf 'Re-render the supervision operating instructions with the command under\n'
+  printf 'SUPERVISION OPERATING INSTRUCTIONS before arming or repairing a cycle; this\n'
+  printf 'script never starts supervision itself.\n'
+  if [ "$AFK_PRESENT" -eq 1 ]; then
+    printf 'Away or quiet mode is recorded (see AFK): load /afk or /quiet, because the daemon owns watcher supervision.\n'
+  fi
+  printf '\nThe compact digest above is complete for this re-emit. Its READ-ONCE CONTRACT\n'
+  printf 'section names what may still be read from disk.\n'
+elif [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session
@@ -1097,10 +1211,12 @@ This script never starts supervision itself.
 
 EOF
 fi
+if [ "$REEMIT" -eq 0 ] || [ "$READ_ONLY" -eq 1 ]; then
 cat <<'EOF'
 The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
 EOF
+fi
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0
