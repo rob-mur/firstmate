@@ -157,6 +157,62 @@ test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
   pass "host: an attended captain outcome wakes main once and stays in its drain until main acknowledges it"
 }
 
+test_informational_captain_outcome_opens_no_main_turn_and_stays_in_the_drain() {
+  local home drained
+  home=$(make_home attended-inform attended)
+  echo inform > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "inform: the host never started a watcher cycle"
+  append_status "$home" 'finished with nothing left for main'
+  wait_until 250 handled_at_least "$home" 1 \
+    || fail "inform: the wake was not handled on the engine: $(cat "$home/state/.supervision-host.log")"
+  assert_grep '"verdict":"captain"' "$home/state/branch-outcomes.jsonl" "fixture: the stub did not record a captain outcome"
+  assert_re '	informational	turn=[^	]*	rows=1	' "$home/state/.supervision-host.log" "the ledger must record the informational row left for main's drain"
+  [ ! -s "$home/host.rc" ] || fail "an informational captain outcome woke main: $(cat "$home/host.out")"
+  assert_no_grep 'branch-outcome' "$home/host.out" "an informational captain outcome must not print a branch-outcome exit"
+  watcher_live "$home" || fail "the host is not parked on a live successor after an informational outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "BRANCH OUTCOMES (captain outcomes the supervision session recorded for you" "main's next drain must still present the informational outcome"
+  assert_contains "$drained" "run bin/fm-branch-outcome.sh mark-processed --through 1" "the informational outcome must keep its acknowledgement"
+  pass "host: an informational captain outcome opens no main turn and stays in main's next drain"
+}
+
+test_mixed_turn_exits_for_the_actionable_rows_only() {
+  local home
+  home=$(make_home attended-inform-mixed attended)
+  echo inform-mixed > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "mixed: the host never started a watcher cycle"
+  append_status "$home" 'one finished, one needs main'
+  wait_until_deadline 60 host_exited "$home" || fail "mixed: the actionable outcome did not wake main: $(cat "$home/state/.supervision-host.log")"
+  assert_re '^supervision-host: branch-outcome: .*\(store rows 2\); run bin/fm-wake-drain.sh' "$home/host.out" \
+    "the exit must name only the actionable row"
+  assert_no_re 'store rows 1, 2|store rows 1\)' "$home/host.out" "the informational row must not be named in the exit"
+  pass "host: a turn with informational and actionable captain outcomes exits for the actionable one only"
+}
+
+test_inform_is_refused_for_a_routine_outcome() {
+  local home out rc=0
+  home=$(make_home inform-routine attended)
+  out=$(FM_HOME="$home" FM_BRANCH_REPORT_TURN=t1 "$ROOT/bin/fm-branch-report.sh" --task demo --verdict routine --inform true --summary 'x' 2>&1) || rc=$?
+  expect_code 2 "$rc" "--inform true on a routine outcome must be refused"
+  assert_contains "$out" "requires the captain verdict" "the refusal must say why"
+  [ ! -s "$home/state/branch-outcomes.jsonl" ] || fail "a refused report reached the store"
+  pass "report: --inform true is refused for a routine outcome and records nothing"
+}
+
+test_legacy_receipt_without_a_mark_is_actionable() {
+  local home
+  home=$(make_home attended-legacy-receipt attended)
+  echo captain-legacy > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "legacy: the host never started a watcher cycle"
+  append_status "$home" 'ready for review'
+  wait_until_deadline 60 host_exited "$home" || fail "legacy: a receipt without its mark column did not wake main: $(cat "$home/state/.supervision-host.log")"
+  assert_re '^supervision-host: branch-outcome: .*\(store rows 1\)' "$home/host.out" "an unmarked receipt must stay actionable"
+  pass "host: a captain receipt without a mark column stays actionable"
+}
+
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return() {
   local home drained
   home=$(make_home attended-go-away attended)
@@ -922,6 +978,10 @@ fm_test_run \
   test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue \
   test_engine_in_another_time_zone_handles_its_granted_rows \
   test_attended_captain_outcome_reaches_main_through_branch_outcomes \
+  test_informational_captain_outcome_opens_no_main_turn_and_stays_in_the_drain \
+  test_mixed_turn_exits_for_the_actionable_rows_only \
+  test_inform_is_refused_for_a_routine_outcome \
+  test_legacy_receipt_without_a_mark_is_actionable \
   test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return \
   test_quiet_record_without_its_daemon_is_a_present_captain \
   test_attended_main_only_close_passes_straight_to_main \
