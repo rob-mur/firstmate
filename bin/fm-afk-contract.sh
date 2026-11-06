@@ -9,8 +9,15 @@
 # path in bin/fm-afk-return.sh calls `archive` through bin/fm-afk-launch.sh stop).
 # Being away changes how the captain is informed and what happens at a
 # captain-owned decision point, never the authority set. Hold-for-return is the
-# only reach profile this release records: there is no phone channel, and the
-# entry announcement says so every time.
+# only reach profile: anything that needs the captain waits for the return. An
+# away entry that finds the optional phone channel configured
+# (bin/fm-phone-channel.sh owns config/phone-channel) records
+# `reach_channels: phone` and that script's reach sentence, so each outcome that
+# needs the captain is also sent there while it waits; otherwise it records
+# `none` and the announcement says no phone channel is configured. A malformed
+# channel config records `none` and entry prints the problem. A refresh leaves
+# the record untouched, so entry says when the channel no longer matches it and
+# new words would pick the change up.
 #
 # AWAY OR QUIET. The same record also backs daemon-backed quiet mode, which a
 # quiet entry marks with `mode: quiet`: the captain is present there, so a quiet
@@ -50,7 +57,7 @@
 #   entered: <UTC ISO 8601>
 #   entered_epoch: <seconds>
 #   expected_return: <UTC ISO 8601> | -
-#   reach_channels: none
+#   reach_channels: none | phone
 #   reach_announced: <the one-sentence reach announcement>
 #   spend_max_concurrent_workers: <n>   without --spend, the ordinary worker
 #                                  records this home already holds at entry,
@@ -296,15 +303,16 @@ fm_afk_contract_validate_iso() {  # <ts>
 }
 
 # Render a whole record on stdout.
-# Inputs: WORDS (verbatim), EXPECTED_RETURN, SPEND.
+# Inputs: WORDS (verbatim), EXPECTED_RETURN, SPEND, and the reach that
+# fm_afk_contract_resolve_reach set (absent: none).
 fm_afk_contract_render_record() {  # <entered-iso> <entered-epoch> <confirmed-iso> <confirmed-epoch>
   local entered=$1 entered_epoch=$2 confirmed=$3 confirmed_epoch=$4
   printf 'version: %s\n' "$FM_AFK_CONTRACT_VERSION"
   printf 'entered: %s\n' "$entered"
   printf 'entered_epoch: %s\n' "$entered_epoch"
   printf 'expected_return: %s\n' "${EXPECTED_RETURN:--}"
-  printf 'reach_channels: none\n'
-  printf 'reach_announced: %s\n' "$FM_AFK_CONTRACT_REACH_ANNOUNCED"
+  printf 'reach_channels: %s\n' "${FM_AFK_CONTRACT_REACH_CHANNELS:-none}"
+  printf 'reach_announced: %s\n' "${FM_AFK_CONTRACT_REACH_SENTENCE:-$FM_AFK_CONTRACT_REACH_ANNOUNCED}"
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
   printf 'confirmed: %s\n' "$confirmed"
   printf 'confirmed_epoch: %s\n' "$confirmed_epoch"
@@ -399,7 +407,7 @@ fm_afk_contract_validate() {  # <path>
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   [ "$expected" = - ] || fm_afk_contract_validate_iso "$expected" || { fm_afk_contract_log "record $path has no valid expected_return"; return 1; }
   reach=$(fm_afk_contract_read_field "$path" reach_channels)
-  [ "$reach" = none ] || { fm_afk_contract_log "record $path has no valid reach_channels"; return 1; }
+  case "$reach" in none|phone) ;; *) fm_afk_contract_log "record $path has no valid reach_channels"; return 1 ;; esac
   announced=$(fm_afk_contract_read_field "$path" reach_announced)
   [ -n "$announced" ] || { fm_afk_contract_log "record $path has no reach announcement"; return 1; }
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
@@ -419,6 +427,54 @@ fm_afk_contract_validate() {  # <path>
 }
 
 # --- rendering --------------------------------------------------------------
+
+# The reach profile's lead-in for a record's announcement and read-back.
+fm_afk_contract_reach_profile() {  # <path>
+  if [ "$(fm_afk_contract_read_field "$1" reach_channels)" = phone ]; then
+    printf 'hold-for-return, with phone notices.'
+  else
+    printf 'hold-for-return only.'
+  fi
+}
+
+# An away entry's reach (the header's POSTURE): sets
+# FM_AFK_CONTRACT_REACH_CHANNELS and FM_AFK_CONTRACT_REACH_SENTENCE for the
+# record, and FM_AFK_CONTRACT_REACH_PROBLEM to the malformed config's reason.
+fm_afk_contract_resolve_reach() {
+  local sentence status
+  FM_AFK_CONTRACT_REACH_CHANNELS=none
+  FM_AFK_CONTRACT_REACH_SENTENCE=$FM_AFK_CONTRACT_REACH_ANNOUNCED
+  FM_AFK_CONTRACT_REACH_PROBLEM=
+  if sentence=$("$FM_AFK_CONTRACT_DIR/fm-phone-channel.sh" reach 2>/dev/null) && [ -n "$sentence" ]; then
+    FM_AFK_CONTRACT_REACH_CHANNELS=phone
+    FM_AFK_CONTRACT_REACH_SENTENCE=$sentence
+    return 0
+  fi
+  status=$("$FM_AFK_CONTRACT_DIR/fm-phone-channel.sh" status 2>/dev/null)
+  case "$status" in
+    configured*|absent) ;;
+    malformed*) FM_AFK_CONTRACT_REACH_PROBLEM=${status#malformed?} ;;
+    *) FM_AFK_CONTRACT_REACH_PROBLEM='its status could not be read' ;;
+  esac
+}
+
+# One line after an away entry's announcement when the phone channel config is
+# malformed, or when a refreshed record's reach no longer matches it.
+fm_afk_contract_render_reach_note() {  # <path>
+  local path=$1 recorded
+  [ "$(fm_afk_contract_record_mode "$path")" = away ] || return 0
+  if [ -n "$FM_AFK_CONTRACT_REACH_PROBLEM" ]; then
+    printf 'Phone channel not used: config/phone-channel is malformed (%s), so nothing is sent to your phone; fix it and enter /afk again with your words to use it.\n' "$FM_AFK_CONTRACT_REACH_PROBLEM"
+    return 0
+  fi
+  recorded=$(fm_afk_contract_read_field "$path" reach_channels)
+  [ "$recorded" != "$FM_AFK_CONTRACT_REACH_CHANNELS" ] || return 0
+  if [ "$recorded" = phone ]; then
+    printf 'Phone channel: config/phone-channel is no longer configured, so nothing is sent to your phone even though this standing record names it.\n'
+  else
+    printf 'Phone channel: config/phone-channel is configured now, but this standing record predates it, so nothing is sent to your phone; enter /afk again with your words to use it.\n'
+  fi
+}
 
 # The read-back is the record's content and nothing else: the words verbatim
 # beside the entry time, expected return, spend cap, and reach line. Firstmate's
@@ -441,7 +497,7 @@ fm_afk_contract_render_readback() {  # <path>
     printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
     printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
     printf '  spend cap: %s concurrent workers\n' "$spend"
-    printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
+    printf '  reach: %s %s\n' "$(fm_afk_contract_reach_profile "$path")" "$(fm_afk_contract_read_field "$path" reach_announced)"
   fi
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
@@ -469,8 +525,9 @@ fm_afk_contract_render_announcement() {  # <path>
   else
     mandate_text='No away instructions were recorded; the away session acts on standing authority only, and anything that needs you waits for your return.'
   fi
-  printf 'Away posture recorded at %s: hold-for-return only. %s %s Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: %s. Spend cap: %s concurrent workers.\n' \
+  printf 'Away posture recorded at %s: %s %s %s Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: %s. Spend cap: %s concurrent workers.\n' \
     "$(fm_afk_contract_read_field "$path" confirmed)" \
+    "$(fm_afk_contract_reach_profile "$path")" \
     "$(fm_afk_contract_read_field "$path" reach_announced)" \
     "$mandate_text" \
     "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")" \
@@ -557,6 +614,11 @@ fm_afk_contract_cmd_enter() {
     standing=$(fm_afk_contract_record_mode "$record")
     [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
   fi
+  fm_afk_contract_resolve_reach
+  if [ "$FM_AFK_CONTRACT_ENTRY_MODE" = quiet ]; then
+    FM_AFK_CONTRACT_REACH_CHANNELS=none
+    FM_AFK_CONTRACT_REACH_SENTENCE=$FM_AFK_CONTRACT_REACH_ANNOUNCED
+  fi
   if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
     if [ "$standing" = quiet ]; then
       fm_afk_contract_log "quiet mode already recorded at $(fm_afk_contract_read_field "$record" entered); a refresh leaves it untouched"
@@ -568,6 +630,7 @@ fm_afk_contract_cmd_enter() {
     fi
     rm -f "$legacy"
     fm_afk_contract_render_announcement "$record" || return 1
+    fm_afk_contract_render_reach_note "$record"
     fm_afk_contract_render_readback "$record"
     return
   fi
@@ -610,6 +673,7 @@ fm_afk_contract_cmd_enter() {
   fi
   rm -f "$legacy"
   fm_afk_contract_render_announcement "$record" || return 1
+  fm_afk_contract_render_reach_note "$record"
   fm_afk_contract_render_readback "$record"
 }
 
