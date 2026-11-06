@@ -350,9 +350,15 @@ fm_supervision_engine_turn() {
     claude)
       # The prompt is the first positional argument, ahead of the variadic
       # tool and directory options that would otherwise absorb it.
-      # shellcheck disable=SC2054 # Bash,Read is one --tools value.
+      # A caller other than the branch session (bin/fm-ask.sh) narrows the
+      # tool set through FM_SUPERVISION_ENGINE_TOOLS (the --tools value) and
+      # FM_SUPERVISION_ENGINE_ALLOWED (a space-separated --allowedTools
+      # list); unset, both are the branch session's Bash and Read.
+      local tools=${FM_SUPERVISION_ENGINE_TOOLS:-Bash,Read} allowed_list=${FM_SUPERVISION_ENGINE_ALLOWED:-Bash Read}
+      local -a allowed
+      read -r -a allowed <<< "$allowed_list"
       args=(-p "$(cat "$message")" --safe-mode --system-prompt-file "$prompt"
-        --tools Bash,Read --permission-mode dontAsk --allowedTools Bash Read
+        --tools "$tools" --permission-mode dontAsk --allowedTools "${allowed[@]}"
         --model "$model" --output-format json)
       root_phys=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root_phys=$FM_ROOT
       home_phys=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_phys=$FM_HOME
