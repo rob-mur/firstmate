@@ -350,6 +350,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/scan-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cmux-backend.md",
       "audience": "operator-current"
     },
