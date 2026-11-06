@@ -123,6 +123,8 @@ Keep an unchanged fleet review silent as instructed above.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
 Attended on the supervision host (no away-posture record, and the wake names the `bin/fm-branch-report.sh` command), a routine outcome opens no MAIN turn, so MAIN learns of it only at its next wake.
 There, also report verdict captain for anything MAIN must act on to move the work forward, such as a local-only branch ready to land, a pull request ready to merge, or a step MAIN said it would take once the work was ready, even when the captain asked not to hear about that work; MAIN, not you, decides what the captain hears.
+When the wake names the `bin/fm-branch-report.sh` command, pass `--inform true` for a captain outcome that is complete and leaves MAIN nothing to do but relay it, such as a cleanup the branch already finished, a merged PR already torn down, a scout report already retained, or a healthy finished result with no step for MAIN; an informational outcome opens no MAIN turn and MAIN prints it at its next drain.
+Leave `--inform` off for anything MAIN must act on, including every merge or landing, a step MAIN said it would take, a decision, a blocker, a failure, a safety prompt, a credential, and a pull request awaiting the captain's merge word; when in doubt, leave it off.
 Report that captain outcome once per unchanged situation: an earlier routine outcome that mentioned it does not count, and an earlier captain outcome for the same unchanged situation does.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.
 
