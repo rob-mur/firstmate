@@ -1539,7 +1539,7 @@ sanitize_reconcile_provenance() {
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local cut_digest cut_answer recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   local resolve_rc
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1626,6 +1626,12 @@ command_answers() {
     keyed_decision_text "$source" "$id" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the captain decision for $id"
     digest=$(sha256_text "$(cat "$tmp")")
+    # A hold closed before the cap moved recorded the answer cut to 512
+    # characters; a replay of the full answer still matches that record.
+    cut_digest=''
+    cut_answer=$(sanitize_field "$answer")
+    [ "$cut_answer" = "$answer" ] \
+      || cut_digest=$(sha256_text "$(keyed_decision_text "$source" "$id" "$cut_answer" "$label")")
     legacy_digest=''
     if [ "$id" != "$key" ]; then
       legacy_key=$key
@@ -1647,6 +1653,7 @@ command_answers() {
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     if body_has_resolution_record "$body" \
       && { [ "$recorded_digest" = "$digest" ] \
+        || { [ -n "$cut_digest" ] && [ "$recorded_digest" = "$cut_digest" ]; } \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] \
