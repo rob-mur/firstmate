@@ -2420,12 +2420,62 @@ FIXTURE
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
-  [ "${#reemit}" -gt 10000 ] || fail "re-emit fixture did not exceed the hook output limit"
   head2k=$(printf '%s' "$reemit" | head -c 2000)
   assert_contains "$head2k" "RE-EMIT CUE" "the re-emit cue is not inside the first 2000 characters"
   assert_contains "$head2k" "Full output saved to" "the re-emit cue does not point at the saved output"
 
   pass "--reemit puts its read cue in the first 2000 characters and a normal start omits it"
+}
+
+test_reemit_is_a_compact_digest_with_one_line_per_task() {
+  local rec root home fakebin reemit normal task_line
+  rec=$(new_world reemit-compact)
+  IFS='|' read -r root home fakebin <<FIXTURE
+$rec
+FIXTURE
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  awk 'BEGIN { for (i = 0; i < 400; i++) printf "preference line %04d padding padding padding\n", i }' > "$home/data/captain.md"
+  printf 'learned fact about widgets\n' > "$home/data/learnings.md"
+  : > "$home/data/projects.md"
+  printf 'kind=ship\nbranch=fm/compact-task\nsecret-meta-marker=1\n' > "$home/state/compact-task.meta"
+  printf 'working: first line\nneeds-decision: last line of the log\n' > "$home/state/compact-task.status"
+  printf 'done: orphan last line\n' > "$home/state/orphan-task.status"
+
+  normal=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+
+  # The startup digest still carries everything the re-emit leaves out.
+  assert_contains "$normal" "secret-meta-marker=1" "a normal start lost the metadata block"
+  assert_contains "$normal" "preference line 0399" "a normal start lost the curated memory"
+  assert_contains "$normal" "SUPERVISION OPERATING INSTRUCTIONS" "a normal start lost the supervision block"
+
+  # The re-emit keeps one line per task, with state and last status.
+  task_line=$(printf '%s\n' "$reemit" | grep '^compact-task ' || true)
+  [ -n "$task_line" ] || fail "--reemit printed no one-line entry for the task"
+  assert_contains "$task_line" "[ship]" "the task line dropped the task kind"
+  assert_contains "$task_line" "endpoint: unknown" "the task line dropped the endpoint state"
+  assert_contains "$task_line" "last status: needs-decision: last line of the log" "the task line dropped the last status"
+  assert_not_contains "$task_line" "first line" "the task line printed more than the last status line"
+  assert_contains "$reemit" "orphan-task | last status: done: orphan last line" "--reemit dropped the orphan status log"
+
+  # It leaves the bulk out and names where to read it.
+  assert_not_contains "$reemit" "secret-meta-marker=1" "--reemit printed the metadata block"
+  assert_not_contains "$reemit" "status tail (last" "--reemit printed a status tail"
+  assert_not_contains "$reemit" "preference line 0399" "--reemit reprinted the curated memory"
+  assert_not_contains "$reemit" "learned fact about widgets" "--reemit reprinted the learnings file"
+  assert_contains "$reemit" "$home/data/captain.md - " "--reemit did not list the captain file path"
+  assert_contains "$reemit" "$home/data/projects.md - present, empty" "--reemit did not report an empty file as empty"
+  assert_contains "$reemit" "$home/data/secondmates.md - ABSENT" "--reemit did not report an absent file as absent"
+  assert_not_contains "$reemit" "Ordinary wake: " "--reemit printed the supervision block"
+  assert_contains "$reemit" "bin/fm-supervision-instructions.sh --harness claude --read-only 0 --afk 0" \
+    "--reemit did not print the command that re-renders the supervision instructions"
+  assert_contains "$reemit" "bin/fm-crew-state.sh <id>" "--reemit did not point at the current-state read"
+  [ "${#reemit}" -lt $(( ${#normal} / 2 )) ] || fail "--reemit is not materially smaller than the startup digest"
+
+  pass "--reemit is a compact digest: one line per task, curated memory by path, the supervision block by command"
 }
 
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
@@ -3153,6 +3203,7 @@ test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_cue_survives_the_hook_output_preview
+test_reemit_is_a_compact_digest_with_one_line_per_task
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
