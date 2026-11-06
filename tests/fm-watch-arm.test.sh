@@ -48,6 +48,13 @@ SEED_PID=
 ARM_PID=
 
 # Start the real watcher as the singleton holder.
+# The drain prints an unchanged OPEN DECISIONS block once and a pointer line
+# afterwards, so a surfaced decision is either the full line or that pointer.
+open_decision_surfaced() {
+  grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' "$1" >/dev/null \
+    || grep -E '^OPEN DECISIONS: [0-9]+ still open, unchanged since ' "$1" >/dev/null
+}
+
 start_seed_watcher() {  # <state> <fakebin> <watch-out> [poll-seconds]
   local state=$1 fakebin=$2 out=$3 poll=${4:-5} i
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL="$poll" FM_SIGNAL_GRACE=1 \
@@ -452,7 +459,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
     || fail "remote-reply wake queued during downtime was not drained"
   grep "$(printf '\tcheck\tstartup-network\t')" "$drainout" >/dev/null \
     || fail "second durable wake queued during downtime was not drained"
-  grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' "$drainout" >/dev/null \
+  open_decision_surfaced "$drainout" \
     || fail "remote parent-reply decision was not re-folded after watcher re-arm"
   ack_wakes "$state" || fail "recovery handling acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "re-arm recovery acknowledgement left durable wakes behind"
@@ -475,8 +482,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   decision_successor=$ARM_PID
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/decision-only-drain.out" \
     2> "$dir/decision-only-drain.err" || fail "decision-only drain after re-arm recovery failed"
-  grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' \
-    "$dir/decision-only-drain.out" >/dev/null \
+  open_decision_surfaced "$dir/decision-only-drain.out" \
     || fail "unchanged remote decision was not re-folded after a later down interval"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/decision-only-drain.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/decision-only-drain.err")
@@ -495,8 +501,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
     || fail "successor did not re-surface the unacknowledged decision recovery"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replayed-decision-drain.out" \
     2> "$dir/replayed-decision-drain.err" || fail "replayed decision recovery drain failed"
-  grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' \
-    "$dir/replayed-decision-drain.out" >/dev/null \
+  open_decision_surfaced "$dir/replayed-decision-drain.out" \
     || fail "interrupted decision recovery did not re-fold the open decision"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replayed-decision-drain.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replayed-decision-drain.err")

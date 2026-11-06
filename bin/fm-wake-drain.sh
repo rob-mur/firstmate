@@ -16,6 +16,16 @@
 # locked drain rotates such leftovers away before doing anything else.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
+#
+# OPEN DECISIONS dedup: the section is the same bytes on every drain while a
+# decision stays open, so it dominated recorded wake payloads. A drain prints
+# the block in full when it differs from the block last presented (a new,
+# changed, answered, or reordered decision) and otherwise prints a one-line
+# "unchanged since" pointer. The last presented block is recorded as a checksum
+# in state/.open-decisions-presented[.branch], committed only after the bytes
+# reach stdout. `--open-decisions` prints the current block in full, and
+# FM_OPEN_DECISIONS_FULL=1 forces a full print for one drain; fm-session-start.sh
+# sets it so a fresh or compacted context always receives the full list.
 set -u
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -48,8 +58,12 @@ ACK_REMOVED=0
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+OPEN_DECISIONS_ONLY=0
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 BRANCH_OUTCOMES_RC=0
+OD_FORCE_FULL=${FM_OPEN_DECISIONS_FULL:-0}
+OD_RECORD_ACTION=
+OD_RECORD_VALUE=
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
@@ -224,6 +238,10 @@ presented_max_row() { # <rows-file>
 
 case "${1:-}" in
   '') ;;
+  --open-decisions)
+    [ "$#" -eq 1 ] || { echo "wake drain: --open-decisions takes no further arguments" >&2; exit 2; }
+    OPEN_DECISIONS_ONLY=1
+    ;;
   --ack-through)
     ACK_THROUGH=${2:-}
     case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
@@ -233,7 +251,7 @@ case "${1:-}" in
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) echo "usage: fm-wake-drain.sh [--open-decisions | --ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
@@ -479,7 +497,10 @@ print_open_decisions_section() {
   else
     open=$(scan_open_decisions_incremental "$STATE") || return 1
   fi
-  [ -n "$open" ] || return 0
+  if [ -z "$open" ]; then
+    OD_RECORD_ACTION=clear
+    return 0
+  fi
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
@@ -510,7 +531,23 @@ print_open_decisions_section() {
 $open
 EOF
 
-  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  if [ "$shown" -le 0 ] && [ "$omitted" -le 0 ]; then
+    OD_RECORD_ACTION=clear
+    return 0
+  fi
+  local record_file digest recorded since_epoch since_seq since_text
+  record_file=$(open_decisions_record_file)
+  digest=$(printf '%s|%s|%s' "$output" "$omitted" "$shown" | cksum | awk '{ print $1 "-" $2 }') || return 1
+  if [ "$OD_FORCE_FULL" != 1 ] && [ -r "$record_file" ]; then
+    IFS=' ' read -r recorded since_epoch since_seq < "$record_file" || true
+    if [ "$recorded" = "$digest" ]; then
+      since_text=$(date -u -d "@${since_epoch:-0}" '+%H:%M:%SZ' 2>/dev/null || date -u -r "${since_epoch:-0}" '+%H:%M:%SZ' 2>/dev/null || printf 'earlier')
+      case "${since_seq:-}" in ''|0|*[!0-9]*) ;; *) since_text="$since_text, wake $since_seq" ;; esac
+      printf 'OPEN DECISIONS: %d still open, unchanged since %s and already shown in full; print them again with bin/fm-wake-drain.sh --open-decisions (a new or changed decision always prints in full).\n' \
+        "$((shown + omitted))" "$since_text" || return 1
+      return 0
+    fi
+  fi
   printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
   printf '%s' "$output" || return 1
   if [ "$omitted" -gt 0 ]; then
@@ -522,6 +559,32 @@ EOF
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
   printf 'OPEN DECISIONS: <key> is the [key=...] printed before the verb; a token inside a note is prose, not a key.\n' || return 1
+  OD_RECORD_ACTION="set"
+  OD_RECORD_VALUE="$digest $(date +%s) ${ACK_THROUGH:-0}"
+}
+
+# Dedup record for print_open_decisions_section: one file per actor so a
+# supervision branch's presentation never suppresses main's.
+open_decisions_record_file() {
+  if [ "$ACTOR" = branch ]; then printf '%s\n' "$STATE/.open-decisions-presented.branch"
+  else printf '%s\n' "$STATE/.open-decisions-presented"; fi
+}
+
+# Commit the record the last print_open_decisions_section call asked for. Runs
+# only after the section's bytes reached stdout, so a closed consumer leaves the
+# previous record in place and the next drain prints the block in full.
+commit_open_decisions_record() {
+  local record_file tmp
+  record_file=$(open_decisions_record_file)
+  case "$OD_RECORD_ACTION" in
+    clear) rm -f -- "$record_file" ;;
+    set)
+      tmp=$(mktemp "$STATE/.open-decisions-presented.XXXXXX") || return 1
+      if printf '%s\n' "$OD_RECORD_VALUE" > "$tmp" && mv -f -- "$tmp" "$record_file"; then :; else rm -f -- "$tmp"; return 1; fi
+      ;;
+  esac
+  OD_RECORD_ACTION=
+  OD_RECORD_VALUE=
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records
@@ -762,7 +825,12 @@ cap_outcome_line() {  # <line> <max-bytes>
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
-  [ -n "$snapshot" ] || return 0
+  if [ -z "$snapshot" ]; then
+    # No status logs means no open decision; drop any dedup record with them.
+    OD_RECORD_ACTION=clear
+    commit_open_decisions_record || true
+    return 0
+  fi
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
@@ -772,6 +840,7 @@ print_status_sections() {
       && print_record_divergence_section
   } > "$prepared"; then
     rm -f -- "$prepared"
+    OD_RECORD_ACTION=
     return 1
   fi
   # Prepare every section before presentation, but do not commit its receipt
@@ -785,6 +854,7 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
+  commit_open_decisions_record || true
   rm -f -- "$prepared"
 }
 
@@ -834,6 +904,25 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ "$OPEN_DECISIONS_ONLY" = 1 ]; then
+  # Read-only reprint of the current OPEN DECISIONS block in full: no wake queue,
+  # no acknowledgement, no status-receipt change. It refreshes the dedup record
+  # so the next ordinary drain points back at what was just shown.
+  OD_FORCE_FULL=1
+  lock="$STATE/.status-presentation-lock"
+  if ! fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
+    echo "wake drain: status presentation lock is busy; retry" >&2
+    exit 1
+  fi
+  snapshot=$(status_presentation_snapshot "$STATE") || { fm_lock_release "$lock"; exit 1; }
+  if [ -n "$snapshot" ]; then
+    print_open_decisions_section "$snapshot" || { fm_lock_release "$lock"; exit 1; }
+  fi
+  commit_open_decisions_record || true
+  fm_lock_release "$lock"
+  exit 0
+fi
 
 if [ -n "$ACK_THROUGH" ]; then
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
