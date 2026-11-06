@@ -49,7 +49,7 @@ test_report_surface_enforces_actor_turn_and_scope() {
   assert_contains "$out" "recorded seq 1 [captain]" "the report must name its store sequence"
   assert_grep '"task":"alpha"' "$state/branch-outcomes.jsonl" "the outcome store did not receive the report"
   assert_grep '"wake":"signal: alpha.status"' "$state/branch-outcomes.jsonl" "the report did not default its wake to the turn's wake"
-  [ "$(cat "$state/.supervision-host-receipts")" = "$(printf 't1\t1\tcaptain\talpha')" ] \
+  [ "$(cat "$state/.supervision-host-receipts")" = "$(printf 't1\t1\tcaptain\talpha\tact')" ] \
     || fail "the host receipt was not written: $(cat "$state/.supervision-host-receipts")"
   local wake_queue_before
   wake_queue_before=$(cat "$state/.wake-queue" 2>/dev/null || true)
@@ -65,6 +65,13 @@ test_report_surface_enforces_actor_turn_and_scope() {
   printf 'turn=t2\nrows=5\ntasks=\nunscoped=1\nwake=heartbeat\n' > "$state/.supervision-host-turn"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t2 "$REPORT" --task fleet --verdict routine --summary quiet --silent true 2>&1); rc=$?
   expect_code 0 "$rc" "an unscoped heartbeat turn must accept a silent fleet report"
+
+  printf 'turn=t3\nrows=1\ntasks=alpha\nunscoped=0\nwake=signal: alpha.status\n' > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t3 "$REPORT" --task alpha --verdict captain --inform true --summary 'cleanup finished' 2>&1); rc=$?
+  expect_code 0 "$rc" "an informational captain outcome must be recorded"
+  assert_not_contains "$(cat "$state/branch-outcomes.jsonl")" "inform" "the informational mark must not enter the store row"
+  [ "$(tail -n 1 "$state/.supervision-host-receipts")" = "$(printf 't3\t4\tcaptain\talpha\tinform')" ] \
+    || fail "the informational receipt was not marked: $(tail -n 1 "$state/.supervision-host-receipts")"
   pass "report surface: only the branch actor's current turn may report, and only on the tasks its wake names"
 }
 

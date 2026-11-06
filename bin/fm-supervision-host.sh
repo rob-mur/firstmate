@@ -1202,9 +1202,17 @@ handle_wake() {  # <reason-lines>
   return 1
 }
 
-# The captain outcomes one turn recorded, as store rows.
+# The captain outcomes one turn recorded that MAIN must act on, as store rows.
+# An informational row (receipt column 5 "inform", docs/supervision-host.md
+# "Captain outcomes") is left out: it stays in the store for the next drain to
+# print, and it opens no MAIN turn. A receipt without the column is an act row.
 turn_captain_seqs() {  # <turn>
-  awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
+  awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" && $5 != "inform" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
+}
+
+# The informational captain outcomes one turn recorded, as store rows.
+turn_inform_seqs() {  # <turn>
+  awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" && $5 == "inform" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
 }
 
 # Why an attended close stays with main exactly as the plain arm delivers it,
@@ -1363,10 +1371,13 @@ while :; do
     exit_to_main "the captain returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them" \
       "$(turn_outcome_lookup_warning)"
   fi
-  # Attended captain outcomes are main's to process; away they wait for the
-  # return, including when the captain left while this turn ran. The close
-  # itself was handled, so only the host's lines reach main.
+  # Attended captain outcomes main must act on end the park for main; an
+  # informational one only waits in the store for main's next drain, and away
+  # they wait for the return, including when the captain left while this turn
+  # ran. The close itself was handled, so only the host's lines reach main.
   if [ -n "$LAST_TURN" ] && ! fm_afk_contract_away_present "$STATE"; then
+    INFORM_SEQS=$(turn_inform_seqs "$LAST_TURN")
+    [ -z "$INFORM_SEQS" ] || log_line "informational	turn=$LAST_TURN	rows=$INFORM_SEQS	left for main's next drain"
     CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
     if [ -n "$CAPTAIN_SEQS" ]; then
       ARM_TEXT=
