@@ -446,6 +446,30 @@ The Claude engine runs beside any of the seven primaries, but only a Claude prim
 A Cursor, OpenCode, omp, Grok, Codex, or agy home names it (`claude`, optionally with a model) in `config/supervision-host`.
 `/afk` there says so when the file selects no engine.
 
+## Ask
+
+`bin/fm-ask.sh` is the `ask` verb of the seam between the captain-facing session and the work behind it.
+It answers a question from the home's durable records, so a lookup whose answer is already written down does not run as serial work inside the captain-facing session.
+
+The engine is the same headless Claude print-mode turn the host runs for a wake, started from `bin/fm-supervision-engine-lib.sh`.
+Its tools are narrowed to reading: the Read tool and a fixed list of read commands, passed through the engine's `FM_SUPERVISION_ENGINE_TOOLS` and `FM_SUPERVISION_ENGINE_ALLOWED` overrides.
+The branch session keeps its own tool set when neither variable is set.
+
+The allowlist is a guardrail against a model drifting into a write, not a security boundary, because a permitted command such as `find` or `sed` has write-capable options.
+An ask is read-only by instruction and by allowlist, never by sandbox.
+
+The system prompt is a pure function of the script, so the provider's prompt cache keeps hitting across asks.
+The home path and the question reach the engine as the user message at the tail.
+`FM_HOME` must be explicit, as for `bin/fm-send.sh`, so an ask never reads another home's records by accident.
+
+Each ask leaves a record under `state/ask/<id>/`, and `--async` plus `outcome <id>` lets a caller start an ask and collect the answer later.
+The script header owns the usage, the record files, the environment, and the exit codes.
+
+An ask answers only what the records hold, and it says so when they do not.
+It is an agentic lookup of two to seven tool turns, so its wall time is a few seconds above the engine's startup floor and varies by question.
+The recorded latency and correctness measurement belongs to the task report that commissioned it, not to this document.
+Run `tests/fm-ask.test.sh` for the behavior contract.
+
 ## Verification
 
 Each arm owner's own suite covers its host mode against a stub host.
