@@ -16,10 +16,17 @@
 #
 # Usage:
 #   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
-#       --summary <text> [--silent true|false] [--wake <text>]
+#       --summary <text> [--silent true|false] [--inform true|false] \
+#       [--wake <text>]
 #
 # The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
 # or captain"); --silent true is legal only for a routine outcome.
+# --inform true marks a captain outcome that MAIN has nothing to act on, only
+# to relay (docs/supervision-host.md "Captain outcomes"); it is legal only for
+# a captain outcome and defaults to false, so an unmarked captain outcome
+# stays one MAIN acts on. The mark lives in the host's receipt, never in the
+# outcome store, so the stored row and its delivery are those of any captain
+# row.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
@@ -54,7 +61,7 @@ RECEIPTS="$STATE/.supervision-host-receipts"
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 
 usage() {
-  sed -n '/^# Usage:/,/^# --wake/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '/^# Usage:/,/^#       \[--wake/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -63,13 +70,14 @@ refuse() {
   exit 3
 }
 
-TASK='' VERDICT='' SUMMARY='' SILENT=false WAKE='' WAKE_SET=0
+TASK='' VERDICT='' SUMMARY='' SILENT=false INFORM=false WAKE='' WAKE_SET=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --task) TASK=${2:-}; shift 2 || usage ;;
     --verdict) VERDICT=${2:-}; shift 2 || usage ;;
     --summary) SUMMARY=${2:-}; shift 2 || usage ;;
     --silent) SILENT=${2:-}; shift 2 || usage ;;
+    --inform) INFORM=${2:-}; shift 2 || usage ;;
     --wake) WAKE=${2:-}; WAKE_SET=1; shift 2 || usage ;;
     -h|--help) usage ;;
     *) usage ;;
@@ -80,12 +88,17 @@ TASK=$(printf '%s' "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
+case "$INFORM" in true|false) ;; *) usage ;; esac
 if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
   echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
   exit 2
 fi
 if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
   echo "invalid report: --silent true requires the routine verdict" >&2
+  exit 2
+fi
+if [ "$INFORM" = true ] && [ "$VERDICT" != captain ]; then
+  echo "invalid report: --inform true requires the captain verdict" >&2
   exit 2
 fi
 
@@ -123,7 +136,9 @@ if ! SEQ=$("$SCRIPT_DIR/fm-branch-outcome.sh" "$@"); then
   echo "outcome store append failed (nothing recorded)" >&2
   exit 1
 fi
-printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
+MARK=act
+[ "$INFORM" != true ] || MARK=inform
+printf '%s\t%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" "$MARK" >> "$RECEIPTS" || {
   echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
   exit 1
 }
@@ -133,7 +148,11 @@ if [ "$SILENT" = true ]; then
 fi
 if [ "$(turn_field posture)" = attended ]; then
   if [ "$VERDICT" = captain ] && ! fm_afk_contract_away_present "$STATE"; then
-    printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
+    if [ "$INFORM" = true ]; then
+      printf 'recorded seq %s [captain, informational]; it opens no MAIN turn and MAIN prints it at its next drain\n' "$SEQ"
+    else
+      printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
+    fi
   else
     printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
   fi
