@@ -1543,6 +1543,25 @@ test_send_resolve_key_refuses_over_cap_before_sending() {
   assert_contains "$show" "held: yes" "the refused steer closed the hold"
 }
 
+test_full_answer_replay_matches_a_512_cut_record() {
+  local home out long cut
+  home=$(make_home cut-replay)
+  long=$(printf 'r%.0s' $(seq 1 2000))
+  cut=$(printf 'r%.0s' $(seq 1 512))
+  tasks_in "$home" add cut-replay "Cut replay" --kind ship --repo sample >/dev/null
+  run_captain "$home" hold cut-replay --reason "captain call needed" >/dev/null
+  # Close with the answer cut to 512, as the pre-cap code recorded it.
+  printf 'cut-replay\t%s\t\n' "$cut" | run_captain "$home" answers --source "cut fixture" >/dev/null \
+    || fail "could not close with the cut answer"
+  out=$(printf 'cut-replay\t%s\t\n' "$long" | run_captain "$home" answers --source "cut fixture") \
+    || fail "replaying the full answer after a 512-cut close did not exit 0"
+  assert_contains "$out" "closed: cut-replay" "the full-answer replay was not reported closed"
+  # A genuinely different answer is still refused.
+  if printf 'cut-replay\t%s\t\n' "different $long" | run_captain "$home" answers --source "cut fixture" >/dev/null 2>&1; then
+    fail "a different long answer was accepted against a closed hold"
+  fi
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate fakebin origin json
   parent=$(make_home main-routing)
@@ -5184,6 +5203,7 @@ test_completion_replaces_a_pair_recorded_after_pr
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_keyed_answer_cap_is_one_visible_limit
 test_send_resolve_key_refuses_over_cap_before_sending
+test_full_answer_replay_matches_a_512_cut_record
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
