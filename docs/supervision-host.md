@@ -88,7 +88,8 @@ The other owners read the file at every arm.
 `bin/fm-branch-report.sh` appends to the outcome store (`bin/fm-branch-outcome.sh`) plus a per-turn receipt the host requires.
 A non-silent row an away turn records after the captain returned is also queued for main as a durable check wake.
 Silent outcomes remain in the store but are not queued or relayed as notes.
-An attended turn queues nothing: its captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine rows stay in the store.
+An attended turn queues nothing: its actionable captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine and informational rows stay in the store.
+`--inform true` marks a captain outcome that leaves main nothing to do but relay it; the mark lives only in the turn's receipt, never in the store row.
 
 ### Leases and authority
 
@@ -128,7 +129,8 @@ It also passes the close through unchanged, with no added line, when any of thes
 
 A close the engine takes is handled as in [One wake](#one-wake), with the dialog mirror at the head of the wake message.
 A handled wake with only routine outcomes never reaches main.
-A handled wake that recorded a captain outcome while the captain is still attended exits with one `supervision-host: branch-outcome:` line naming its store rows, without the close it handled; see [Captain outcomes](#captain-outcomes).
+A handled wake that recorded an actionable captain outcome while the captain is still attended exits with one `supervision-host: branch-outcome:` line naming its store rows, without the close it handled; see [Captain outcomes](#captain-outcomes).
+A wake whose captain outcomes are all informational never reaches main.
 A turn that fails hands its close to main with one `supervision-host:` line, as away.
 Main-only rows that share the queue with the branch's rows stay queued for main.
 The [handling-successor recovery contract](watcher-continuity.md#durable-queue-and-turn-end-backstop) guarantees that a main-only row appended after the predecessor closes, including before the successor initializes or while the host is parked, reaches main as a pass-through.
@@ -206,7 +208,9 @@ One example is a Cursor park superseded by the return turn's own end, which stop
 
 ## Captain outcomes
 
-A captain outcome the attended engine records while the captain remains attended wakes main once, through the owner's ordinary wake path, with one `supervision-host: branch-outcome:` line naming its store rows.
+An actionable captain outcome the attended engine records while the captain remains attended wakes main once, through the owner's ordinary wake path, with one `supervision-host: branch-outcome:` line naming its store rows.
+An informational one, recorded with `--inform true` because main has nothing to do but relay it, opens no main turn: the host logs it and leaves the row for main's next drain, which presents it like any other unprocessed captain outcome.
+A legacy receipt with no mark is actionable, and a turn that mixes both kinds exits for the actionable rows only.
 Main drains, and `bin/fm-wake-drain.sh` presents it in its `BRANCH OUTCOMES` section with the exact `bin/fm-branch-outcome.sh mark-processed --through <seq>` acknowledgement.
 That presentation is what the Pi branch's visible entry is, so it advances the store's read cursor through the rows it presents.
 Every later drain, including the session-start digest, presents unprocessed captain outcomes again until main acknowledges them, so an ignored outcome costs no extra turn and is never lost.
