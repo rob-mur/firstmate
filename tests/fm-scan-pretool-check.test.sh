@@ -135,9 +135,9 @@ test_inert_outside_primary() {
 test_override_and_fail_open() {
   FM_ALLOW_BROAD_SCAN=1 run_check "$CHECK" 'grep -r foo /'
   [ "$RC" -eq 0 ] || fail "FM_ALLOW_BROAD_SCAN=1 must allow (rc=$RC)"
-  printf 'not json' | "$CHECK" --claude >/dev/null 2>&1; [ "$?" -eq 0 ] || fail "malformed stdin must fail open"
-  printf '' | "$CHECK" --claude >/dev/null 2>&1; [ "$?" -eq 0 ] || fail "empty stdin must fail open"
-  "$CHECK" --claude --command 'grep -r "unterminated /' >/dev/null 2>&1; [ "$?" -eq 0 ] || fail "an unparseable command must fail open"
+  printf 'not json' | "$CHECK" --claude >/dev/null 2>&1 || fail "malformed stdin must fail open"
+  printf '' | "$CHECK" --claude >/dev/null 2>&1 || fail "empty stdin must fail open"
+  "$CHECK" --claude --command 'grep -r "unterminated /' >/dev/null 2>&1 || fail "an unparseable command must fail open"
   mv "$PRIMARY/bin/fm-scan-command-policy.mjs" "$PRIMARY/bin/fm-scan-command-policy.mjs.off"
   "$CHECK" --claude --command 'grep -r foo /' >/dev/null 2>&1
   local rc=$?
