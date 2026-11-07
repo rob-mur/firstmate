@@ -13,7 +13,7 @@
 //   dispatch        press the dispatch button
 //   load            frame load: restore review state, then report queued anchors
 //   send            the chrome sends every queued prompt, then reports anchors
-// Prints { cards, storage, calls, queue, badges, bar, picks }.
+// Prints { cards, storage, calls, queue }.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const [, , boardPath, storagePath, actionList = ""] = process.argv;
@@ -130,7 +130,7 @@ const anchors = () => post({ type: "lavish:queuedAnchors", selectors: Object.val
 const scopes = () => {
   const out = [];
   const walk = (n) => { for (const c of n.children) { if (c.attributes["data-lavish-question"]) out.push(c); walk(c); } };
-  for (const id of ["bb-call", "bb-charted", "bb-dispatch"]) walk({ children: [byId.get(id)] });
+  for (const id of ["bb-call"]) walk({ children: [byId.get(id)] });
   return out;
 };
 const controls = () => scopes().flatMap((scope) =>
@@ -150,11 +150,6 @@ for (const act of actionList.split(",").filter(Boolean)) {
     }
   } else if (name === "submit") {
     forms().find((f) => f.attributes["data-lavish-question"] === arg).fire("submit");
-  } else if (name === "pick") {
-    const box = byId.get("bb-charted").querySelectorAll(".bb-pick").find((c) => c.value === arg);
-    box.checked = true; box.fire("change");
-  } else if (name === "dispatch") {
-    byId.get("bb-dispatch-btn").fire("click");
   } else if (name === "load") {
     for (const f of session.review) {
       const hit = controls().find((c) => c.key === f.key) || controls().find((c) => c.question === f.question && c.index === f.index);
@@ -175,7 +170,6 @@ session.review = controls().map((c) => ({
 }));
 writeFileSync(sessionPath, JSON.stringify(session));
 
-const bar = byId.get("bb-dispatch");
 const cards = forms().map((f) => ({
   key: f.attributes["data-lavish-question"],
   selection: f.querySelectorAll("input").find((r) => r.type === "radio" && r.checked)?.value ?? "",
@@ -185,6 +179,4 @@ const cards = forms().map((f) => ({
 }));
 process.stdout.write(JSON.stringify({
   cards, storage: store, calls, queue: Object.keys(session.queue),
-  bar: { queued: bar.classList.contains("is-queued"), count: byId.get("bb-dispatch-count").textContent, disabled: byId.get("bb-dispatch-btn").disabled },
-  picks: byId.get("bb-charted").querySelectorAll(".bb-pick").filter((c) => c.checked).map((c) => c.value),
 }) + "\n");
