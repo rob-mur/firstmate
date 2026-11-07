@@ -541,7 +541,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
               | select(($all_decisions == 1) or live_captain_call)
               | {id:($m.id + "/" + .id),key,verb,
                  title:((.summary // .id) | trunc(60)),reason:((.reason // "-") | trunc(80)),
-                 title_full:(.summary // .id),reason_full:(.reason // "-"),
+                 title_full:(.title_full // .summary // .id),reason_full:(.reason_full // .reason // "-"),
                  summary:hold_summary((.summary // .id);
                                       (.reason // "captain decision pending")),
                  question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id} ]
@@ -554,7 +554,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                          | index($id) | not)
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
                    title:((.title // .id) | trunc(60)),reason:((.hold_reason // "-") | trunc(80)),
-                   title_full:(.title // .id),reason_full:(.hold_reason // "-"),
+                   title_full:(.title_full // .title // .id),reason_full:(.hold_reason_full // .hold_reason // "-"),
                    summary:hold_summary((.title // .id);
                                         (.hold_reason // "captain decision pending")),
                    question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id} ])[] ]) as $decisions_all
