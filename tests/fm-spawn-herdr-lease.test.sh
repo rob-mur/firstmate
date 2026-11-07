@@ -100,11 +100,14 @@ case "${1:-} ${2:-}" in
       *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
         [ ! -f "$D/launch-send-fails" ] || exit 1
         printf '%s\n' "$payload" > "$D/launched-command"
+        rm -f "$D/no-agent"
         : > "$D/herdr-agent-live" ;;
     esac
     exit 0 ;;
   'agent get')
-    if [ -f "$D/herdr-agent-live" ]; then
+    if [ -f "$D/no-agent" ]; then
+      printf '{"error":{"code":"agent_not_found"}}\n'
+    elif [ -f "$D/herdr-agent-live" ]; then
       printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
     else
       printf '{"result":{"agent":{"agent_status":"shell-starting"}}}\n'
@@ -289,6 +292,36 @@ test_never_moving_worktree_entry() {
   pass "Herdr refuses a never-moving pane with diagnostic context and no launch"
 }
 
+# A restart recovery spawns the same id over its existing record. The slot that
+# record leased still holds its work, so it is reused untouched instead of
+# stranded behind a second lease.
+test_same_id_respawn_reuses_its_leased_slot() {
+  local id=lease-reuse dir out status pool
+  dir=$(make_lease_case "$id")
+  pool="$dir/pool/s1"
+  mkdir -p "$pool"
+  rm -rf "$dir/slot"
+  git -C "$dir/project" worktree add -q --detach "$pool/proj"
+  ln -s "$pool/proj" "$dir/slot"
+  printf '{"worktrees":[{"path":"%s","leased":true,"lease_holder":"%s"}]}\n' "$pool/proj" "$id" \
+    > "$dir/pool/treehouse-state.json"
+  out=$(run_lease_spawn "$dir" "$id")
+  status=$?
+  expect_code 0 "$status" "first spawn should succeed"$'\n'"$out"
+  assert_grep "task=$id" "$pool/.fm-slot-owner" "the first spawn did not claim its slot"
+  # The worker died; its record and leased slot (with uncommitted work) remain.
+  rm -f "$dir/fake/herdr-agent-live"
+  : > "$dir/fake/no-agent"
+  echo restart-work >> "$pool/proj/README.md"
+  out=$(run_lease_spawn "$dir" "$id")
+  status=$?
+  expect_code 0 "$status" "same-id respawn should succeed"$'\n'"$out"
+  [ "$(grep -c '^get --lease' "$dir/fake/treehouse-log")" = 1 ] \
+    || fail "the respawn leased a second slot: $(cat "$dir/fake/treehouse-log")"
+  assert_grep restart-work "$pool/proj/README.md" "the respawn discarded the slot's uncommitted work"
+  pass "a same-id respawn reuses the slot its record leased, untouched"
+}
+
 test_delayed_worktree_entry
 test_dropped_worktree_entry
 test_never_moving_worktree_entry
@@ -300,5 +333,7 @@ test_rolled_back_spawn_after_launch_names_the_lease_it_keeps
 test_abort_returns_a_clean_lease_once_the_pane_is_gone
 test_abort_keeps_a_dirty_lease_once_the_pane_is_gone
 test_abort_keeps_the_lease_while_the_pane_is_present
+
+test_same_id_respawn_reuses_its_leased_slot
 
 echo "# all fm-spawn-herdr-lease tests passed"
