@@ -3376,7 +3376,7 @@ test_full_captain_questions_survive_local_and_secondmate_projection() {
   make_valid_secondmate_home questions "$mate"
   append_secondmate_registry "$home" questions "$mate"
   title='Choose the rollout scope for the next release while preserving the complete operator question and every explicitly recorded alternative'
-  reason='Which route should proceed? A: retain the existing workflow until the staged verification has finished and every downstream dependency has reported its result. B: start the separate migration after the remaining review, preserving the fallback and the complete audit record. C: defer until the final café / 東京 review.'
+  reason='Which route should proceed? A: retain the existing workflow until the staged verification has finished and every downstream dependency has reported its result. B: start the separate migration after the remaining review, preserving the fallback and the complete audit record. C: defer until the final café / 東京 review. D: keep both routes running side by side for a full observation period, compare the recorded outcomes of each against the agreed acceptance list, and only then retire the slower route once the captain has confirmed the comparison in writing. END-OF-HOLD-REASON'
   for target in "$home" "$mate"; do
     cat > "$target/data/backlog.md" <<EOF
 ## In flight
@@ -3396,6 +3396,11 @@ EOF
     [.decisions_open[] | select(.id == "full-call" or .id == "questions/full-call")]
     | length == 2 and all(.[]; .question == $question and (.summary | length) <= 91)
   ' >/dev/null || fail "full local/secondmate question was lost: $json"
+  printf '%s' "$json" | jq -e --arg title "$title" --arg reason "$reason" '
+    ($reason | length) > 500
+    and ([.decisions_open[] | select(.id == "full-call" or .id == "questions/full-call")]
+      | length == 2 and all(.[]; .title_full == $title and .reason_full == $reason))
+  ' >/dev/null || fail "local or secondmate decision lost its uncut title or reason: $json"
   printf '%s' "$json" | jq -e '
     [.decisions_open[].id] == ["full-call", "report-call", "questions/full-call", "questions/report-call"]
     and ([.decisions_open[] | select(.id | endswith("report-call")) | .question]
@@ -3410,9 +3415,9 @@ EOF
       and (.title | length) <= 121 and (.hold_reason | length) <= 161))
   ' >/dev/null || fail "secondmate transport discarded the full question or expanded compact fields: $summary"
   expanded=$(run "$home" "$fakebin" --json --all-decisions)
-  printf '%s' "$expanded" | jq -e --arg question "$title: $reason" '
+  printf '%s' "$expanded" | jq -e --arg question "$title: $reason" --arg reason "$reason" '
     [.decisions_open[] | select(.id == "dated-call" or .id == "questions/dated-call")]
-    | length == 2 and all(.[]; .question == $question)
+    | length == 2 and all(.[]; .question == $question and .reason_full == $reason)
   ' >/dev/null || fail "revealed deferred questions were lost: $expanded"
   toon=$(run "$home" "$fakebin" --all-decisions)
   printf '%s' "$toon" | grep -F "$title: $reason" >/dev/null \

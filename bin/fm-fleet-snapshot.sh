@@ -93,8 +93,9 @@
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
 #     Generated captain-hold rows in decisions_open and queued carry the full
-#     question for presentation; their overview summary, reason, title, and
-#     hold_reason fields stay bounded.
+#     question for presentation, plus uncut title_full and reason_full
+#     (queued rows: title_full and hold_reason_full); their overview summary,
+#     reason, title, and hold_reason fields stay bounded.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
@@ -1010,6 +1011,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),
+            title_full:.title,reason_full:.hold_reason,
              question:(.title + ": " + .hold_reason),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
@@ -1124,6 +1126,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
+          hold_reason_full:(.hold_reason // null),title_full:.title,
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           hold_bucket:(.hold_bucket // null),
