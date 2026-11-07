@@ -1675,6 +1675,7 @@ T3CODE_LAUNCH_UNCONFIRMED=0
 T3CODE_PROJECT_ID=
 T3CODE_MODEL_SELECTION=
 HERDR_LEASED=0
+HERDR_LEASE_REUSED=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -4737,6 +4738,32 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
   fi
 }
 
+# A fresh Herdr task's slot stays durably leased to its task id until teardown
+# returns it. Print the recorded worktree when the recorded Herdr pane holds no
+# agent, Treehouse still reports the slot leased to this id, and the slot claim
+# names this task; otherwise fail, and the caller leases a new slot.
+herdr_task_own_leased_worktree() { # <meta>
+  local meta=$1 recorded slot
+  [ "$(fm_backend_of_meta "$meta")" = herdr ] &&
+    fm_backend_herdr_parse_target "$(fm_backend_target_of_meta "$meta")" &&
+    fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
+  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null)" in
+    dead | no-agent) ;;
+    *) return 1 ;;
+  esac
+  recorded=$(herdr_projection_meta_field_exact "$meta" worktree) || return 1
+  [ -n "$recorded" ] && fm_treehouse_pool_slot "$PROJ_ABS" "$recorded" || return 1
+  slot=$(cd "$recorded" && pwd -P) || return 1
+  fm_treehouse_slot_owner_state "$slot" "$ID"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 1
+  # The pool state file, not `treehouse status --json`, which older pinned
+  # Treehouse releases lack; fm_treehouse_pool_slot already required it.
+  jq -e --arg path "$slot" --arg id "$ID" \
+    'any(.worktrees[]?; .path == $path and .leased == true and .lease_holder == $id)' \
+    "$(dirname "$(dirname "$slot")")/treehouse-state.json" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$recorded"
+}
+
 herdr_projection_meta_field_exact() { # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -5460,7 +5487,16 @@ spawn_send_key() { # <target> <key>
 # spawn_enter_recorded_worktree move the top-level shell itself. A lease
 # outlives its pane, so an aborted spawn returns it (spawn_abort_cleanup) and
 # bin/fm-teardown.sh returns it for a finished task.
+# A same-id spawn over the task's existing record (a restart recovery) reuses
+# the slot that record still holds (herdr_task_own_leased_worktree) instead of
+# leasing a second one; that slot is untouched, and never this spawn's to return.
 spawn_lease_herdr_slot() {
+  if { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; } &&
+    WT=$(herdr_task_own_leased_worktree "$STATE/$ID.meta"); then
+    validate_spawn_worktree "the recorded leased worktree" "$WT (still leased to $ID with its work)"
+    HERDR_LEASE_REUSED=1
+    return 0
+  fi
   WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
     echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS; $(spawn_endpoint_hint)" >&2
     exit 1
@@ -6089,10 +6125,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
     fi
-    SPAWN_SLOT_CLAIMED=1
+    [ "$HERDR_LEASE_REUSED" = 1 ] || SPAWN_SLOT_CLAIMED=1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ] && [ "$HERDR_LEASE_REUSED" != 1 ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
 fi
 
