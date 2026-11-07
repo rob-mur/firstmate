@@ -1481,6 +1481,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
 
 test_keyed_answer_cap_is_one_visible_limit() {
   local home out show limit at over cjk rc
+  set +e
   home=$(make_home answer-cap)
   limit=$(run_captain "$home" answer-limit) || fail "answer-limit was not published"
   [ "$limit" = 6000 ] || fail "the published answer limit is not 6000 bytes: $limit"
