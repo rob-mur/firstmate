@@ -16,7 +16,8 @@
 #
 # Mapping (snapshot field -> board section):
 #   decisions_open  -> captains_call: one `decision` card per captain-held task id,
-#                      titled from the row's `title`, `about` from its `reason`,
+#                      titled from the row's full `title_full` (else `title`), `about` from
+#                      its full `reason_full` (else `reason`),
 #                      `pr_url` and `repo` from the PR the task recorded, and a
 #                      freeform answer box (a card with no authored options). The
 #                      snapshot already buckets holds, so every row is a live call.
@@ -175,12 +176,12 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" '
               repo: ( ($pr | repo_of_url)
                       // ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0])
                       // null ),
-              title: (($d.title // $d.summary // $d.key) | nz($d.key)),
+              title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
               options: [],
               allow_freeform: true,
               freeform_hint: "answer in your own words (say later to defer)"
             }
-            + (if ($d.reason | nz(null)) != null then {about: $d.reason} else {} end)
+            + (if (($d.reason_full // $d.reason) | nz(null)) != null then {about: ($d.reason_full // $d.reason)} else {} end)
             + (if $pr != null then {pr_url: $pr} else {} end) )
           + overlay("captains_call"; $d.key; card_fields)
           | . as $card

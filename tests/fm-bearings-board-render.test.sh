@@ -116,156 +116,6 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
   render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
 }
 
-charted_next_count() {  # <render-json>
-  printf '%s' "$1" | jq -r '.stats[] | select(.label == "charted next") | .n'
-}
-
-test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
-  local home out
-  home=$(make_home warning-badge)
-  out=$(render "$home" '[
-    {"id":"real-queued","repo":"sample","title":"Queued work","reason":"queued behind the cutover","dispatchable":true},
-    {"id":"main-inventory","repo":"sample","title":"Main inventory integrity","reason":"main inventory","dispatchable":false,"kind":"warning"}
-  ]')
-  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
-    || fail "the board rendered its fail-closed error instead of the fleet: $out"
-  printf '%s' "$out" | jq -e '
-    (.charted | length) == 2
-      and (.charted[0] | .title == "Queued work"
-        and [.badges[] | .text] == ["waiting"] and .pickable == true)
-      and (.charted[1] | .title == "Main inventory integrity"
-        and [.badges[] | .text] == ["needs repair"]
-        and [.badges[] | .tone] == ["danger"]
-        and .pickable == false)
-  ' >/dev/null || fail "a warning row did not read differently from queued work: $out"
-  pass "a warning row badges needs repair while queued work keeps waiting"
-}
-
-test_warnings_are_excluded_from_the_charted_next_count() {
-  local home out
-  home=$(make_home warning-count)
-  out=$(render "$home" '[
-    {"id":"queued-one","repo":"sample","title":"One","reason":"gated","dispatchable":true},
-    {"id":"warn-one","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"},
-    {"id":"warn-two","repo":"sample","title":"Inventory mismatch","reason":"main inventory","dispatchable":false,"kind":"warning"}
-  ]')
-  [ "$(charted_next_count "$out")" = 1 ] \
-    || fail "the charted next tally counted alarms as queued work: $out"
-  printf '%s' "$out" | jq -e '(.charted | length) == 3' >/dev/null \
-    || fail "excluding warnings from the count also dropped their rows: $out"
-  pass "the charted next count counts queued work only, and still renders warnings"
-}
-
-test_a_board_of_only_warnings_still_reports_nothing_queued() {
-  local home out
-  home=$(make_home warning-only)
-  out=$(render "$home" '[
-    {"id":"warn-only","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
-  ]')
-  [ "$(charted_next_count "$out")" = 0 ] \
-    || fail "a warning-only board claimed queued work: $out"
-  printf '%s' "$out" | jq -e '
-    (.empty | length) == 1 and (.empty[0] | test("Nothing is queued"))
-      and (.charted | length) == 1
-  ' >/dev/null || fail "a warning-only board hid the warning or the empty state: $out"
-  pass "a warning-only board reports nothing queued and still shows the warning"
-}
-
-test_omitted_warnings_never_count_as_more_queued() {
-  local home out
-  home=$(make_home warning-more)
-  out=$(render "$home" '[
-    {"id":"warn-visible","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
-  ]' 0 1)
-  [ "$(charted_next_count "$out")" = 0 ] \
-    || fail "an omitted warning was counted as queued work: $out"
-  printf '%s' "$out" | jq -e '
-    (.empty | length) == 1 and (.empty[0] | test("Nothing is queued"))
-      and (.more == ["+1 more repair warning - ask firstmate for the full chart"])
-      and ([.more[] | select(test("more queued"))] | length) == 0
-  ' >/dev/null || fail "an omitted warning was labeled as more queued: $out"
-  pass "omitted warnings remain separate from omitted queued work"
-}
-
-test_an_omitted_kind_keeps_the_existing_queued_rendering() {
-  local home out
-  home=$(make_home default-kind)
-  out=$(render "$home" '[
-    {"id":"with-reason","repo":"sample","title":"With reason","reason":"blocked on prep","dispatchable":true},
-    {"id":"no-reason","repo":"sample","title":"No reason","reason":"","dispatchable":true}
-  ]' 2)
-  [ "$(charted_next_count "$out")" = 4 ] \
-    || fail "an omitted kind changed the charted next tally: $out"
-  printf '%s' "$out" | jq -e '
-    ([.charted[0].badges[] | .text] == ["waiting"])
-      and (.charted[1].badges == [])
-  ' >/dev/null || fail "an omitted kind changed the existing queued badges: $out"
-  pass "an omitted kind renders exactly as queued work always did"
-}
-
-test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
-  local home out
-  home=$(make_home underway-name)
-  out=$(render_board "$home" '[
-    {"id":"fm-board-name-r1","repo":"firstmate","name":"Show task names on the board",
-     "state":"working","kind":"ship","doing":"no-mistakes: review round 2"}
-  ]' '[]')
-  printf '%s' "$out" | jq -e '
-    (.underway | length) == 1
-      and (.underway[0]
-        | .title == "Show task names on the board"
-          and (.sub | test("no-mistakes: review round 2"))
-          and (.sub | test("ship")) and (.sub | test("firstmate"))
-          and [.badges[] | .text] == ["working"])
-  ' >/dev/null || fail "an underway row did not lead with the task name: $out"
-  pass "an underway row leads with the task name and still reports its run status"
-}
-
-test_an_underway_identifier_label_is_not_replaced_by_run_status() {
-  local home out
-  home=$(make_home underway-identifier)
-  out=$(render_board "$home" '[
-    {"id":"mate/child-1","repo":null,"name":"mate/child-1",
-     "state":"working","kind":"secondmate","doing":"fixing the failing check"}
-  ]' '[]')
-  printf '%s' "$out" | jq -e '
-    (.underway | length) == 1
-      and (.underway[0]
-        | .title == "mate/child-1"
-          and (.sub | startswith("fixing the failing check · "))
-          and (.title != "fixing the failing check"))
-  ' >/dev/null || fail "an identifier-labelled underway row rendered as status-only: $out"
-  pass "an underway identifier label is not replaced by run status"
-}
-
-test_charted_next_reads_newest_filed_first() {
-  local home out
-  home=$(make_home charted-order)
-  out=$(render_board "$home" '[]' '[
-    {"id":"oldest","repo":"sample","title":"Filed in June","reason":"queued","dispatchable":true,"filed":"2026-06-01"},
-    {"id":"newest","repo":"sample","title":"Filed in August","reason":"queued","dispatchable":true,"filed":"2026-08-14T09:30:00Z"},
-    {"id":"middle","repo":"sample","title":"Filed in July","reason":"queued","dispatchable":true,"filed":"2026-07-22"}
-  ]')
-  printf '%s' "$out" | jq -e '
-    [.charted[] | .title] == ["Filed in August", "Filed in July", "Filed in June"]
-  ' >/dev/null || fail "charted next was not ordered newest filed first: $out"
-  pass "charted next renders the most recently filed work first"
-}
-
-test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() {
-  local home out
-  home=$(make_home charted-undated)
-  out=$(render_board "$home" '[]' '[
-    {"id":"undated-first","repo":"sample","title":"Undated one","reason":"queued","dispatchable":true},
-    {"id":"dated","repo":"sample","title":"Dated","reason":"queued","dispatchable":true,"filed":"2026-07-22"},
-    {"id":"undated-second","repo":"sample","title":"Undated two","reason":"queued","dispatchable":true,"filed":null}
-  ]')
-  printf '%s' "$out" | jq -e '
-    [.charted[] | .title] == ["Dated", "Undated one", "Undated two"]
-  ' >/dev/null || fail "undated charted rows did not keep a stable trailing order: $out"
-  pass "charted rows with no filed date follow the dated rows in payload order"
-}
-
 test_full_snapshot_question_reaches_the_rendered_decision() {
   local home a b reason snapshot calls out
   home=$(make_home full-decision-question)
@@ -339,100 +189,6 @@ run_board() {  # <home> <actions>
     || fail "the board could not be exercised with: $2"
 }
 
-CHARTED_TWO='[{"id":"t1","repo":"r","title":"One","reason":"queued","dispatchable":true},
-  {"id":"t2","repo":"r","title":"Two","reason":"queued","dispatchable":true}]'
-
-test_dispatch_picks_survive_a_refresh_with_or_without_browser_storage() {
-  local home out
-  home=$(make_home picks)
-  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
-  run_board "$home" "pick:t1,pick:t2" >/dev/null
-  out=$(run_board "$home" "")
-  printf '%s' "$out" | jq -e '.picks == ["t1","t2"] and .bar.disabled == false and (.bar.count | startswith("2 picked"))' >/dev/null \
-    || fail "a refresh lost the dispatch picks held in browser storage: $out"
-  # A sandboxed frame has no storage, so only Lavish's own restore can bring the picks back.
-  home=$(make_home picks-sandboxed)
-  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
-  NO_STORAGE=1 run_board "$home" "pick:t2" >/dev/null
-  out=$(NO_STORAGE=1 run_board "$home" "load")
-  printf '%s' "$out" | jq -e '.picks == ["t2"] and .bar.disabled == false and (.bar.count | startswith("1 picked"))' >/dev/null \
-    || fail "a sandboxed refresh lost the dispatch picks: $out"
-  # Picks for work that left the chart drop away.
-  build_call_board "$home" '["k1"]' '[{"id":"t1","repo":"r","title":"One","reason":"queued","dispatchable":true}]'
-  out=$(run_board "$home" "")
-  printf '%s' "$out" | jq -e '.picks == []' >/dev/null || fail "a pick for departed work survived: $out"
-  pass "dispatch picks survive a refresh, in a sandboxed frame too, and drop with departed work"
-}
-
-test_a_queued_answer_shows_as_queued_after_a_refresh_and_is_not_queued_twice() {
-  local home out
-  home=$(make_home queued-badge)
-  build_call_board "$home" '["k1","k2"]' "$CHARTED_TWO"
-  NO_STORAGE=1 run_board "$home" "type,submit:k1,pick:t1,dispatch" >/dev/null
-  out=$(NO_STORAGE=1 run_board "$home" "load")
-  printf '%s' "$out" | jq -e '
-    .calls == [] and .bar.queued == true
-      and (.cards | map({key, queued}) == [{key:"k1",queued:true},{key:"k2",queued:false}])
-      and (.queue | sort) == ["dispatch.charted","question:k1"]
-  ' >/dev/null || fail "a refresh did not restore the queued badges, or queued an answer again: $out"
-  pass "a refresh restores the queued badges and queues nothing a second time"
-}
-
-test_an_answer_the_chrome_already_sent_is_not_queued_again() {
-  local home out
-  home=$(make_home sent)
-  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
-  run_board "$home" "type,submit:k1,pick:t1,dispatch,load" >/dev/null
-  # The captain sends the queue from the chrome while the board is open.
-  out=$(run_board "$home" "load,send")
-  printf '%s' "$out" | jq -e '.cards[0].state == "sent" and .cards[0].queued == true and .bar.queued == true and .queue == []' >/dev/null \
-    || fail "the board did not note that the chrome sent the answers: $out"
-  # After a new tab (no chrome queue) the kept copies must not come back.
-  rm -f "$home/storage.json.session.json"
-  out=$(run_board "$home" "load")
-  printf '%s' "$out" | jq -e '.calls == [] and .queue == []' >/dev/null \
-    || fail "an answer already sent was queued again: $out"
-  # A refresh in the same tab keeps showing it as answered and still queues nothing.
-  out=$(run_board "$home" "load")
-  printf '%s' "$out" | jq -e '.calls == [] and .queue == []' >/dev/null || fail "a refresh requeued a sent answer: $out"
-  pass "an answer the chrome already sent is never queued again"
-}
-
-test_an_unsent_answer_is_queued_again_in_a_new_tab_exactly_once() {
-  local home out
-  home=$(make_home requeue)
-  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
-  run_board "$home" "type,submit:k1,pick:t1,dispatch,load" >/dev/null
-  # New tab: the chrome queue is gone, the browser store still has both answers.
-  rm -f "$home/storage.json.session.json"
-  out=$(run_board "$home" "load")
-  printf '%s' "$out" | jq -e '
-    (.calls | length) == 2
-      and ([.calls[].key] | sort) == ["dispatch.charted","question:k1"]
-      and ([.calls[] | select(.key == "question:k1") | .data] == [{schema:"fm-bearings-answer.v1",question:"k1",selection:"a",note:"typed k1"}])
-      and ([.calls[] | select(.key == "dispatch.charted") | .data] == [{question:"dispatch.charted",answer:"t1"}])
-      and .cards[0].queued == true and .bar.queued == true
-  ' >/dev/null || fail "an unsent answer was not queued again in a new tab: $out"
-  # Reloading that same tab finds the answers still queued, so nothing more is queued.
-  out=$(run_board "$home" "load")
-  printf '%s' "$out" | jq -e '.calls == []' >/dev/null || fail "the restored answers were queued twice: $out"
-  pass "an unsent answer is queued again in a new tab exactly once"
-}
-
-test_a_kept_dispatch_order_is_dropped_when_its_work_left_the_chart() {
-  local home out
-  home=$(make_home requeue-departed)
-  build_call_board "$home" '["k1","k2"]' "$CHARTED_TWO"
-  run_board "$home" "type,submit:k1,submit:k2,pick:t1,pick:t2,dispatch,load" >/dev/null
-  build_call_board "$home" '["k1"]' '[{"id":"t1","repo":"r","title":"One","reason":"queued","dispatchable":true}]'
-  rm -f "$home/storage.json.session.json"
-  out=$(run_board "$home" "load")
-  printf '%s' "$out" | jq -e '
-    ([.calls[].key] == ["question:k1"]) and (.storage["fm-bearings-board.queued.v1"] | fromjson | keys) == ["card:k1"]
-  ' >/dev/null || fail "a stale dispatch order or a departed card's answer was queued again: $out"
-  pass "a kept answer for a departed card or for work that left the chart is dropped"
-}
-
 test_every_card_type_renders_its_links() {
   local home data out
   home=$(make_home card-links)
@@ -470,19 +226,38 @@ test_every_card_type_renders_its_links() {
   pass "decision, merge, and credential cards each render their PR and extra links"
 }
 
-test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
-test_an_underway_identifier_label_is_not_replaced_by_run_status
-test_charted_next_reads_newest_filed_first
-test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
-test_a_warning_row_reads_as_a_repair_not_as_queued_work
-test_warnings_are_excluded_from_the_charted_next_count
-test_a_board_of_only_warnings_still_reports_nothing_queued
-test_omitted_warnings_never_count_as_more_queued
-test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
 test_every_card_type_renders_its_links
-test_dispatch_picks_survive_a_refresh_with_or_without_browser_storage
-test_a_queued_answer_shows_as_queued_after_a_refresh_and_is_not_queued_twice
-test_an_answer_the_chrome_already_sent_is_not_queued_again
-test_an_unsent_answer_is_queued_again_in_a_new_tab_exactly_once
-test_a_kept_dispatch_order_is_dropped_when_its_work_left_the_chart
+
+test_board_renders_only_the_captains_call() {
+  local home out
+  home=$(make_home only-call)
+  out=$(render_board "$home" \
+    '[{"id":"u1","name":"Underway one","repo":"r","state":"working","doing":"x","kind":"task"}]' \
+    '[{"id":"c1","repo":"r","title":"Charted one","reason":"queued","dispatchable":true}]' 0 0 \
+    '[{"key":"k1","type":"decision","title":"Decide","repo":"r","options":[],"allow_freeform":true}]')
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.captains_call | length) == 1
+      and .stats == [] and .underway == [] and .charted == []
+  ' >/dev/null || fail "the board rendered more than the Captain's Call: $out"
+  if grep -q 'Recently Landed\|Charted Next\|id="bb-underway"' "$home/.lavish/bearings-board.html"; then
+    fail "the built board still carries a non-decision section"
+  fi
+  pass "the board renders only the Captain's Call decision box"
+}
+
+test_a_long_title_and_about_render_in_full() {
+  local home out title about
+  home=$(make_home long-text)
+  title=$(printf 'T%.0s' $(seq 1 200))
+  about=$(printf 'A%.0s' $(seq 1 400))
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg t "$title" --arg a "$about" \
+    '[{key:"k1",type:"decision",title:$t,about:$a,repo:"r",options:[],allow_freeform:true}]')")
+  printf '%s' "$out" | jq -e --arg t "$title" --arg a "$about" '
+    .error == "" and (.captains_call[0] | contains($t) and contains($a))
+  ' >/dev/null || fail "a long title or about was cut: $out"
+  pass "a long decision title and about text render without a cut"
+}
+
+test_board_renders_only_the_captains_call
+test_a_long_title_and_about_render_in_full
