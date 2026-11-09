@@ -349,6 +349,22 @@ test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards() {
   pass "a wait or park hold is shown as waiting and each decision card leads with its question"
 }
 
+test_a_released_hold_is_not_a_decision_card() {
+  local snap="$TMP_ROOT/released.json" p
+  jq '.decisions_open = [
+        {id: "r1", key: "r1", verb: "captain-hold", title: "Past date", reason: "Pick the rollout", hold_until: "2020-01-01", owner: "(main)"},
+        {id: "r2", key: "r2", verb: "captain-hold", title: "Unheld", reason: "Pick the owner", held: "no", owner: "(main)"},
+        {id: "r3", key: "r3", verb: "captain-hold", title: "Unheld flag", reason: "Pick the date", held: false, owner: "(main)"},
+        {id: "r4", key: "r4", verb: "captain-hold", title: "Future date", reason: "Pick the plan", hold_until: "2999-01-01", owner: "(main)"},
+        {id: "r5", key: "r5", verb: "captain-hold", title: "Active", reason: "Pick the name", held: "yes", owner: "(main)"}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "r5" "$(jq -r '[.captains_call[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "only an active hold stays a decision card"
+  assert_equals "r4" "$(jq -r '[.waiting[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "a hold dated in the future is waiting, never a card"
+  assert_equals "0" "$(jq -r '[.. | objects | select(.key? == "r1" or .key? == "r2" or .key? == "r3")] | length' <<<"$p")" "a released hold appears nowhere on the board"
+  pass "a released hold does not render as a decision card"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -361,4 +377,5 @@ fm_test_run \
   test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
   test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably \
   test_the_priority_digest_is_bounded_and_silent_when_unset \
-  test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards
+  test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards \
+  test_a_released_hold_is_not_a_decision_card
