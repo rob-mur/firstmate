@@ -13,7 +13,11 @@
 //   dispatch        press the dispatch button
 //   load            frame load: restore review state, then report queued anchors
 //   send            the chrome sends every queued prompt, then reports anchors
-// Prints { cards, storage, calls, queue }.
+//   up:<key>        press the move-up button on that key's row in the order list
+//   down:<key>      press the move-down button on that key's row
+//   go              press "Start answering" on the order step
+//   reorder         press "Reorder" on the deck
+// Prints { cards, storage, calls, queue, order }.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const [, , boardPath, storagePath, actionList = ""] = process.argv;
@@ -34,7 +38,11 @@ class Node {
   }
   get textContent() { return this.children.length ? this.children.map((c) => c.textContent).join("") : this._text; }
   set textContent(v) { this._text = String(v); this.children = []; }
-  appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
+  appendChild(n) {
+    if (n.parentNode) n.parentNode.removeChild(n);
+    n.parentNode = this; this.children.push(n); return n;
+  }
+  removeChild(n) { const i = this.children.indexOf(n); if (i >= 0) this.children.splice(i, 1); n.parentNode = null; return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   fire(t) { for (const fn of this.listeners[t] || []) fn({ preventDefault() {} }); }
@@ -130,7 +138,7 @@ const anchors = () => post({ type: "lavish:queuedAnchors", selectors: Object.val
 const scopes = () => {
   const out = [];
   const walk = (n) => { for (const c of n.children) { if (c.attributes["data-lavish-question"]) out.push(c); walk(c); } };
-  for (const id of ["bb-call"]) walk({ children: [byId.get(id)] });
+  for (const id of ["bb-call", "bb-order"]) walk({ children: [byId.get(id)] });
   return out;
 };
 const controls = () => scopes().flatMap((scope) =>
@@ -141,7 +149,8 @@ const controls = () => scopes().flatMap((scope) =>
 
 const forms = () => byId.get("bb-call").querySelectorAll("form");
 for (const act of actionList.split(",").filter(Boolean)) {
-  const [name, arg] = act.split(":");
+  const cut = act.indexOf(":");
+  const [name, arg] = cut < 0 ? [act, undefined] : [act.slice(0, cut), act.slice(cut + 1)];
   if (name === "type") {
     for (const f of forms()) {
       f.querySelector("input[type=radio]").checked = true;
@@ -158,6 +167,13 @@ for (const act of actionList.split(",").filter(Boolean)) {
     }
     post({ type: "lavish:restoreReviewState" });
     anchors();
+  } else if (name === "up" || name === "down") {
+    const row = byId.get("bb-order-list").children.find((r) => r.attributes["data-order-key"] === arg);
+    row.querySelector(name === "up" ? ".bb-order__up" : ".bb-order__down").fire("click");
+  } else if (name === "go") {
+    byId.get("bb-order-go").fire("click");
+  } else if (name === "reorder") {
+    byId.get("bb-reorder").fire("click");
   } else if (name === "send") {
     session.queue = {};
     anchors();
@@ -179,4 +195,11 @@ const cards = forms().map((f) => ({
 }));
 process.stdout.write(JSON.stringify({
   cards, storage: store, calls, queue: Object.keys(session.queue),
+  order: {
+    stepShown: !byId.get("bb-order").hidden,
+    deckShown: !byId.get("bb-callwrap").hidden,
+    list: byId.get("bb-order-list").children.map((r) => r.attributes["data-order-key"]),
+    titles: byId.get("bb-order-list").children.map((r) => r.children[1].children[0].textContent),
+    reorderDisabled: byId.get("bb-reorder").disabled,
+  },
 }) + "\n");
