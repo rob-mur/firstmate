@@ -148,8 +148,13 @@ const call = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
   links: card.findAll((n) => n.tagName === "a")
     .map((a) => ({ href: a.href ?? "", text: a.textContent })),
 }));
+const waitingNode = byId.get("bb-waiting");
+const waiting = {
+  shown: waitingNode ? waitingNode.hidden === false : false,
+  rows: (byId.get("bb-waiting-list") || new Node("div")).children.map((r) => r.textContent),
+};
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, captains_call, underway, charted, call, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, waiting, captains_call, underway, charted, call, empty, more, error: errorText }) + "\n");
