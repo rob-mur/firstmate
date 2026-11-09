@@ -43,7 +43,11 @@ class Node {
       : this._text;
   }
   set textContent(v) { this._text = String(v); this.children = []; }
-  appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
+  appendChild(n) {
+    if (n.parentNode) n.parentNode.removeChild(n);
+    n.parentNode = this; this.children.push(n); return n;
+  }
+  removeChild(n) { const i = this.children.indexOf(n); if (i >= 0) this.children.splice(i, 1); n.parentNode = null; return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
   addEventListener() {}
   findAll(pred) {

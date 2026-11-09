@@ -38,7 +38,7 @@ Load a reference with `cat` through Bash (for example `cat .agents/skills/bearin
 | --- | --- |
 | `references/digest.md` | Every `/bearings` invocation: the gather command, the secondmate reconcile request, composing the digest, and the file-mode report. |
 | `references/chat-contract.md` | Every `/bearings` invocation, before writing the reply: the four sections, empty-states, rules, and report tone. |
-| `references/lavish-board.md` | `/bearings lavish`, or a `procevent lavish` wake whose source id is the bearings board's: payload rules, board wake routing, the merge-click ruling. |
+| `references/lavish-board.md` | `/bearings lavish`, or a `procevent lavish` wake whose source id is the bearings board's: payload rules, board wake routing, the stored task priority and where firstmate reads it, the merge-click ruling. |
 | `references/contributions.md` | A `check: contributions` wake, or filing work linked to an upstream issue. |
 
 A contribution wake or linked-issue filing goes directly to `references/contributions.md`; the digest procedure applies to Bearings invocations only.
