@@ -256,6 +256,13 @@ esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
+# Live board: when a bearings board exists in this home, refresh it in the
+# background if fleet state moved (bin/fm-board-refresh.sh owns every guard).
+# Detached and best effort, so it can never delay or change the drain.
+if [ "$ACTOR" = main ] && [ -z "${ACK_THROUGH:-}" ] && [ -f "$FM_HOME/.lavish/bearings-board.html" ] && [ -x "$SCRIPT_DIR/fm-board-refresh.sh" ]; then
+  ( nohup "$SCRIPT_DIR/fm-board-refresh.sh" >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
+fi
+
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
 # lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
@@ -1184,6 +1191,7 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+[ "$ACTOR" != main ] || FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$SCRIPT_DIR/fm-board-priority.sh" digest 2>/dev/null || true
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"

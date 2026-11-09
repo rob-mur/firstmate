@@ -308,6 +308,23 @@ test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably() {
   pass "the stored priority orders the payload's cards and tasks and records the board's ranking"
 }
 
+test_the_priority_digest_is_bounded_and_silent_when_unset() {
+  local data="$TMP_ROOT/digest-data" out ids PRIO="$ROOT/bin/fm-board-priority.sh"
+  mkdir -p "$data"
+  out=$(FM_DATA_OVERRIDE="$data" "$PRIO" digest) || fail "digest failed with no ranking"
+  [ -z "$out" ] || fail "digest printed with no ranking: $out"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set t2 t1 || fail "set refused ids"
+  out=$(FM_DATA_OVERRIDE="$data" "$PRIO" digest)
+  case "$out" in "CAPTAIN PRIORITY"*) ;; *) fail "digest has no heading: $out" ;; esac
+  [ "$(printf '%s\n' "$out" | sed -n 2p)" = "  1. t2" ] || fail "digest did not lead with the top rank: $out"
+  ids=$(seq -f 'task%g' 1 15)
+  # shellcheck disable=SC2086
+  FM_DATA_OVERRIDE="$data" "$PRIO" set $ids || fail "set refused many ids"
+  out=$(FM_DATA_OVERRIDE="$data" "$PRIO" digest)
+  printf '%s\n' "$out" | grep -q '(3 more ranked' || fail "digest did not bound a long ranking: $out"
+  pass "the priority digest is bounded and silent when unset"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -318,4 +335,5 @@ fm_test_run \
   test_an_unheld_captain_contribution_becomes_a_link_card \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
   test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
-  test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably
+  test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably \
+  test_the_priority_digest_is_bounded_and_silent_when_unset
