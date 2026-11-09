@@ -19,7 +19,10 @@
 #                      titled from the row's full `title_full` (else `title`), `about` from
 #                      its full `reason_full` (else `reason`),
 #                      `pr_url` and `repo` from the PR the task recorded, and a
-#                      freeform answer box (a card with no authored options). The
+#                      derived default choices (bin/fm-bearings-question-lib.sh: yes/no,
+#                      numbered parts, two-way or, else approve/decline; an authored
+#                      overlay `options` still wins) with reconcile secondary, and any
+#                      https URLs in the reason lifted into the card `links`. The
 #                      snapshot already buckets holds, so every row is a live call.
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
@@ -104,6 +107,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+. "$SCRIPT_DIR/fm-bearings-question-lib.sh"  # FM_BEARINGS_QUESTION_JQ_DEFS: the shared question/wait rule
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 
 if [ -z "$SNAPSHOT" ]; then
@@ -153,7 +157,7 @@ overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
 PRIO_JSON=$("$SCRIPT_DIR/fm-board-priority.sh" show 2>/dev/null | jq -R . | jq -s . 2>/dev/null) || PRIO_JSON='[]'
 [ -n "$PRIO_JSON" ] || PRIO_JSON='[]'
 
-jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" --arg today "$(date -u +%Y-%m-%d)" '
+jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" --arg today "$(date -u +%Y-%m-%d)" "$FM_BEARINGS_QUESTION_JQ_DEFS"'
   def card_fields: ["title","about","decide","detail","options","recommend_value","type","close",
                     "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question"];
   def underway_fields: ["repo"];
@@ -182,13 +186,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   | ($snap.landed // []) as $landed_rows
   | (($snap.omitted // []) | map(.surface)) as $omitted
 
-  | def is_wait($d):
-      (($d.reason_full // $d.reason // "") | tostring) as $r
-      | if ($r | test("\\?")) then false
-        elif (($d.hold_until // $d.until // "") | tostring | length) > 0
-             and (($d.hold_until // $d.until) != "-") then true
-        else ($r | test("(^|[^a-z])(parked|paused|on hold|held until|hold until|resume|resuming|waiting (for|on)|wait (for|until|on)|until|re-?runs?)([^a-z]|$)"; "i")) end;
-    def released($d):
+  | def released($d):
       ( ((if $d | has("held") then $d.held else "yes" end) | tostring | ascii_downcase)
         | (. == "no" or . == "false") )
       or ( (($d.hold_until // "") | tostring) as $u
@@ -213,12 +211,15 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                       // ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0])
                       // null ),
               title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
-              options: [],
+              options: default_options($d),
               allow_freeform: true,
               freeform_hint: "answer in your own words (say later to defer)"
             }
             + (if (($d.reason_full // $d.reason) | nz(null)) != null then {question: ($d.reason_full // $d.reason)} else {} end)
-            + (if $pr != null then {pr_url: $pr} else {} end) )
+            + (if $pr != null then {pr_url: $pr} else {} end)
+            + ( [ (($d.reason_full // $d.reason // "") | tostring | scan("https://[^[:space:]<>\"()]+") )
+                  | sub("[.,;:!?]+$"; "") ] | unique | .[:5]
+                | if length > 0 then {links: map({url: ., label: (sub("^https://"; "") | .[:60])})} else {} end ) )
           + overlay("captains_call"; $d.key; card_fields)
           | . as $card
           | select((($copy.captains_call // {}) | has($d.key) | not)
