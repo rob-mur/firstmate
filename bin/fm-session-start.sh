@@ -964,6 +964,7 @@ fi
 stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
+FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-board-priority.sh" digest 2>/dev/null || true
 
 if [ "$REEMIT" -eq 1 ]; then
   # Compact re-emit: one line per task - id, kind, endpoint liveness, and the
