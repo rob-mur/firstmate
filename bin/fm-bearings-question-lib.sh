@@ -24,10 +24,12 @@
 #   4. anything else becomes approve and decline.
 # The board's `build` appends the standard reconcile choice after these, and a
 # payload never authors it.
+# shellcheck disable=SC2016  # jq program text, not shell expansion
 FM_BEARINGS_QUESTION_JQ_DEFS='
   def is_wait($d):
     (($d.reason_full // $d.reason // "") | tostring) as $r
-    | if ($r | test("\\?")) then false
+    | if ($d.verb // "") == "review-ready" then false
+      elif ($r | test("\\?")) then false
       elif (($d.hold_until // $d.until // "") | tostring | length) > 0
            and (($d.hold_until // $d.until) != "-") then true
       else ($r | test("(^|[^a-z])(parked|paused|on hold|held until|hold until|resume|resuming|waiting (for|on)|wait (for|until|on)|until|re-?runs?)([^a-z]|$)"; "i")) end;
@@ -41,7 +43,9 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
     | ($q | sub("^[[:space:]]+"; "") | (split(" ")[0] // "") | ascii_downcase | gsub("[^a-z]"; "")) as $first
     | (($q | (split("?")[0] // "") | split(". ") | (last // "") | split(": ") | (last // "")) as $sentence
        | [ $sentence | split(" or ")[] ]) as $alts
-    | if ($numbered | length) >= 2 then
+    | if ($d.verb // "") == "review-ready" then
+        [{value: "reviewed", label: "Reviewed, carry on"}, {value: "later", label: "Not yet, keep it on the board"}]
+      elif ($numbered | length) >= 2 then
         [ range(0; $numbered | length) as $i
           | {value: ("option-" + (($i + 1) | tostring)), label: $numbered[$i]} ]
       elif ($first | IN("should","shall","do","does","did","can","could","is","are","was","were","will","would","may","might","must","has","have","had","ok","okay","want","need"))
