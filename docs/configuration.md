@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Claude session settings](#claude-session-settings-configclaude-session-settingsjson), [Claude crew settings](#claude-crew-settings-configclaude-crew-settingsjson), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Claude session settings](#claude-session-settings-configclaude-session-settingsjson), [Claude crew settings](#claude-crew-settings-configclaude-crew-settingsjson), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [per-spawn MCP servers](#per-spawn-mcp-servers-configmcp-serversjson), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1705,6 +1705,22 @@ Every spawn, control-plane relaunch, and automatic recovery reads the file again
 After changing a live mate's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
 The file stays in the primary home and is not inherited or copied into the secondmate's home, because a secondmate does not launch secondmates.
 [`bin/fm-omp-profile-lib.sh`](../bin/fm-omp-profile-lib.sh) owns parsing and the refusals.
+
+## Per-spawn MCP servers (config/mcp-servers.json)
+
+The optional local, gitignored `config/mcp-servers.json` defines MCP servers a Claude ship or scout can opt into for one task, so a server that costs many tokens stays out of ordinary sessions yet is available to a worker that needs it.
+It holds the same JSON `claude --mcp-config` accepts:
+
+```json
+{"mcpServers": {"slack": {"type": "http", "url": "https://mcp.slack.com/mcp"}}}
+```
+
+`bin/fm-spawn.sh <id> <project> ... --mcp slack` (repeatable, also `--mcp=slack`) writes only the named entries to `state/<id>.mcp.json` and launches Claude with `--mcp-config <that file>`.
+It does not pass `--strict-mcp-config`: the worker keeps its ordinary MCP configuration and gains the named servers, so the opt-in never removes a server the captain relies on.
+The sorted, comma-joined names are recorded as `mcp=` in `state/<id>.meta` (absent when unused, so ordinary records are unchanged), and every relaunch replays them; `fm-spawn.sh --relaunch` refuses `--mcp` so the record stays the single source.
+A name the file does not define, a missing or malformed file, a malformed name, a non-Claude harness, a raw launch command, a secondmate, or `backend=t3code` refuses before anything is launched.
+The generated file is removed at cleanup.
+OAuth sign-in is not stored in this file; see the task report for where Claude keeps it.
 
 ## Lavish server address (config/lavish-axi-host)
 

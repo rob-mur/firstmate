@@ -2023,6 +2023,98 @@ assert_attribution_policy_absent() {  # <launch-command> <what>
     || fail "$what launch settings JSON still disables Claude attribution: $settings"
 }
 
+write_mcp_servers() {  # <home>
+  cat > "$1/config/mcp-servers.json" <<'JSON'
+{"mcpServers":{"slack":{"type":"http","url":"https://mcp.slack.com/mcp"},"other":{"type":"http","url":"https://example.invalid/mcp"}}}
+JSON
+}
+
+test_mcp_opt_in_passes_only_the_named_servers() {
+  local rec id out status launch file
+  id=mcp-optin-z1
+  rec=$(make_spawn_case mcp-optin claude "$id")
+  read_case_record "$rec"
+  write_mcp_servers "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mcp slack)
+  status=$?
+  expect_code 0 "$status" "claude spawn with --mcp slack should succeed"$'\n'"$out"
+  file="$HOME_DIR/state/$id.mcp.json"
+  [ -f "$file" ] || fail "spawn should write the generated MCP config $file"
+  jq -e '.mcpServers | keys == ["slack"] and .slack.url == "https://mcp.slack.com/mcp"' "$file" >/dev/null \
+    || fail "generated config should hold only the named server: $(cat "$file")"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--mcp-config " "launch should pass --mcp-config"
+  assert_contains "$launch" "$id.mcp.json" "launch should name the generated file"
+  assert_not_contains "$launch" "--strict-mcp-config" "launch must not be strict"
+  assert_grep "mcp=slack" "$HOME_DIR/state/$id.meta" "meta should record the MCP names"
+  pass "--mcp passes only the named server through --mcp-config and records it in meta"
+}
+
+test_mcp_absent_leaves_launch_and_meta_unchanged() {
+  local rec id out status launch
+  id=mcp-absent-z2
+  rec=$(make_spawn_case mcp-absent claude "$id")
+  read_case_record "$rec"
+  write_mcp_servers "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn without --mcp should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--mcp-config" "no --mcp means no --mcp-config"
+  assert_no_regex "^mcp=" "$HOME_DIR/state/$id.meta" "no --mcp means no mcp= meta line"
+  [ ! -e "$HOME_DIR/state/$id.mcp.json" ] || fail "no --mcp means no generated config"
+  pass "a spawn without --mcp is unchanged"
+}
+
+test_mcp_repeatable_records_sorted_names() {
+  local rec id out status
+  id=mcp-multi-z3
+  rec=$(make_spawn_case mcp-multi claude "$id")
+  read_case_record "$rec"
+  write_mcp_servers "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mcp slack --mcp=other)
+  status=$?
+  expect_code 0 "$status" "repeated --mcp should succeed"$'\n'"$out"
+  assert_grep "mcp=other,slack" "$HOME_DIR/state/$id.meta" "meta should record both names"
+  jq -e '.mcpServers | keys == ["other","slack"]' "$HOME_DIR/state/$id.mcp.json" >/dev/null || fail "both servers expected"
+  pass "--mcp is repeatable"
+}
+
+test_mcp_refusals_launch_nothing() {
+  local rec id out status
+  id=mcp-refuse-z4
+  rec=$(make_spawn_case mcp-refuse claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mcp slack)
+  status=$?
+  expect_code 1 "$status" "missing config should refuse"
+  assert_contains "$out" "mcp-servers.json" "refusal should name the config file"
+
+  write_mcp_servers "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mcp nope)
+  status=$?
+  expect_code 1 "$status" "unknown server should refuse"
+  assert_contains "$out" "does not define" "refusal should say the name is unknown"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mcp 'bad name')
+  status=$?
+  expect_code 1 "$status" "malformed name should refuse"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mcp slack --harness codex)
+  status=$?
+  expect_code 1 "$status" "non-claude harness should refuse"
+  assert_contains "$out" "only for a claude harness" "refusal should name the harness limit"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mcp)
+  status=$?
+  expect_code 1 "$status" "valueless --mcp should refuse"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn must not write a task record"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused spawn must not launch anything"
+  pass "--mcp refuses a missing config, unknown or malformed name, non-claude harness, and no value"
+}
+
 test_claude_task_launch_carries_control_channel_authority() {
   local rec id out status launch
   id=profile-claude-control-channel-z21
@@ -3168,6 +3260,10 @@ test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
+test_mcp_opt_in_passes_only_the_named_servers
+test_mcp_absent_leaves_launch_and_meta_unchanged
+test_mcp_repeatable_records_sorted_names
+test_mcp_refusals_launch_nothing
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_long_launch_is_delivered_intact
