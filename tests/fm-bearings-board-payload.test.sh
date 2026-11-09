@@ -365,6 +365,65 @@ test_a_released_hold_is_not_a_decision_card() {
   pass "a released hold does not render as a decision card"
 }
 
+test_every_question_card_gets_real_default_choices() {
+  local snap="$TMP_ROOT/choices.json" copy="$TMP_ROOT/choices-copy.json" p
+  write_snapshot "$TMP_ROOT/choices-base.json"
+  jq '.decisions_open = [
+        {id: "n1", key: "n1", verb: "captain-hold", title: "Two calls", reason: "two calls left: (1) build the separated text dataset as its own PR? (2) actionlint", owner: "(main)"},
+        {id: "y1", key: "y1", verb: "captain-hold", title: "Ship it", reason: "Should we ship the migration this week?", owner: "(main)"},
+        {id: "o1", key: "o1", verb: "captain-hold", title: "Pick one", reason: "Retain the old workflow or migrate to the new runner?", owner: "(main)"},
+        {id: "g1", key: "g1", verb: "captain-hold", title: "Release plan", reason: "Choose the public release name", owner: "(main)"},
+        {id: "a1", key: "a1", verb: "captain-hold", title: "Authored", reason: "Should we ship?", owner: "(main)"}]' \
+    "$TMP_ROOT/choices-base.json" > "$snap"
+  printf '{"captains_call":{"a1":{"options":[{"value":"fast","label":"Fast"}],"recommend_value":"fast"}}}\n' > "$copy"
+  p=$("$GEN" --snapshot "$snap" --copy "$copy") || fail "the generator failed"
+  assert_equals "option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "n1") | [.options[].value] | join(",")' <<<"$p")" "numbered sub-questions become their own choices"
+  assert_equals "build the separated text dataset as its own PR" "$(jq -r '.captains_call[] | select(.key == "n1") | .options[0].label' <<<"$p")" "a numbered choice is labelled with its own text"
+  assert_equals "actionlint" "$(jq -r '.captains_call[] | select(.key == "n1") | .options[1].label' <<<"$p")" "the last numbered choice keeps its text"
+  assert_equals "yes,no" "$(jq -r '.captains_call[] | select(.key == "y1") | [.options[].value] | join(",")' <<<"$p")" "a yes/no question gets yes and no"
+  assert_equals "option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "o1") | [.options[].value] | join(",")' <<<"$p")" "an either-or question splits into its alternatives"
+  assert_equals "Retain the old workflow" "$(jq -r '.captains_call[] | select(.key == "o1") | .options[0].label' <<<"$p")" "an alternative is labelled with its own words"
+  assert_equals "approve,decline" "$(jq -r '.captains_call[] | select(.key == "g1") | [.options[].value] | join(",")' <<<"$p")" "an unrecognizable question still gets approve and decline"
+  assert_equals "fast" "$(jq -r '.captains_call[] | select(.key == "a1") | [.options[].value] | join(",")' <<<"$p")" "authored copy options replace the derived choices"
+  assert_equals "true" "$(jq -r '[.captains_call[] | select(.key | IN("n1","y1","o1","g1","a1")) | (.options | length) > 0 and .allow_freeform] | all' <<<"$p")" "every card has choices and keeps the freeform box"
+  assert_equals "false" "$(jq -r '[.captains_call[].options[]?.value] | any(. == "reconcile")' <<<"$p")" "reconcile is never generated"
+  printf '%s\n' "$p" > "$TMP_ROOT/choices-payload.json"
+  validates "$TMP_ROOT/choices-payload.json" || fail "a payload with derived choices did not satisfy the board validator"
+  pass "every question card gets real default choices and authored options still win"
+}
+
+test_a_task_status_question_becomes_a_card_and_a_wait_a_waiting_row() {
+  local snap="$TMP_ROOT/status.json" p
+  write_snapshot "$TMP_ROOT/status-base.json"
+  jq '.decisions_open += [
+        {id: "slack-scout", key: "status.slack-scout.blocked.default", verb: "blocked", source: "status", task: "slack-scout", decision_key: "default", owner: "(main)",
+         title_full: "slack-scout", reason_full: "Slack MCP tools are missing", question: "Slack MCP tools are missing", summary: "Slack MCP tools are missing"},
+        {id: "mate/fos-rulings", key: "status.mate.fos-rulings.default", verb: "needs-decision", source: "status", task: "fos-rulings", decision_key: "default", owner: "mate",
+         title_full: "fos-rulings", reason_full: "two calls left: (1) build the dataset as its own PR? (2) actionlint", summary: "two calls left"},
+        {id: "mate/parked", key: "status.mate.parked.default", verb: "needs-decision", source: "status", task: "parked", decision_key: "default", owner: "mate",
+         title_full: "parked", reason_full: "waiting for the upstream release", summary: "waiting for the upstream release"}]' \
+    "$TMP_ROOT/status-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "Slack MCP tools are missing" "$(jq -r '.captains_call[] | select(.key == "status.slack-scout.blocked.default") | .question' <<<"$p")" "a blocked task opens as a card with its blocker text"
+  assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "status.slack-scout.blocked.default") | (.options | length) > 0' <<<"$p")" "a blocked task card offers answer choices"
+  assert_equals "option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos-rulings.default") | [.options[].value] | join(",")' <<<"$p")" "a secondmate status question is a card with real choices"
+  assert_equals "status.mate.parked.default" "$(jq -r '[.waiting[] | select(.key | startswith("status."))] | map(.key) | join(",")' <<<"$p")" "a status wait goes to the waiting group"
+  pass "task and secondmate status questions reach the board as cards or waiting rows"
+}
+
+test_urls_in_a_question_become_card_links() {
+  local snap="$TMP_ROOT/urls.json" p
+  write_snapshot "$TMP_ROOT/urls-base.json"
+  jq '.decisions_open = [
+        {id: "u1", key: "u1", verb: "captain-hold", title: "Review", reason: "Should we merge https://github.com/acme/app/pull/7, or wait? <b>x</b> http://insecure.example/x", owner: "(main)"}]' \
+    "$TMP_ROOT/urls-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "https://github.com/acme/app/pull/7" "$(jq -r '.captains_call[0].links | map(.url) | join(",")' <<<"$p")" "an https URL in the question is lifted into the card links, without trailing punctuation"
+  printf '%s\n' "$p" > "$TMP_ROOT/urls-payload.json"
+  validates "$TMP_ROOT/urls-payload.json" || fail "a payload with lifted links did not satisfy the board validator"
+  pass "URLs in a question become clickable card links and plain http is not lifted"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -378,4 +437,7 @@ fm_test_run \
   test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably \
   test_the_priority_digest_is_bounded_and_silent_when_unset \
   test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards \
-  test_a_released_hold_is_not_a_decision_card
+  test_a_released_hold_is_not_a_decision_card \
+  test_every_question_card_gets_real_default_choices \
+  test_a_task_status_question_becomes_a_card_and_a_wait_a_waiting_row \
+  test_urls_in_a_question_become_card_links
