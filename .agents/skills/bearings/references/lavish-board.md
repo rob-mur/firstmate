@@ -10,10 +10,24 @@ It maps the fleet snapshot to the fm-bearings-board.v1 payload deterministically
 Run `bin/fm-bearings-board-payload.sh > <payload.json>` (add `--include-prs` when the digest used live PRs), then `bin/fm-bearings-board.sh build <payload.json>`.
 Add nothing for a plain board.
 The board opens on step 1, one priority list of every Captain's Call item and every task under way, which the captain reorders (drag or arrows), most important first.
-Clicking a decision row opens its card; "Start answering" deals the cards in the list's order; a task under way is a priority-only row with no card.
+Clicking a decision row opens its card; "Start answering" deals the cards in the list's order; a task under way is a priority-only row with no card unless it is blocked or needs a decision, in which case it opens as a question card.
+The "bearings" header on the page links back to the board.
 The list's order survives a refresh and rebuild like a queued answer, and a row added since asks to be placed again.
 `bin/fm-bearings-board-payload.sh` already sorts cards and tasks by the stored priority, so a rebuilt board starts in the captain's order.
-Decision cards arrive as freeform answer boxes; the optional `--copy <overlay.json>` carries only the judgment the snapshot cannot supply, and the generator's header owns its schema:
+Every question card carries real default answer choices derived from its question, and the standard reconcile choice stays secondary.
+A yes/no question gets yes and no, numbered sub-questions become one choice each, a plain two-way "A or B" question gets both sides, and any other question gets approve and decline.
+Authored overlay options still replace the derived ones.
+`bin/fm-bearings-question-lib.sh` owns that derivation and the question-versus-wait rule for the payload and the snapshot.
+URLs in a question lift into the card's links (https only, at most five), and everything else stays escaped text.
+
+Every question the wake drain lists as an open decision reaches the board without `--all-decisions`.
+That covers a needs-decision or blocked status on a task under way and on a secondmate's task, and a captain hold whose reason asks a question even when the snapshot buckets it as blocked or aged.
+Each becomes a card, or a waiting row when it is a wait; a resolved key never shows.
+Status-sourced cards carry the key `status.[<mate>.]<task>.<key>`, and the snapshot row keeps `task`, `decision_key` and `mate`.
+The board's keyed-answer intake announces such a key as skipped, because no main-backlog hold owns it.
+Route the answer from the skipped row: run `FM_HOME=<home of the mate, or this home for a main task> bin/fm-send.sh <task> --resolve-key <decision_key> '<answer>'`, so the answer closes the question on the worker's side as well.
+
+Decision cards otherwise arrive with those choices and a freeform box; the optional `--copy <overlay.json>` carries only the judgment the snapshot cannot supply, and the generator's header owns its schema:
 
 - A card's authored options, `recommend_value`, `decide` and `about` copy, and a `close: "release"` when the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it); question-shaped items omit it.
 - A merge or credential card under `captains_call_extra`: a merge card's key is `merge.<task-id>`, carries `risk`, and puts the one PR it waits on in `pr_url`.

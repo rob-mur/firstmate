@@ -374,3 +374,18 @@ test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
 }
 
 test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
+
+test_the_bearings_header_links_back_to_the_board() {
+  local home page
+  home=$(make_home headerlink)
+  build_call_board "$home" '["k1"]'
+  page="$home/.lavish/bearings-board.html"
+  [ -f "$page" ] || fail "the board page was not built"
+  # The header brand is a real link to the stable board page, so a page opened
+  # from the board returns to it on click.
+  tr '\n' ' ' < "$page" | grep -Eq '<header[^>]*>[[:space:]]*<div[^>]*>[[:space:]]*<a [^>]*href="bearings-board\.html"[^>]*>.*<span class="bb-brand__wm">bearings</span>[[:space:]]*</a>' \
+    || fail "the bearings header is not a link back to the board"
+  pass "the bearings header links back to the board page"
+}
+
+test_the_bearings_header_links_back_to_the_board

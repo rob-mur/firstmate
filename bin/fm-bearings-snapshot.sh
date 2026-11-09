@@ -36,7 +36,11 @@
 # captain hold still contributes each working child as its own Underway row;
 # the home row on secondmates[] keeps the decision and gate classification.
 # Captain-hold placement follows the canonical snapshot's hold_bucket and
-# nothing else; this wrapper never inspects hold reason or body prose. The
+# nothing else, with one exception: a blocked or aged hold whose reason asks a
+# question (contains a question mark) is promoted to decisions_open so a real
+# question is never hidden in a gate bucket. A needs-decision or blocked status
+# on a task under way, main or secondmate, also reaches decisions_open as a
+# source:"status" row with task, decision_key and mate for routing the answer. The
 # buckets are total and mutually exclusive, so every captain hold appears in
 # exactly one decision bucket and none can fall through both. An actively worked
 # held task may also appear in Underway. A "live" hold is a default Captain's Call
@@ -393,8 +397,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       elif length > $n then (if $n == 1 then "…" else (.[:($n - 1)] + "…") end)
       else . end;
   def live_captain_call: .hold_bucket == "live";
+  # A hold whose reason asks a question is a question for the captain wherever the
+  # bucketing put it: blocked and aged holds stay on the board. A dated hold is the
+  # deliberate deferral and stays out until its date.
+  def promoted_question_hold:
+    (.hold_bucket == "blocked" or .hold_bucket == "aged")
+    and ((.hold_reason // .reason_full // .reason // "") | tostring | test("\\?"));
   def projected_deferred_hold:
-    .hold_bucket != null and .hold_bucket != "live";
+    .hold_bucket != null and .hold_bucket != "live" and (promoted_question_hold | not);
   def bounded_blocker_note($n):
     ((.unresolved_blocker_ids // []) | map(tostring)) as $ids
     | reduce range(0; $ids | length) as $i
@@ -431,6 +441,20 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            + ($base | fit($context_n - $title_n)))
         end
       end;
+  # Status-log needs-decision and blocked events are questions for the captain.
+  # Keys reserved for relays and hold mirrors are not (see fm-classify-lib.sh).
+  def status_question_row($owner; $mate; $t; $title):
+    select(.verb == "needs-decision" or .verb == "blocked")
+    | select((.key // "default") | tostring | test("^(pending-reply-|remote-reply-continuity-|captain-hold-)") | not)
+    | (.key // "default") as $k
+    | (("status." + (if $mate == null then "" else $mate + "." end) + $t + "." + $k)
+       | gsub("[^A-Za-z0-9._-]"; "-") | .[:128]) as $slug
+    | {id:(if $mate == null then $t else $mate + "/" + $t end),key:$slug,verb:.verb,
+       source:"status",task:$t,decision_key:$k,mate:$mate,
+       title:($title | trunc(60)),reason:((.summary // "-") | trunc(80)),
+       title_full:$title,reason_full:(.summary // "-"),
+       summary:hold_summary($title; (.summary // "captain decision pending")),
+       question:(.summary // "-"),owner:$owner};
   def as_gate($owner):
     {id, title:(.title | trunc(60)),
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
@@ -529,16 +553,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
-         | select(($all_decisions == 1) or live_captain_call)
+         | select(($all_decisions == 1) or live_captain_call or promoted_question_hold)
          | {id,key:.id,verb:"captain-hold",
             title:(.title | trunc(60)),reason:((.hold_reason // "-") | trunc(80)),
             title_full:(.title // .id),reason_full:(.hold_reason // "-"),
             summary:hold_summary(.title; .hold_reason),
             question:(.title + ": " + .hold_reason),owner:"(main)"} ]
+     + [ .tasks[]? | select(.kind != "secondmate") | . as $t
+         | (.hints.open_decisions // [])[]
+         | status_question_row("(main)"; null; $t.id; ($t.backlog.title // $t.id)) ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
-              | select(($all_decisions == 1) or live_captain_call)
+              | select(($all_decisions == 1) or live_captain_call or promoted_question_hold)
               | {id:($m.id + "/" + .id),key,verb,
                  title:((.summary // .id) | trunc(60)),reason:((.reason // "-") | trunc(80)),
                  title_full:(.title_full // .summary // .id),reason_full:(.reason_full // .reason // "-"),
@@ -557,7 +584,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                    title_full:(.title_full // .title // .id),reason_full:(.hold_reason_full // .hold_reason // "-"),
                    summary:hold_summary((.title // .id);
                                         (.hold_reason // "captain decision pending")),
-                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id} ])[] ]) as $decisions_all
+                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id} ]
+            + [ $m.decisions_open[]?
+                | select(.source == "status")
+                | status_question_row($m.id; $m.id; .id; .id) ])[] ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]
@@ -591,13 +621,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
              (.hold_bucket != null or .state == "queued" or
               (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
-         | select((.hold_bucket == null) or ($all_decisions == 0))
+         | select((.hold_bucket == null) or ($all_decisions == 0 and (promoted_question_hold | not)))
          | as_gate("(main)") ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
          | select(.captain_actionable != true)
-         | select((.hold_bucket == null) or ($all_decisions == 0))
+         | select((.hold_bucket == null) or ($all_decisions == 0 and (promoted_question_hold | not)))
          | as_gate($m.id) ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
