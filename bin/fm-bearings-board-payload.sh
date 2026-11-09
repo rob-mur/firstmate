@@ -153,7 +153,7 @@ overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
 PRIO_JSON=$("$SCRIPT_DIR/fm-board-priority.sh" show 2>/dev/null | jq -R . | jq -s . 2>/dev/null) || PRIO_JSON='[]'
 [ -n "$PRIO_JSON" ] || PRIO_JSON='[]'
 
-jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" '
+jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" --arg today "$(date -u +%Y-%m-%d)" '
   def card_fields: ["title","about","decide","detail","options","recommend_value","type","close",
                     "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question"];
   def underway_fields: ["repo"];
@@ -188,7 +188,12 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         elif (($d.hold_until // $d.until // "") | tostring | length) > 0
              and (($d.hold_until // $d.until) != "-") then true
         else ($r | test("(^|[^a-z])(parked|paused|on hold|held until|hold until|resume|resuming|waiting (for|on)|wait (for|until|on)|until|re-?runs?)([^a-z]|$)"; "i")) end;
-    ( [ $snap.decisions_open[]? ]
+    def released($d):
+      ( ((if $d | has("held") then $d.held else "yes" end) | tostring | ascii_downcase)
+        | (. == "no" or . == "false") )
+      or ( (($d.hold_until // "") | tostring) as $u
+           | ($u | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")) and (($u[:10]) <= $today) );
+    ( [ $snap.decisions_open[]? | select(released(.) | not) ]
       | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end) ) as $held
   | ( [ $held[] | select(is_wait(.) | not) ] ) as $question_rows
   | ( [ $held[] | select(is_wait(.))
