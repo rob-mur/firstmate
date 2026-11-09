@@ -40,7 +40,12 @@
 # question (contains a question mark) is promoted to decisions_open so a real
 # question is never hidden in a gate bucket. A needs-decision or blocked status
 # on a task under way, main or secondmate, also reaches decisions_open as a
-# source:"status" row with task, decision_key and mate for routing the answer. The
+# source:"status" row with task, decision_key and mate for routing the answer. A
+# secondmate question the parent status log shows (the wake drain's open
+# decisions) is read from the parent task itself, so it reaches the board even
+# when the home summary is invalid; it is skipped only when the home is valid
+# with no active work, or already lists the same key. A finished task whose last
+# event names a live review page becomes a source:"review-page" row. The
 # buckets are total and mutually exclusive, so every captain hold appears in
 # exactly one decision bucket and none can fall through both. An actively worked
 # held task may also appear in Underway. A "live" hold is a default Captain's Call
@@ -467,6 +472,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        title_full:$title,reason_full:(.summary // "-"),
        summary:hold_summary($title; (.summary // "captain decision pending")),
        question:(.summary // "-"),owner:$owner};
+  # A finished task whose last event names a live Lavish review page is a page
+  # the captain has not opened yet: it is a question card linking to that page.
+  def review_page_row($t):
+    (($t.hints.last_event_text // "") | sub("^[a-z-]+ (\\[at=[0-9]+\\])?:? ?"; "")) as $text
+    | select(($t.current_state.state // "") == "done")
+    | select($text | test("https?://[^[:space:]]+/session/[0-9a-f]{8,}"))
+    | ($t.backlog.title // $t.id) as $title
+    | {id:$t.id,key:(("review." + $t.id) | gsub("[^A-Za-z0-9._-]"; "-") | .[:128]),
+       verb:"review-ready",source:"review-page",task:$t.id,decision_key:null,mate:null,
+       title:($title | trunc(60)),reason:($text | trunc(80)),
+       title_full:$title,reason_full:$text,
+       summary:hold_summary($title; $text),
+       question:("Review page ready: " + $text),owner:"(main)"};
   def as_gate($owner):
     {id, title:(.title | trunc(60)),
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
@@ -575,9 +593,24 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             title_full:(.title // .id),reason_full:(.hold_reason // "-"),
             summary:hold_summary(.title; .hold_reason),
             question:(.title + ": " + .hold_reason),owner:"(main)"} ]
-     + [ .tasks[]? | select(.kind != "secondmate") | . as $t
+     + [ . as $root | .tasks[]? | . as $t
+         # A secondmate home that is valid and reports no active work is
+         # authoritative: a parent-log question for it is stale (contradiction
+         # evidence only). Any other state keeps the drain-visible question.
+         | select($t.kind != "secondmate"
+                  or ([ ($root.secondmate_current.records // [])[]
+                        | select(.id == $t.id and .provenance.summary_valid == true
+                                 and .current.state == "no_active_work") ] | length) == 0)
+         # The same decision already carried by the home own status log is not
+         # listed twice.
          | (.hints.open_decisions // [])[]
-         | status_question_row("(main)"; null; $t.id; ($t.backlog.title // $t.id)) ]
+         | select($t.kind != "secondmate"
+                  or (.key as $k | [ ($root.secondmate_current.records // [])[]
+                        | select(.id == $t.id) | .decisions_open[]?
+                        | select(.source == "status" and .key == $k) ] | length) == 0)
+         | status_question_row((if $t.kind == "secondmate" then $t.id else "(main)" end);
+                               null; $t.id; ($t.backlog.title // $t.id)) ]
+     + [ .tasks[]? | . as $t | review_page_row($t) ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")

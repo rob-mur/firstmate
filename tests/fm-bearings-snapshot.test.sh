@@ -3549,6 +3549,7 @@ test_a_resolved_status_question_is_not_a_board_row() {
   home=$(make_home status-resolved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
   printf 'needs-decision [key=race]: pick subscribe order\nresolved [key=race]: answered: A\n' > "$mate/state/mate.status"
+  printf 'needs-decision [key=race]: pick subscribe order\nresolved [key=race]: answered: A\n' > "$home/state/mate.status"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
@@ -3577,6 +3578,45 @@ test_a_question_hold_in_a_hidden_bucket_still_reaches_the_board() {
       and (.gates | any(.[]; .id == "aged-plain"))
   ' >/dev/null || fail "a bucketed question hold did not reach the board while the plain one stayed gated: $json"
   pass "a question hold in the aged bucket reaches decisions_open without --all-decisions"
+}
+
+# Real shape (round 2): the questions the wake drain lists for a secondmate live
+# in the parent's own status log for that secondmate, whatever its home summary
+# says. They reach the board even when the home is unreadable.
+test_secondmate_questions_from_the_parent_log_survive_an_invalid_home() {
+  local home mate fakebin json
+  home=$(make_home mate-parent-log); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  printf 'needs-decision [key=round5]: Grilling round 5 is on http://dev-1.tailf848b0.ts.net:4387/session/988b504d3271c0ea - (1) run the baseline (2) pick models\nneeds-decision [key=captain-hold-mirror-1]: mirror of a hold\nneeds-decision [key=default]: pick one\nresolved [key=default]: answered\n' \
+    > "$home/state/mate.status"
+  rm -rf "$mate"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .key == "status.mate.round5" and .source == "status"
+        and .task == "mate" and .decision_key == "round5" and .owner == "mate"))
+      and (.decisions_open | any(.[]; (.key | test("captain-hold-mirror")) or .decision_key == "default") | not)
+  ' >/dev/null || fail "a secondmate question from the parent log did not reach the board: $json"
+  pass "secondmate questions from the parent status log reach decisions_open even with an unreadable home"
+}
+
+# A finished task whose last event names a live review page is a card.
+test_a_ready_review_page_is_a_board_row() {
+  local home fakebin json
+  home=$(make_home review-page); write_fixture "$home"
+  printf 'done [at=1794236580]: report at data/scout-x/report.md; understand board live at http://dev-1.tailf848b0.ts.net:4387/session/5e96b7b8f3b4f9db. ask devops first.\n' \
+    > "$home/state/scout-x.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .decisions_open | any(.[]; .key == "review.scout-x" and .source == "review-page" and .verb == "review-ready"
+      and (.reason_full | contains("/session/5e96b7b8f3b4f9db")))
+  ' >/dev/null || fail "a ready review page did not become a row: $json"
+  printf 'done [at=1794236580]: report at data/scout-x/report.md\n' > "$home/state/scout-x.status"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '.decisions_open | any(.[]; .key == "review.scout-x") | not' >/dev/null \
+    || fail "a done task without a page became a row: $json"
+  pass "a done task naming a live review page is a board row, one without a page is not"
 }
 
 fm_test_run \
@@ -3644,5 +3684,7 @@ fm_test_run \
   test_per_repository_pr_cap_is_disclosed \
   test_projection_and_toon_fail_closed \
   test_status_questions_reach_decisions_open_with_routing_fields \
+  test_secondmate_questions_from_the_parent_log_survive_an_invalid_home \
+  test_a_ready_review_page_is_a_board_row \
   test_a_resolved_status_question_is_not_a_board_row \
   test_a_question_hold_in_a_hidden_bucket_still_reaches_the_board
