@@ -1531,7 +1531,7 @@ test_section_caps_and_expansion_flags() {
     (.in_flight|length) == 2 and (.decisions_open|length) == 2 and (.gates|length) == 2
     and (.reports|length) == 2 and (.recorded_prs|length) == 2 and (.unhealthy_endpoints|length) == 2
     and ([.omitted[].surface] | index("in_flight showing 2 of 5") != null)
-    and ([.omitted[].surface] | index("decisions_open showing 2 of 5") != null)
+    and ([.omitted[].surface] | index("decisions_open showing 2 of 10") != null)
     and ([.omitted[].surface] | index("gates showing 2 of 5") != null)
     and ([.omitted[].surface] | index("reports showing 2 of 5") != null)
     and ([.omitted[].surface] | index("recorded_prs showing 2 of 5") != null)
@@ -1542,7 +1542,7 @@ test_section_caps_and_expansion_flags() {
     run "$home" "$fakebin" --json --all-in-flight --all-decisions --all-queued \
       --all-reports --all-recorded-prs --all-unhealthy)
   printf '%s' "$expanded" | jq -e '
-    (.in_flight|length) == 5 and (.decisions_open|length) == 5 and (.gates|length) == 5
+    (.in_flight|length) == 5 and (.decisions_open|length) == 10 and (.gates|length) == 5
     and (.reports|length) == 5 and (.recorded_prs|length) == 5 and (.unhealthy_endpoints|length) == 5
   ' >/dev/null || fail "section expansion flags did not reveal full sets: $expanded"
   pass "all fleet-sized sections are capped with counted opt-in expansion"
@@ -2124,7 +2124,7 @@ test_live_blocker_is_not_charted_queue_work() {
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.in_flight | any(.[]; .id == "ship-task" and .state == "blocked"))
-      and (.decisions_open | any(.[]; .id == "ship-task") | not)
+      and (.decisions_open | any(.[]; .id == "ship-task" and .source == "status" and .verb == "blocked"))
       and (.gates | any(.[]; .id == "ship-task") | not)
   ' >/dev/null || fail "live blocked work was projected as queued/deferred work: $json"
   pass "Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work"
@@ -2142,7 +2142,7 @@ test_captains_call_anti_leak() {
   json=$(run "$home" "$fakebin" --json)
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   jq -n -e --argjson bearings "$json" --argjson canonical "$canonical" '
-    ([$bearings.decisions_open[].id] == ["mate/mate-decision-race"])
+    (([$bearings.decisions_open[].id] | sort) == ["mate/mate", "mate/mate-decision-race"])
       and ($canonical.secondmate_current.records[] | select(.id == "mate")
         | (.decisions_open | any(.source == "status"))
           and (.decisions_open | any(.source == "backlog")))
@@ -3520,6 +3520,65 @@ test_supplied_secondmate_questions_and_legacy_optional_fields() {
   pass "supplied secondmate questions preserve text with missing optional fields"
 }
 
+# A blocked or needs-decision status on a task under way, or on a task in a
+# secondmate home, is a question for the captain: it reaches decisions_open as a
+# status-sourced row with a unique board key and the routing fields an answer needs.
+# Keys reserved for relays and hold mirrors never become cards.
+test_status_questions_reach_decisions_open_with_routing_fields() {
+  local home fakebin json
+  home=$(make_home status-questions); write_fixture "$home"
+  printf 'blocked [key=synthetic-dependency]: Slack MCP tools are missing\n' > "$home/state/ship-task.status"
+  printf 'needs-decision [key=captain-hold-mirror]: mirror of a hold\nneeds-decision [key=pending-reply-abc]: relay\n' > "$home/state/scout-x.status"
+  record_claude_state "$home/state" ship-task idle
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .key == "status.ship-task.synthetic-dependency" and .source == "status"
+        and .task == "ship-task" and .decision_key == "synthetic-dependency" and .mate == null
+        and .owner == "(main)" and .question == "Slack MCP tools are missing"))
+      and (.decisions_open | any(.[]; .key == "status.mate.mate.race" and .source == "status"
+        and .task == "mate" and .decision_key == "race" and .mate == "mate" and .owner == "mate"))
+      and (.decisions_open | any(.[]; (.key | test("captain-hold-mirror|pending-reply")) ) | not)
+      and (.gates | any(.[]; .id == "ship-task") | not)
+  ' >/dev/null || fail "status questions did not reach decisions_open with routing fields: $json"
+  pass "blocked and needs-decision status questions reach decisions_open, reserved relay keys excluded"
+}
+
+test_a_resolved_status_question_is_not_a_board_row() {
+  local home mate fakebin json
+  home=$(make_home status-resolved); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  printf 'needs-decision [key=race]: pick subscribe order\nresolved [key=race]: answered: A\n' > "$mate/state/mate.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .source == "status" and .decision_key == "race") | not)
+  ' >/dev/null || fail "a resolved status question stayed on the board: $json"
+  pass "a resolved status question is absent from decisions_open"
+}
+
+# A hold whose reason asks a question is a real question wherever the bucketing
+# put it: it reaches decisions_open without --all-decisions and leaves the gates,
+# while a non-question aged hold stays bucketed.
+test_a_question_hold_in_a_hidden_bucket_still_reaches_the_board() {
+  local home fakebin json
+  home=$(make_home bucketed-question); write_fixture "$home"
+  sed -i '/^## Queued/a\
+- [ ] aged-question - Aged real question (repo: firstmate) (kind: captain) (since 2026-06-01) (hold: should we ship the aged migration?) (hold-kind: captain)\
+  Captain hold set: 2026-06-01T00:00:00Z\
+- [ ] aged-plain - Aged plain hold (repo: firstmate) (kind: captain) (since 2026-06-01) (hold: choose a sample route) (hold-kind: captain)\
+  Captain hold set: 2026-06-01T00:00:00Z' "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "aged-question" and .verb == "captain-hold"))
+      and (.gates | any(.[]; .id == "aged-question") | not)
+      and (.decisions_open | any(.[]; .id == "aged-plain") | not)
+      and (.gates | any(.[]; .id == "aged-plain"))
+  ' >/dev/null || fail "a bucketed question hold did not reach the board while the plain one stayed gated: $json"
+  pass "a question hold in the aged bucket reaches decisions_open without --all-decisions"
+}
+
 fm_test_run \
   test_full_captain_questions_survive_local_and_secondmate_projection \
   test_supplied_secondmate_questions_and_legacy_optional_fields \
@@ -3583,4 +3642,7 @@ fm_test_run \
   test_revealed_deferred_holds_show_their_deferral_reason \
   test_pr_repository_cap_and_expansion \
   test_per_repository_pr_cap_is_disclosed \
-  test_projection_and_toon_fail_closed
+  test_projection_and_toon_fail_closed \
+  test_status_questions_reach_decisions_open_with_routing_fields \
+  test_a_resolved_status_question_is_not_a_board_row \
+  test_a_question_hold_in_a_hidden_bucket_still_reaches_the_board

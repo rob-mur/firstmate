@@ -125,7 +125,7 @@ a { color: inherit; text-decoration: none; }
   max-width: var(--container-app); margin: 0 auto; padding: 0 28px; height: 64px;
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
 }
-.bb-brand { display: inline-flex; align-items: center; gap: 12px; }
+.bb-brand { display: inline-flex; align-items: center; gap: 12px; color: inherit; text-decoration: none; cursor: pointer; }
 .bb-brand__disc {
   display: grid; place-items: center; width: 34px; height: 34px; flex: none;
   border-radius: 999px; background: var(--rust-500); color: var(--paper-000);
@@ -305,14 +305,14 @@ a { color: inherit; text-decoration: none; }
 
 <header class="bb-nav">
   <div class="bb-nav__inner">
-    <span class="bb-brand">
+    <a class="bb-brand" href="bearings-board.html" title="Back to the board">
       <span class="bb-brand__disc">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 6v16"/><path d="m19 13 2-1a9 9 0 0 1-18 0l2 1"/><path d="M9 11h6"/><circle cx="12" cy="4" r="2"/>
         </svg>
       </span>
       <span class="bb-brand__wm">bearings</span>
-    </span>
+    </a>
   </div>
 </header>
 
