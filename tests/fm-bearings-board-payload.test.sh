@@ -424,6 +424,22 @@ test_urls_in_a_question_become_card_links() {
   pass "URLs in a question become clickable card links and plain http is not lifted"
 }
 
+test_a_tailnet_review_page_link_and_a_review_card_get_choices() {
+  local snap="$TMP_ROOT/review.json" p
+  write_snapshot "$TMP_ROOT/review-base.json"
+  jq '.decisions_open = [
+        {id: "rv", key: "review.rv", verb: "review-ready", source: "review-page", title: "Understand request", reason: "report ready; understand board live at http://dev-1.tailf848b0.ts.net:4387/session/5e96b7b8f3b4f9db. ask devops first", owner: "(main)"},
+        {id: "q", key: "q", verb: "needs-decision", source: "status", title: "Round", reason: "Round on http://dev-1.tailf848b0.ts.net:4387/session/988b504d3271c0ea - (1) run it now (2) pick models; also http://evil.example/x", owner: "mate"}]' \
+    "$TMP_ROOT/review-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "reviewed,later" "$(jq -r '.captains_call[] | select(.key == "review.rv") | .options | map(.value) | join(",")' <<<"$p")" "a review-ready card offers reviewed and later"
+  assert_equals "http://dev-1.tailf848b0.ts.net:4387/session/5e96b7b8f3b4f9db" "$(jq -r '.captains_call[] | select(.key == "review.rv") | .links[0].url' <<<"$p")" "the tailnet review page is lifted into the links"
+  assert_equals "http://dev-1.tailf848b0.ts.net:4387/session/988b504d3271c0ea" "$(jq -r '.captains_call[] | select(.key == "q") | .links | map(.url) | join(",")' <<<"$p")" "only the tailnet origin is lifted among http URLs"
+  printf '%s\n' "$p" > "$TMP_ROOT/review-payload.json"
+  validates "$TMP_ROOT/review-payload.json" || fail "a payload with a tailnet link did not satisfy the board validator"
+  pass "a ready review page is a card with reviewed/later choices and a clickable tailnet link"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -440,4 +456,5 @@ fm_test_run \
   test_a_released_hold_is_not_a_decision_card \
   test_every_question_card_gets_real_default_choices \
   test_a_task_status_question_becomes_a_card_and_a_wait_a_waiting_row \
-  test_urls_in_a_question_become_card_links
+  test_urls_in_a_question_become_card_links \
+  test_a_tailnet_review_page_link_and_a_review_card_get_choices
