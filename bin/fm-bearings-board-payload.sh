@@ -22,7 +22,7 @@
 #                      derived default choices (bin/fm-bearings-question-lib.sh: yes/no,
 #                      numbered parts, two-way or, else approve/decline; an authored
 #                      overlay `options` still wins) with reconcile secondary, and any
-#                      https URLs in the reason lifted into the card `links`. The
+#                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`. The
 #                      snapshot already buckets holds, so every row is a live call.
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
@@ -217,9 +217,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
             }
             + (if (($d.reason_full // $d.reason) | nz(null)) != null then {question: ($d.reason_full // $d.reason)} else {} end)
             + (if $pr != null then {pr_url: $pr} else {} end)
-            + ( [ (($d.reason_full // $d.reason // "") | tostring | scan("https://[^[:space:]<>\"()]+") )
+            + ( [ (($d.reason_full // $d.reason // "") | tostring | scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") )
                   | sub("[.,;:!?]+$"; "") ] | unique | .[:5]
-                | if length > 0 then {links: map({url: ., label: (sub("^https://"; "") | .[:60])})} else {} end ) )
+                | if length > 0 then {links: map({url: ., label: (sub("^https?://"; "") | .[:60])})} else {} end ) )
           + overlay("captains_call"; $d.key; card_fields)
           | . as $card
           | select((($copy.captains_call // {}) | has($d.key) | not)

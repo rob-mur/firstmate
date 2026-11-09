@@ -389,3 +389,32 @@ test_the_bearings_header_links_back_to_the_board() {
 }
 
 test_the_bearings_header_links_back_to_the_board
+
+test_card_links_wrap_and_the_about_text_is_readable_and_unclipped() {
+  local home page css
+  home=$(make_home cardlayout)
+  build_call_board "$home" '["k1"]'
+  page="$home/.lavish/bearings-board.html"
+  [ -f "$page" ] || fail "the board page was not built"
+  css=$(cat "$page")
+  # Each card link sits on its own line and wraps; a long URL breaks rather
+  # than being clipped.
+  printf '%s' "$css" | grep -E '^\.bb-decision__link ' | grep -Eq 'display: *block' \
+    || fail "a card link is not its own block"
+  if printf '%s' "$css" | grep -E '^\.bb-decision__link ' | grep -Eq 'nowrap|ellipsis|overflow: *hidden'; then
+    fail "a card link is still clipped"
+  fi
+  printf '%s' "$css" | grep -E '^\.bb-decision__link ' | grep -Eq 'overflow-wrap: *anywhere' \
+    || fail "a long card link does not break"
+  # The about text is shown in full and is not smaller than the card title is large.
+  if printf '%s' "$css" | grep -E '^\.bb-ctx__v ' | grep -Eq 'ellipsis|line-clamp|nowrap|overflow: *hidden'; then
+    fail "the about text is clipped"
+  fi
+  printf '%s' "$css" | grep -E '^\.bb-ctx__v ' | grep -Eq 'font-size: *var\(--fs-base\)' \
+    || fail "the about text is not base size"
+  printf '%s' "$css" | grep -E '^\.bb-decision__title ' | grep -Eq 'font-size: *var\(--fs-base\)' \
+    || fail "the card title is still oversized"
+  pass "card links wrap one per line and the about text is full and readable"
+}
+
+test_card_links_wrap_and_the_about_text_is_readable_and_unclipped
