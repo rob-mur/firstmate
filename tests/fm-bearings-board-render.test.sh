@@ -149,11 +149,11 @@ test_full_snapshot_question_reaches_the_rendered_decision
 
 # Build a board with the given Captain's Call keys and run it under the drafts
 # harness against a storage file shared across builds.
-build_call_board() {  # <home> <keys-json> [charted-json]
+build_call_board() {  # <home> <keys-json> [charted-json] [underway-json]
   local home=$1 data="$1/payload.json"
-  jq -n --argjson keys "$2" --argjson charted "${3:-[]}" '{
+  jq -n --argjson keys "$2" --argjson charted "${3:-[]}" --argjson underway "${4:-[]}" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, underway:[], landed:[], charted:$charted, charted_more:0, charted_warning_more:0,
+    prs_live:false, underway:$underway, landed:[], charted:$charted, charted_more:0, charted_warning_more:0,
     captains_call:[$keys[] | {key:., type:"decision", title:("Card " + .), repo:"r",
       about:"a", decide:"d", allow_freeform:true,
       options:[{value:"a",label:"A"},{value:"b",label:"B"}]}]}' > "$data"
@@ -178,7 +178,7 @@ test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards() {
     (.cards | map(.key)) == ["k1","k3"]
       and .cards[0].selection == "a" and .cards[0].note == "typed k1"
       and .cards[1].selection == "" and .cards[1].note == ""
-      and ((.storage | to_entries[0].value | fromjson | keys) == ["k1"])
+      and ((.storage["fm-bearings-board.drafts.v1"] | fromjson | keys) == ["k1"])
   ' >/dev/null || fail "a rebuild lost or kept the wrong in-progress input: $out"
   pass "a rebuild keeps in-progress answers for surviving cards and drops departed ones"
 }
@@ -261,3 +261,89 @@ test_a_long_title_and_about_render_in_full() {
 
 test_board_renders_only_the_captains_call
 test_a_long_title_and_about_render_in_full
+
+test_the_board_lists_every_decision_for_reordering_before_the_cards() {
+  local home out
+  home=$(make_home reorder)
+  build_call_board "$home" '["k1","k2","k3"]'
+  out=$(run_board "$home" "")
+  printf '%s' "$out" | jq -e '
+    .order.stepShown and (.order.deckShown | not)
+      and .order.list == ["k1","k2","k3"]
+      and .order.titles == ["Card k1","Card k2","Card k3"]
+  ' >/dev/null || fail "the board did not open on the reorderable list: $out"
+  out=$(run_board "$home" "down:k1,down:k1,down:k2,up:k2,go")
+  printf '%s' "$out" | jq -e '
+    (.order.stepShown | not) and .order.deckShown
+      and .order.list == ["k2","k3","k1"]
+      and (.cards | map(.key)) == ["k2","k3","k1"]
+  ' >/dev/null || fail "the chosen order did not become the card order: $out"
+  pass "the board opens on one reorderable list and deals the cards in the chosen order"
+}
+
+test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh() {
+  local home out
+  home=$(make_home reorder-answers)
+  build_call_board "$home" '["k1","k2","k3"]'
+  run_board "$home" "down:k1,down:k1,go,type" >/dev/null
+  out=$(run_board "$home" "submit:k1,submit:k3,submit:k2")
+  printf '%s' "$out" | jq -e '
+    (.calls | map(.data | {question, order, order_total}) | sort_by(.order)) == [
+      {question:"k2", order:1, order_total:3},
+      {question:"k3", order:2, order_total:3},
+      {question:"k1", order:3, order_total:3}]
+    and (.calls | all(.prompt | test("priority [123] of 3")))
+    and (.calls | all(.data.schema == "fm-bearings-answer.v1"))
+  ' >/dev/null || fail "answers did not carry the chosen order: $out"
+  # A new tab keeps the order, goes straight to the cards, and the reorder
+  # control is held while answers are queued.
+  rm -f "$home/storage.json.session.json"
+  out=$(run_board "$home" "load")
+  printf '%s' "$out" | jq -e '
+    (.cards | map(.key)) == ["k2","k3","k1"] and .order.deckShown and (.order.stepShown | not)
+  ' >/dev/null || fail "the chosen order did not survive a refresh: $out"
+  # A rebuild with an extra card puts the list back so the new card is placed.
+  build_call_board "$home" '["k1","k2","k3","k4"]'
+  out=$(run_board "$home" "")
+  printf '%s' "$out" | jq -e '
+    .order.stepShown and .order.list == ["k2","k3","k1","k4"]
+  ' >/dev/null || fail "a new card was not offered for placement: $out"
+  pass "answers carry their priority and the order survives a refresh and a rebuild"
+}
+
+test_the_order_survives_a_refresh_without_browser_storage() {
+  local home out
+  home=$(make_home reorder-nostorage)
+  build_call_board "$home" '["k1","k2"]'
+  NO_STORAGE=1 run_board "$home" "down:k1,go,load" >/dev/null
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e '
+    (.cards | map(.key)) == ["k2","k1"] and .order.deckShown
+  ' >/dev/null || fail "a sandboxed refresh lost the chosen order: $out"
+  pass "the chosen order is restored through Lavish's form state when storage is blocked"
+}
+
+test_the_board_lists_every_decision_for_reordering_before_the_cards
+test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh
+test_the_order_survives_a_refresh_without_browser_storage
+
+test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording() {
+  local home out
+  home=$(make_home priority)
+  build_call_board "$home" '["k1","k2"]' '[]' \
+    '[{"repo":"r","name":"Build it","id":"t1","state":"working","doing":"tests","kind":"ship"}]'
+  out=$(run_board "$home" "")
+  printf '%s' "$out" | jq -e '
+    .order.stepShown and .order.list == ["k1","k2","task:t1"]
+      and (.cards | map(.key)) == ["k1","k2"]
+  ' >/dev/null || fail "the list did not include the task under way: $out"
+  out=$(run_board "$home" "up:task:t1,go")
+  printf '%s' "$out" | jq -e '
+    .order.list == ["k1","task:t1","k2"] and (.cards | map(.key)) == ["k1","k2"]
+      and (.calls | map(select(.data.schema == "fm-bearings-priority.v1")) | length) == 1
+      and (.calls | map(select(.data.schema == "fm-bearings-priority.v1"))[0].data.keys) == ["k1","t1","k2"]
+  ' >/dev/null || fail "the priority was not sent with the chosen order: $out"
+  pass "the board ranks tasks and decisions together and sends the priority for recording"
+}
+
+test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording

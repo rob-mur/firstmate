@@ -279,6 +279,35 @@ test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http()
   pass "the validator accepts https and the tailnet origin only, refusing every other http link"
 }
 
+test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably() {
+  local snap="$TMP_ROOT/prio-snap.json" data="$TMP_ROOT/prio-data" out ctx="$TMP_ROOT/prio-ctx.json"
+  local PRIO="$ROOT/bin/fm-board-priority.sh"
+  write_snapshot "$snap"
+  mkdir -p "$data"
+  out=$("$GEN" --snapshot "$snap")
+  [ "$(jq -c '[.captains_call[0].key, .underway[0].id]' <<<"$out")" = '["alpha-fix","t1"]' ] \
+    || fail "the default order changed without a priority: $out"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set old-row alpha-fix old-row t1 || fail "set refused a valid ranking"
+  [ "$(FM_DATA_OVERRIDE="$data" "$PRIO" show | paste -sd, -)" = "old-row,alpha-fix,t1" ] || fail "the ranking was not stored in order without duplicates"
+  [ "$(FM_DATA_OVERRIDE="$data" "$PRIO" rank alpha-fix)" = 2 ] || fail "rank did not report the stored position"
+  [ "$(FM_DATA_OVERRIDE="$data" "$PRIO" rank nope)" = - ] || fail "rank did not report an unranked id"
+  out=$(FM_DATA_OVERRIDE="$data" "$GEN" --snapshot "$snap")
+  [ "$(jq -r '.captains_call[0].key' <<<"$out")" = old-row ] || fail "the payload did not honor the stored priority for cards: $out"
+  [ "$(jq -r '.underway[0].id' <<<"$out")" = alpha-fix ] || fail "the payload did not rank the underway tasks by priority"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set t1 || fail "set refused one id"
+  out=$(FM_DATA_OVERRIDE="$data" "$GEN" --snapshot "$snap")
+  [ "$(jq -r '.underway[0].id' <<<"$out")" = t1 ] || fail "ranked task did not lead underway"
+  [ "$(jq -r '.captains_call[0].key' <<<"$out")" = alpha-fix ] || fail "unranked cards lost their snapshot order"
+  printf '{"schema":"fm-bearings-priority.v1","keys":["alpha-fix","t1"],"order":[]}' > "$ctx"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set --from-ctx "$ctx" || fail "the board's priority context was refused"
+  [ "$(FM_DATA_OVERRIDE="$data" "$PRIO" show | paste -sd, -)" = "alpha-fix,t1" ] || fail "--from-ctx did not record the board's ranking"
+  printf '{"schema":"other","keys":["x"]}' > "$ctx"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set --from-ctx "$ctx" 2>/dev/null && fail "a foreign context was accepted"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set 'bad id' 2>/dev/null && fail "an invalid id was accepted"
+  [ "$(FM_DATA_OVERRIDE="$data" "$PRIO" show | paste -sd, -)" = "alpha-fix,t1" ] || fail "a refused set changed the stored ranking"
+  pass "the stored priority orders the payload's cards and tasks and records the board's ranking"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -288,4 +317,5 @@ fm_test_run \
   test_copy_overlay_cannot_change_the_payload_shape \
   test_an_unheld_captain_contribution_becomes_a_link_card \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
-  test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http
+  test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
+  test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably

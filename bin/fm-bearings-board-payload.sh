@@ -40,6 +40,9 @@
 #                   -> charted warning rows for a home whose books disagree
 #                      (`reconcile-<id>`) or whose state is unavailable
 #                      (`unavailable-<id>`).
+#   priority        -> the order of captains_call (by card key) and underway (by id):
+#                      bin/fm-board-priority.sh holds the captain's ranking, ranked rows
+#                      come first in that order, and unranked rows keep snapshot order after.
 #   omitted         -> charted_more, from the `gates showing N of M` surface.
 #
 # Copy overlay (--copy): a JSON object whose optional maps are keyed by the row
@@ -136,7 +139,11 @@ overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
 ' 2>&1) || fail "copy overlay is malformed: $overlay_errors"
 [ -z "$overlay_errors" ] || fail "copy overlay refused: $(printf '%s' "$overlay_errors" | head -n1)"
 
-jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" '
+# the captain's durable priority (bin/fm-board-priority.sh), highest first
+PRIO_JSON=$("$SCRIPT_DIR/fm-board-priority.sh" show 2>/dev/null | jq -R . | jq -s . 2>/dev/null) || PRIO_JSON='[]'
+[ -n "$PRIO_JSON" ] || PRIO_JSON='[]'
+
+jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" '
   def card_fields: ["title","about","decide","detail","options","recommend_value","type","close",
                     "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo"];
   def underway_fields: ["repo"];
@@ -260,12 +267,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" '
 
   | ($gate_rows + $home_rows) as $charted
 
-  | { schema: "fm-bearings-board.v1",
+  | def ranked($v): ($prio | index($v)) as $i | if $i == null then 1000000 else $i end;
+    def by_priority(k): to_entries | sort_by([ranked(.value | k), .key]) | map(.value);
+  { schema: "fm-bearings-board.v1",
       home: $snap.home,
       generated: $snap.generated,
       prs_live: (($snap.prs // "") | startswith("checked")),
-      captains_call: $captains_call,
-      underway: $underway,
+      captains_call: ($captains_call | by_priority(.key)),
+      underway: ($underway | by_priority(.id)),
       landed: $landed,
       charted: $charted }
     + (if $gates_cut != null then {charted_more: (($gates_cut.m | tonumber) - ($gates_cut.n | tonumber))} else {} end)

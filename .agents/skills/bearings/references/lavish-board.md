@@ -9,6 +9,10 @@
 It maps the fleet snapshot to the fm-bearings-board.v1 payload deterministically: one decision card per captain-held task id (keyed by the task id, titled and described from the held task's own record), every non-done in-flight row as Underway with its projected `name`, landed rows, and the gates and warnings as Charted Next with `kind`, `dispatchable`, `filed`, `repo` and the omitted-row counts derived from structured fields.
 Run `bin/fm-bearings-board-payload.sh > <payload.json>` (add `--include-prs` when the digest used live PRs), then `bin/fm-bearings-board.sh build <payload.json>`.
 Add nothing for a plain board.
+The board opens on step 1, one priority list of every Captain's Call item and every task under way, which the captain reorders (drag or arrows), most important first.
+Clicking a decision row opens its card; "Start answering" deals the cards in the list's order; a task under way is a priority-only row with no card.
+The list's order survives a refresh and rebuild like a queued answer, and a row added since asks to be placed again.
+`bin/fm-bearings-board-payload.sh` already sorts cards and tasks by the stored priority, so a rebuilt board starts in the captain's order.
 Decision cards arrive as freeform answer boxes; the optional `--copy <overlay.json>` carries only the judgment the snapshot cannot supply, and the generator's header owns its schema:
 
 - A card's authored options, `recommend_value`, `decide` and `about` copy, and a `close: "release"` when the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it); question-shaped items omit it.
@@ -34,6 +38,12 @@ Verify the call's latest state, then retire the request through `bin/fm-captain-
 Both outcomes refuse without that pending board-created request, and `bin/fm-captain-hold.sh reconcile list` names every request still outstanding.
 A remote-secondmate card whose task is absent from the main backlog remains on the board unchanged, but its reconcile request is refused in the main home until the separately tracked owner-aware routing follow-up can query and mutate the authoritative secondmate home; handle the announced capture without claiming that a request or reconciliation succeeded.
 `captain-hold-lifecycle` owns why a reconcile may never be recorded as the captain's answer.
+A `priority` annotation (context schema `fm-bearings-priority.v1`, `keys` highest first, tasks by their id and decisions by their card key) is the captain's durable task priority and needs no answer routing.
+Record it with `bin/fm-board-priority.sh set --from-ctx <file>` (the script header owns the store, `data/board-priority.txt`), and echo the recorded order in chat.
+Read the ranking with `bin/fm-board-priority.sh show` whenever you choose which queued task to dispatch, which wake to handle, or which decision to raise or answer next: a higher-ranked task goes first unless a dependency, blocker, time gate or capacity limit makes it unsafe, and say so when you skip one.
+The board stays live because you rebuild it, not because it polls: run the payload generator and `build` again after any wake that changes fleet state (a spawn, a status change, a landing, a new or answered captain call), and the stored priority and the board's own order store carry the captain's ranking across each rebuild.
+Each answer carries the captain's priority, as `[priority N of M]` in its label and as `order` and `order_total` in its context data.
+When a result holds several answers, handle them lowest `order` first, and echo that sequence in chat.
 Route the non-decision keys yourself:
 
 - `merge.<task-id>` is the captain's explicit merge order; follow the merge ruling below.

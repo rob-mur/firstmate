@@ -233,6 +233,27 @@ a { color: inherit; text-decoration: none; }
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
 
+/* ---- Step 1: order the Captain's Call before answering ---- */
+.bb-order { display: flex; flex-direction: column; gap: 12px; }
+.bb-order[hidden], .bb-callwrap[hidden] { display: none; }
+.bb-order__help { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
+.bb-order__list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.bb-order__row {
+  display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; min-width: 0;
+  background: var(--surface-card); border: 2px solid var(--ink-900); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-hard-sm); cursor: grab;
+}
+.bb-order__row.is-dragging { opacity: 0.45; }
+.bb-order__row.is-over { border-color: var(--rust-500); background: var(--rust-050); }
+.bb-order__rank { font-family: var(--font-mono); font-size: var(--fs-h4); font-weight: 600; color: var(--rust-600); min-width: 2ch; text-align: right; }
+.bb-order__main { min-width: 0; flex: 1 1 auto; }
+.bb-order__title { font-size: var(--fs-sm); font-weight: 800; color: var(--text-strong); line-height: 1.3; overflow-wrap: anywhere; }
+.bb-order__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); }
+.bb-order__open { all: unset; cursor: pointer; font-size: var(--fs-sm); font-weight: 800; color: var(--text-strong); line-height: 1.3; overflow-wrap: anywhere; text-decoration: underline; }
+.bb-order__moves { display: flex; gap: 6px; flex: none; }
+.bb-order__go { align-self: flex-start; }
+.bb-reorder { margin-left: 6px; }
+
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
 .bb-row {
@@ -291,11 +312,17 @@ a { color: inherit; text-decoration: none; }
       </span>
       <span class="fm-sign fm-sign--muted" id="bb-call-sub"></span>
     </div>
-    <div class="bb-callwrap">
+    <div class="bb-order" id="bb-order" hidden>
+      <p class="bb-order__help">Step 1 of 2 - put the tasks in priority order, most important first (drag a row, or use the arrows). Firstmate keeps this order and reads it when it picks what to work on or answer next. Open a decision to answer it, or press Start answering to deal the cards in this order.</p>
+      <ol class="bb-order__list" id="bb-order-list"></ol>
+      <div class="bb-order__go"><button type="button" class="fm-btn fm-btn--sm fm-btn--primary" id="bb-order-go">Start answering</button></div>
+    </div>
+    <div class="bb-callwrap" id="bb-callwrap">
       <div class="bb-call" id="bb-call"></div>
       <!-- nav sits under the stack -->
       <div class="bb-stacknav">
         <span class="bb-stacknav__count" id="bb-stack-count">-</span>
+        <button type="button" class="fm-btn fm-btn--sm fm-btn--gold bb-reorder" id="bb-reorder">Reorder</button>
         <button type="button" class="bb-stacknav__btn" id="bb-stack-prev" aria-label="Previous card">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
         </button>
@@ -487,7 +514,45 @@ __FM_BEARINGS_BOARD_DATA__
     return out;
   }
 
-  data.captains_call.forEach(function (item) {
+  /* Captain's chosen answer order. Stored beside the drafts so it survives a
+     rebuild the same way; a copy also rides in a hidden control Lavish restores
+     with the form, for the sandboxed frame that has no storage. */
+  var ORDER_KEY = "fm-bearings-board.order.v1";
+  var itemByKey = {};
+  var callKeySet = {};
+  var rankItems = data.captains_call.slice();
+  data.captains_call.forEach(function (c) { callKeySet[c.key] = true; });
+  /* tasks under way join the list as priority-only rows (no card) */
+  (Array.isArray(data.underway) ? data.underway : []).forEach(function (u) {
+    if (!u || typeof u.id !== "string" || !u.id) return;
+    rankItems.push({ key: "task:" + u.id, title: u.name || u.id, repo: u.repo || null, underway: true, doing: u.doing || "" });
+  });
+  rankItems.forEach(function (c) { itemByKey[c.key] = c; });
+  var storedOrder = jsonLoad(ORDER_KEY, false);
+  var orderKeys = [];
+  (Array.isArray(storedOrder.keys) ? storedOrder.keys : []).forEach(function (k) {
+    if (itemByKey[k] && orderKeys.indexOf(k) < 0) orderKeys.push(k);
+  });
+  var newKeys = 0;
+  rankItems.forEach(function (c) {
+    if (orderKeys.indexOf(c.key) < 0) { orderKeys.push(c.key); newKeys++; }
+  });
+  /* confirmed once the captain has started answering; a card that arrived
+     since then, or a board with nothing to reorder, is handled below */
+  var orderConfirmed = (storedOrder.confirmed === true && newKeys === 0) || orderKeys.length < 2;
+  if (orderKeys.length >= 2 && !data.captains_call.length) orderConfirmed = false;
+  function orderSave() { jsonStore(ORDER_KEY, { keys: orderKeys, confirmed: orderConfirmed }); }
+  orderSave();
+  var orderScope = el("div");
+  orderScope.setAttribute("data-lavish-question", "board-order");
+  var orderHidden = document.createElement("input");
+  orderHidden.type = "hidden"; orderHidden.name = "board-order";
+  orderHidden.value = JSON.stringify({ keys: orderKeys, confirmed: orderConfirmed });
+  orderScope.appendChild(orderHidden);
+  document.getElementById("bb-order").appendChild(orderScope);
+
+  var cardKeys = orderKeys.filter(function (k) { return callKeySet[k]; });
+  cardKeys.map(function (k) { return itemByKey[k]; }).forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     var pad = el("div", "bb-decision__pad");
 
@@ -599,8 +664,13 @@ __FM_BEARINGS_BOARD_DATA__
         note: note
       };
       if (item.close) ctxData.close = item.close;
-      queueAnswer(target, "Captain's Call answer - " + item.title + ": " + displayAnswer,
-        { tag: "choice", text: item.title + " -> " + displayAnswer, data: ctxData });
+      /* the captain's priority: answers are handled in this order */
+      var rank = orderKeys.indexOf(item.key) + 1;
+      ctxData.order = rank;
+      ctxData.order_total = orderKeys.length;
+      var tagText = "[priority " + rank + " of " + orderKeys.length + "] ";
+      queueAnswer(target, "Captain's Call answer " + tagText + "- " + item.title + ": " + displayAnswer,
+        { tag: "choice", text: tagText + item.title + " -> " + displayAnswer, data: ctxData });
       /* deal the next card once this one is answered */
       setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
     });
@@ -625,16 +695,155 @@ __FM_BEARINGS_BOARD_DATA__
       (answered ? " · " + answered + " answered" : "");
     stackPrev.disabled = active === 0;
     stackNext.disabled = active === cards.length - 1;
+    if (typeof showStep === "function" && typeof reorderBtn !== "undefined") reorderBtn.disabled = anyQueued();
     /* the pile thins as the deal approaches the bottom */
     deck.classList.toggle("bb-call--penult", active === cards.length - 2);
     deck.classList.toggle("bb-call--last", active === cards.length - 1);
   }
+  /* Step 1: the reorderable list of every decision, shown before the deck */
+  var orderPanel = document.getElementById("bb-order");
+  var orderList = document.getElementById("bb-order-list");
+  var callWrap = document.getElementById("bb-callwrap");
+  var reorderBtn = document.getElementById("bb-reorder");
+  var dragKey = null;
+  function anyQueued() { return deck.querySelectorAll(".is-queued").length > 0; }
+  function orderPersist() {
+    orderSave();
+    var v = JSON.stringify({ keys: orderKeys, confirmed: orderConfirmed });
+    if (orderHidden.value !== v) {
+      orderHidden.value = v;
+      try { orderHidden.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) { /* no events */ }
+    }
+  }
+  function applyOrder() {
+    var byKey = {};
+    cards.forEach(function (c, i) { byKey[cardKeys[i]] = c; });
+    cardKeys = orderKeys.filter(function (k) { return callKeySet[k]; });
+    cards = cardKeys.map(function (k) { return byKey[k]; });
+    cards.forEach(function (c) { deck.appendChild(c); });
+    showCard(0);
+  }
+  function moveKey(key, to) {
+    var from = orderKeys.indexOf(key);
+    to = Math.max(0, Math.min(orderKeys.length - 1, to));
+    if (from < 0 || from === to) return;
+    orderKeys.splice(from, 1);
+    orderKeys.splice(to, 0, key);
+    orderPersist();
+    renderOrder();
+  }
+  function renderOrder() {
+    while (orderList.children.length) orderList.removeChild(orderList.children[0]);
+    orderKeys.forEach(function (k, i) {
+      var item = itemByKey[k];
+      var row = el("li", "bb-order__row");
+      row.draggable = true;
+      row.setAttribute("data-order-key", k);
+      row.appendChild(el("span", "bb-order__rank", String(i + 1)));
+      var main = el("div", "bb-order__main");
+      var titleEl = el(item.underway ? "div" : "button", "bb-order__title" + (item.underway ? "" : " bb-order__open"), item.title);
+      if (!item.underway) {
+        titleEl.type = "button";
+        titleEl.setAttribute("aria-label", "Open card: " + item.title);
+        titleEl.addEventListener("click", function () { openCard(k); });
+      }
+      main.appendChild(titleEl);
+      var sub = [item.underway ? "underway" : "needs you", item.repo, item.underway && item.doing ? item.doing : null].filter(Boolean).join(" · ");
+      main.appendChild(el("div", "bb-order__repo", sub));
+      row.appendChild(main);
+      var moves = el("div", "bb-order__moves");
+      var up = el("button", "bb-stacknav__btn bb-order__up", "\u2191");
+      up.type = "button"; up.setAttribute("aria-label", "Move up"); up.disabled = i === 0;
+      up.addEventListener("click", function () { moveKey(k, i - 1); });
+      var down = el("button", "bb-stacknav__btn bb-order__down", "\u2193");
+      down.type = "button"; down.setAttribute("aria-label", "Move down"); down.disabled = i === orderKeys.length - 1;
+      down.addEventListener("click", function () { moveKey(k, i + 1); });
+      moves.appendChild(up); moves.appendChild(down);
+      row.appendChild(moves);
+      row.addEventListener("dragstart", function (ev) {
+        dragKey = k;
+        try { ev.dataTransfer.effectAllowed = "move"; ev.dataTransfer.setData("text/plain", k); } catch (e) { /* no dataTransfer */ }
+      });
+      row.addEventListener("dragover", function (ev) { if (dragKey) ev.preventDefault(); });
+      row.addEventListener("drop", function (ev) {
+        ev.preventDefault();
+        var from = dragKey; dragKey = null;
+        if (from && from !== k) moveKey(from, i);
+      });
+      row.addEventListener("dragend", function () { dragKey = null; });
+      orderList.appendChild(row);
+    });
+  }
+  function showStep() {
+    var ordering = !orderConfirmed && orderKeys.length > 1;
+    orderPanel.hidden = !ordering;
+    callWrap.hidden = ordering;
+    reorderBtn.hidden = orderKeys.length < 2;
+    reorderBtn.disabled = anyQueued();
+  }
+  /* the durable priority: one annotation firstmate records and reads when it
+     picks the next work, sent whenever the captain leaves the list */
+  var priorityScope = el("div");
+  priorityScope.setAttribute("data-lavish-question", "board-priority");
+  document.getElementById("bb-order").appendChild(priorityScope);
+  var priorityTarget = makeTarget("board-priority", priorityScope, el("span"), priorityScope);
+  function sendPriority() {
+    var ids = orderKeys.map(function (k) { return k.indexOf("task:") === 0 ? k.slice(5) : k; });
+    queueAnswer(priorityTarget, "Board priority, highest first: " + ids.join(", "),
+      { tag: "priority", text: "board priority: " + ids.join(", "),
+        data: { schema: "fm-bearings-priority.v1", keys: ids, order: orderKeys.slice() } });
+  }
+  document.getElementById("bb-order-go").addEventListener("click", function () {
+    if (!cards.length) { orderPersist(); sendPriority(); return; }
+    orderConfirmed = true;
+    orderPersist();
+    applyOrder();
+    showStep();
+    sendPriority();
+  });
+  function openCard(key) {
+    orderConfirmed = true;
+    orderPersist();
+    applyOrder();
+    showCard(cardKeys.indexOf(key));
+    showStep();
+    sendPriority();
+  }
+  reorderBtn.addEventListener("click", function () {
+    if (anyQueued()) return;
+    orderConfirmed = false;
+    orderPersist();
+    renderOrder();
+    showStep();
+  });
+  /* adopt an order Lavish restored with the form when storage held none */
+  function adoptRestoredOrder() {
+    var v;
+    try { v = JSON.parse(orderHidden.value); } catch (e) { return; }
+    if (!v || !Array.isArray(v.keys) || JSON.stringify(v.keys) === JSON.stringify(orderKeys)) return;
+    var keys = [];
+    v.keys.forEach(function (k) { if (itemByKey[k] && keys.indexOf(k) < 0) keys.push(k); });
+    if (keys.length !== orderKeys.length) return;
+    orderKeys = keys;
+    if (v.confirmed === true) orderConfirmed = true;
+    orderSave();
+    renderOrder();
+    applyOrder();
+  }
+  renderOrder();
+
   if (cards.length) {
     stackPrev.addEventListener("click", function () { showCard(active - 1); });
     stackNext.addEventListener("click", function () { showCard(active + 1); });
     showCard(0);
+    showStep();
   } else {
     deck.classList.add("bb-call--empty");
+    reorderBtn.hidden = true;
+    if (orderKeys.length > 1) {
+      document.getElementById("bb-order-go").textContent = "Save priority";
+      showStep();
+    }
     deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
     stackNav.hidden = true;
   }
@@ -643,10 +852,11 @@ __FM_BEARINGS_BOARD_DATA__
      board re-reads them; it then reports which anchors still hold an unsent
      answer, which is the only queue signal the board gets. */
   function resync() {
+    adoptRestoredOrder();
     Object.keys(targets).forEach(function (id) {
       if (targets[id].hidden.value) targets[id].badge.classList.add("is-queued");
     });
-    if (cards.length) showCard(active);
+    if (cards.length) { showCard(active); showStep(); }
   }
   function onAnchors(selectors) {
     resync();
