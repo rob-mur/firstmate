@@ -13,6 +13,7 @@
 #   fm-board-priority.sh set --from-ctx <file> replace it from a fm-bearings-priority.v1 JSON object
 #   fm-board-priority.sh show                 print the ranking, one id per line
 #   fm-board-priority.sh rank <id>            print the 1-based rank, or `-` when unranked
+#   fm-board-priority.sh digest               print a bounded one-block ranking for the session digest and wake drain; nothing when no ranking is stored
 #
 # Storage: one id per line in $FM_HOME/data/board-priority.txt (FM_DATA_OVERRIDE
 # relocates data/). The file is captain-private durable state, written atomically.
@@ -54,6 +55,12 @@ case "$cmd" in
   -h|--help) usage ;;
   show)
     [ -f "$FILE" ] && cat "$FILE"
+    exit 0
+    ;;
+  digest)
+    [ -s "$FILE" ] || exit 0
+    printf 'CAPTAIN PRIORITY (set on the board, highest first; when choosing what to dispatch, handle or answer next, take a higher-ranked task first unless a dependency, blocker, time gate or capacity limit makes it unsafe; full list: bin/fm-board-priority.sh show):\n'
+    awk 'NR <= 12 { printf "  %d. %s\n", NR, $0 } END { if (NR > 12) printf "  (%d more ranked - bin/fm-board-priority.sh show)\n", NR - 12 }' "$FILE"
     exit 0
     ;;
   rank)
