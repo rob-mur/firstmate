@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--follow-up <scout-id>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--mcp <name>]... [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--follow-up <scout-id>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--mcp <name>]... [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -535,6 +535,17 @@
 #   relaunch reuses the recorded entry unless --account moves it. Without the
 #   list, --account refuses and nothing else changes. docs/configuration.md
 #   "Several Claude accounts" owns the contract.
+# Per-spawn MCP servers (config/mcp-servers.json, --mcp <name>, repeatable):
+#   Opt-in, Claude ship or scout only. The home file holds the same JSON
+#   `claude --mcp-config` accepts ({"mcpServers":{"<name>":{...}}}); only the
+#   named entries are written to state/<id>.mcp.json and passed with
+#   --mcp-config (never --strict-mcp-config, so the worker keeps the rest of its
+#   ordinary MCP configuration). The sorted names are recorded as mcp= in the
+#   task record and replayed by every relaunch; --relaunch refuses --mcp. An
+#   unknown name, a missing or malformed file, a non-claude harness, a raw
+#   launch command, a secondmate, and backend=t3code all refuse before any
+#   endpoint exists. docs/configuration.md "Per-spawn MCP servers" owns the
+#   contract.
 # Per-secondmate omp profile (config/secondmate-accounts/<id>/omp-profile):
 #   Opt-in, and read only for a local secondmate's own omp agent;
 #   bin/fm-omp-profile-lib.sh owns the file and its refusals. A pinned launch
@@ -1081,6 +1092,8 @@ UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
+MCP_NAMES=()
+MCP_SET=0
 RELAUNCH=0
 FOLLOW_UP=
 FOLLOW_UP_SET=0
@@ -1146,6 +1159,10 @@ for a in "$@"; do
     account)
       ACCOUNT_ARG=$a
       ACCOUNT_SET=1
+      ;;
+    mcp)
+      MCP_NAMES+=("$a")
+      MCP_SET=1
       ;;
     follow-up)
       FOLLOW_UP=$a
@@ -1234,6 +1251,11 @@ for a in "$@"; do
     ACCOUNT_ARG=${a#--account=}
     ACCOUNT_SET=1
     ;;
+  --mcp) want_value=mcp ;;
+  --mcp=*)
+    MCP_NAMES+=("${a#--mcp=}")
+    MCP_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -1291,6 +1313,23 @@ fi
   echo "error: --account applies to ships and scouts; secondmate ${POS[0]:-} launches on its own config/secondmate-accounts/<id>/claude-account pin" >&2
   exit 1
 }
+# --mcp names servers from config/mcp-servers.json for a Claude ship or scout
+# (header above). Shape is checked here; the config, the harness, and the launch
+# form are checked once the harness is resolved.
+if [ "$MCP_SET" -eq 1 ]; then
+  [ "$KIND" != secondmate ] || {
+    echo "error: --mcp applies to ships and scouts, never a secondmate" >&2
+    exit 1
+  }
+  for mcp_name in "${MCP_NAMES[@]}"; do
+    case "$mcp_name" in
+    '' | *[!A-Za-z0-9_.-]*)
+      echo "error: --mcp requires a server name of letters, digits, '.', '_' or '-'; got '$mcp_name'" >&2
+      exit 1
+      ;;
+    esac
+  done
+fi
 if [ "$FOLLOW_UP_SET" -eq 1 ]; then
   [ "$KIND" = scout ] && [ "$RELAUNCH" -eq 0 ] || {
     echo "error: --follow-up applies only to a fresh --scout spawn" >&2
@@ -1333,6 +1372,10 @@ esac
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "$BACKEND_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2
+    exit 1
+  }
+  [ "$MCP_SET" -eq 0 ] || {
+    echo "error: --relaunch replays the task's recorded MCP servers; --mcp cannot override them" >&2
     exit 1
   }
   [ "$KIND_SET" -eq 0 ] || {
@@ -2276,6 +2319,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   [ "$ACCOUNT_SET" -eq 0 ] || shared_args+=(--account "$ACCOUNT_ARG")
+  for mcp_name in ${MCP_NAMES[@]+"${MCP_NAMES[@]}"}; do shared_args+=(--mcp "$mcp_name"); done
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -2667,6 +2711,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   UPSTREAM_CONSENT=$(fm_meta_get "$RELAUNCH_META" upstream_consent)
+  # Replay the per-spawn MCP opt-in the task recorded (comma-joined names).
+  mcp_recorded=$(fm_meta_get "$RELAUNCH_META" mcp)
+  if [ -n "$mcp_recorded" ]; then
+    IFS=, read -r -a MCP_NAMES <<<"$mcp_recorded"
+    MCP_SET=1
+  fi
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -3025,7 +3075,7 @@ launch_template() {
   # project and fetched content. A persistent secondmate receives its own
   # supervisor contract instead, so this task-worker statement does not apply.
   claude)
-    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
+    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ __CLAUDEMCP__'
     if [ "$kind" != secondmate ]; then
       printf '%s' '__CLAUDEEXCLUDE__'
       printf '%s' "--append-system-prompt '$(spawn_claude_task_channel_statement)' "
@@ -3670,6 +3720,37 @@ if [ "$BACKEND" = t3code ]; then
     echo "error: backend=t3code cannot apply the $HARNESS worker account pin because T3's provider instance owns the account; select that instance in config/t3code-instances instead" >&2
     exit 1
   fi
+fi
+# Per-spawn MCP opt-in (header above): resolved before any endpoint, worktree,
+# or record exists, so an unknown name or a launch that cannot carry the flag
+# refuses instead of starting a worker without the server it was promised.
+MCP_CONFIG_JSON=
+if [ "$MCP_SET" -eq 1 ]; then
+  if [ "$HARNESS" != claude ] || [ "$RAW_LAUNCH" = 1 ]; then
+    echo "error: --mcp is supported only for a claude harness launch built by firstmate (harness=$HARNESS${RAW_COMMAND:+, raw launch command}); it cannot be applied here" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" = t3code ]; then
+    echo "error: backend=t3code starts the agent itself and cannot pass --mcp-config; choose another backend or drop --mcp" >&2
+    exit 1
+  fi
+  MCP_CONFIG_FILE="$CONFIG/mcp-servers.json"
+  if [ ! -f "$MCP_CONFIG_FILE" ] || [ ! -r "$MCP_CONFIG_FILE" ]; then
+    echo "error: --mcp ${MCP_NAMES[*]} needs $MCP_CONFIG_FILE, a readable JSON file of {\"mcpServers\":{\"<name>\":{...}}}" >&2
+    exit 1
+  fi
+  if ! jq -e '(.mcpServers | type) == "object"' "$MCP_CONFIG_FILE" >/dev/null 2>&1; then
+    echo "error: $MCP_CONFIG_FILE must be a JSON object with an mcpServers object" >&2
+    exit 1
+  fi
+  MCP_NAMES_JSON=$(printf '%s\n' "${MCP_NAMES[@]}" | jq -R . | jq -cs 'unique')
+  if ! MCP_CONFIG_JSON=$(jq -c --argjson names "$MCP_NAMES_JSON" \
+      'if ($names - (.mcpServers | keys)) == [] then {mcpServers: (.mcpServers | with_entries(select(.key as $k | $names | index($k))))} else error("missing") end' \
+      "$MCP_CONFIG_FILE" 2>/dev/null); then
+    echo "error: --mcp names a server $MCP_CONFIG_FILE does not define (asked: ${MCP_NAMES[*]}; defined: $(jq -r '.mcpServers | keys | join(", ")' "$MCP_CONFIG_FILE"))" >&2
+    exit 1
+  fi
+  MCP_NAMES_META=$(printf '%s' "$MCP_NAMES_JSON" | jq -r 'join(",")')
 fi
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
@@ -7571,6 +7652,9 @@ preserve_relaunch_meta() {
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
+  # The per-spawn MCP opt-in (sorted, comma-joined), only when one applies, so
+  # every other task record stays byte-identical; a relaunch replays it.
+  [ -z "$MCP_CONFIG_JSON" ] || echo "mcp=$MCP_NAMES_META"
   # The per-secondmate omp profile pin, only when one applies, so every other
   # task record stays byte-identical.
   [ -z "$OMP_PROFILE_PIN" ] || echo "omp_profile=$OMP_PROFILE_PIN"
@@ -7882,6 +7966,18 @@ case "$LAUNCH" in
   LAUNCH=${LAUNCH//__BRIEFDOORBELL__/"$(shell_quote "$brief_doorbell")"}
   ;;
 esac
+# Per-spawn MCP servers: the selected definitions are written to a task-owned
+# file and passed with --mcp-config, never --strict-mcp-config (header above).
+# Without an opt-in the placeholder is empty and the launch is byte-identical.
+CLAUDE_MCP_FLAG=
+if [ -n "$MCP_CONFIG_JSON" ]; then
+  if ! { printf '%s\n' "$MCP_CONFIG_JSON" >"$STATE_REAL/$ID.mcp.json" && chmod 600 "$STATE_REAL/$ID.mcp.json"; }; then
+    echo "error: could not write $STATE_REAL/$ID.mcp.json for --mcp" >&2
+    exit 1
+  fi
+  CLAUDE_MCP_FLAG="--mcp-config $(shell_quote "$STATE_REAL/$ID.mcp.json") "
+fi
+LAUNCH=${LAUNCH//__CLAUDEMCP__/$CLAUDE_MCP_FLAG}
 case "$LAUNCH" in
 *__CLAUDEADDDIRS__*)
   CLAUDE_ADD_DIRS=$(claude_add_dirs_flag "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID") || {
