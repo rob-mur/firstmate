@@ -347,3 +347,30 @@ test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording() {
 }
 
 test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording
+
+test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question() {
+  local home out data
+  home=$(make_home waiting)
+  build_call_board "$home" '["k1"]'
+  data="$home/payload.json"
+  jq '.captains_call[0] += {question: "Which route should proceed?"} | del(.captains_call[0].about)
+      | .waiting = [{key:"w1", title:"Forge ops", reason:"Parked for the weekend; resume Monday", repo:null}]' \
+    "$data" > "$data.new" && mv "$data.new" "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board with a waiting group did not build"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") || fail "the board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .error == "" and .waiting.shown
+      and (.waiting.rows | length) == 1
+      and (.waiting.rows[0] | contains("Forge ops") and contains("Parked for the weekend"))
+      and (.captains_call | length) == 1
+      and (.captains_call[0] | contains("Which route should proceed?") and contains("Card k1"))
+      and (.captains_call[0] | contains("Parked for the weekend") | not)
+  ' >/dev/null || fail "the waiting group or the question lead did not render: $out"
+  out=$(render_board "$home" '[]' '[]' 0 0 '[]')
+  printf '%s' "$out" | jq -e '.waiting.shown | not' >/dev/null || fail "an empty waiting group was shown: $out"
+  pass "waiting holds render below the decisions and a decision card leads with its question"
+}
+
+test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
