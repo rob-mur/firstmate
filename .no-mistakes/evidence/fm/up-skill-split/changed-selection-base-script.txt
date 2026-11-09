@@ -1,0 +1,3 @@
+$ (base-commit bin/fm-test-run.sh) --list --changed --base bc9370e8
+fm-test-run: no changed-test mapping for source path: .agents/skills/afk/references/daemon.md
+exit=2

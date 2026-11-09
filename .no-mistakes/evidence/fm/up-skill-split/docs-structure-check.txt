@@ -1,0 +1,61 @@
+## Every references/*.md path named in changed skill/docs/AGENTS files resolves
+ok   .agents/skills/afk/SKILL.md -> .agents/skills/afk/references/entering.md
+ok   .agents/skills/afk/SKILL.md -> references/daemon.md
+ok   .agents/skills/afk/SKILL.md -> references/entering.md
+ok   .agents/skills/afk/SKILL.md -> references/return.md
+ok   .agents/skills/afk/SKILL.md -> references/while-away.md
+MISSING .agents/skills/afk/references/daemon.md -> references/entering.md
+ok   .agents/skills/bearings/SKILL.md -> .agents/skills/bearings/references/digest.md
+ok   .agents/skills/bearings/SKILL.md -> references/chat-contract.md
+ok   .agents/skills/bearings/SKILL.md -> references/contributions.md
+ok   .agents/skills/bearings/SKILL.md -> references/digest.md
+ok   .agents/skills/bearings/SKILL.md -> references/lavish-board.md
+MISSING .agents/skills/bearings/references/chat-contract.md -> references/digest.md
+MISSING .agents/skills/bearings/references/digest.md -> references/chat-contract.md
+MISSING .agents/skills/bearings/references/digest.md -> references/contributions.md
+MISSING .agents/skills/process-event-sources/SKILL.md -> references/lavish-board.md
+ok   .agents/skills/project-management/SKILL.md -> .agents/skills/project-management/references/remove.md
+ok   .agents/skills/project-management/SKILL.md -> references/add-create-initialize.md
+ok   .agents/skills/project-management/SKILL.md -> references/delivery-posture.md
+ok   .agents/skills/project-management/SKILL.md -> references/remove.md
+MISSING .agents/skills/quiet/SKILL.md -> references/return.md
+ok   .agents/skills/secondmate-provisioning/SKILL.md -> .agents/skills/secondmate-provisioning/references/charter-and-seed.md
+ok   .agents/skills/secondmate-provisioning/SKILL.md -> references/backlog-handoff.md
+ok   .agents/skills/secondmate-provisioning/SKILL.md -> references/charter-and-seed.md
+ok   .agents/skills/secondmate-provisioning/SKILL.md -> references/record-intake.md
+ok   .agents/skills/secondmate-provisioning/SKILL.md -> references/recovery.md
+ok   .agents/skills/secondmate-provisioning/SKILL.md -> references/retirement.md
+MISSING .agents/skills/secondmate-provisioning/references/charter-and-seed.md -> references/backlog-handoff.md
+MISSING AGENTS.md -> references/contributions.md
+ok   docs/architecture.md -> .agents/skills/afk/references/daemon.md
+ok   docs/architecture.md -> .agents/skills/secondmate-provisioning/references/charter-and-seed.md
+ok   docs/configuration.md -> .agents/skills/secondmate-provisioning/references/charter-and-seed.md
+ok   docs/remote-secondmates.md -> .agents/skills/secondmate-provisioning/references/charter-and-seed.md
+
+## secondmate-provisioning stub rows mentioning backlog-handoff
+24:| `references/backlog-handoff.md` | Moving in-scope queued items to a secondmate, including right after creating and seeding a new one, so existing in-scope main-backlog work is not left behind. |
+
+## above/below in moved reference files
+.agents/skills/afk/references/entering.md:11:     `/quiet` enters nothing there where the attended host runs, and otherwise still launches the daemon below (the quiet skill's `quiet-check` decides).
+.agents/skills/afk/references/entering.md:18:     On the t3code backend there is no terminal to create, so `start` refuses and only the native path above works; a Codex captain hosted by T3 Code has no away daemon (docs/t3code-backend.md "Active limits").
+.agents/skills/project-management/references/remove.md:7:Once that preflight confirms none of the above and the captain's approval is concrete, AGENTS.md hard rule 1's captain-approved project operation exception authorizes firstmate to remove the clone directly and update its registry entry to match.
+.agents/skills/project-management/references/add-create-initialize.md:5:A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
+.agents/skills/bearings/references/digest.md:3:For a contribution wake or linked-issue filing, go directly to `references/contributions.md`; the digest procedure below applies to Bearings invocations.
+.agents/skills/bearings/references/lavish-board.md:43:- `merge.<task-id>` is the captain's explicit merge order; follow the merge ruling below.
+.agents/skills/afk/references/daemon.md:5:On the harness and backend combinations that still launch the daemon, the mechanics below are unchanged.
+.agents/skills/afk/references/daemon.md:66:Events selected by the routing below escalate to firstmate's context as one pre-read, single-line, batched digest.
+.agents/skills/afk/references/daemon.md:100:  Status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
+.agents/skills/afk/references/daemon.md:103:The single-line format makes submission unambiguous across harnesses; the carrier described above distinguishes it from an ordinary captain message.
+.agents/skills/afk/references/daemon.md:120:- **Max-defer escape** - follow the [bounded flush and alarm contract above](#busy-guard-and-composer-guard) and the [alert setup guide](../../../../docs/wedge-alarm.md).
+.agents/skills/secondmate-provisioning/references/charter-and-seed.md:36:Pass `--no-projects` in the project position to seed the project-less home described above; the same mutual-exclusion and fail-loud-on-omission rules apply.
+.agents/skills/secondmate-provisioning/references/charter-and-seed.md:106:It uses the same live-home discovery and propagation helper as bootstrap, reports each item as `pushed`, `unchanged`, `skipped`, or `error`, and follows the config-reread contract above for changed or pending generations.
+
+## each stub frontmatter + line counts
+name: afk
+71
+name: bearings
+51
+name: secondmate-provisioning
+59
+name: project-management
+49
