@@ -1129,6 +1129,33 @@ test_account_list_relaunch_reuses_the_recorded_account() {
   pass "fm-control relaunch: a declared account list keeps the account the task records"
 }
 
+test_mcp_opt_in_is_replayed_on_relaunch() {
+  local dir out rc id=rl-mcp
+  dir=$(new_case mcp "$id")
+  add_ship_task "$dir" "$id" claude
+  echo "mcp=slack" >> "$dir/home/state/$id.meta"
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '{"mcpServers":{"slack":{"type":"http","url":"https://mcp.slack.com/mcp"},"other":{"type":"http","url":"https://example.invalid/mcp"}}}' \
+    > "$dir/home/config/mcp-servers.json"
+  out=$(run_control "$dir" "$id" relaunch --note "replay mcp"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a task recording mcp=slack should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" mcp)" = slack ] || fail "the relaunched record should keep mcp=slack"
+  assert_contains "$(cat "$dir/fake/literal")" "--mcp-config" "the replacement should carry --mcp-config"
+  jq -e '.mcpServers | keys == ["slack"]' "$dir/home/state/$id.mcp.json" >/dev/null \
+    || fail "the replayed config should hold only the recorded server"
+
+  out=$(run_spawn "$dir" "$id" --relaunch --mcp other); rc=$?
+  expect_code 1 "$rc" "--relaunch must refuse an --mcp override"
+  assert_contains "$out" "--mcp cannot override" "refusal should explain the replay rule"
+
+  # A harness switch to one that cannot carry the servers refuses loudly.
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch --harness codex); rc=$?
+  expect_code 1 "$rc" "relaunch onto a non-claude harness must refuse while mcp is recorded"
+  assert_contains "$out" "only for a claude harness" "refusal should name the harness limit"
+  pass "fm-control relaunch: the per-spawn MCP opt-in is replayed, not overridable, and refuses a non-claude harness"
+}
+
 test_account_list_relaunch_moves_only_on_explicit_account() {
   local dir out rc id=rl-list-move
   dir=$(new_case list-move "$id")
@@ -3295,6 +3322,7 @@ test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_account_list_relaunch_reuses_the_recorded_account
 test_account_list_relaunch_moves_only_on_explicit_account
+test_mcp_opt_in_is_replayed_on_relaunch
 test_account_list_relaunch_refusals_happen_before_stop
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
