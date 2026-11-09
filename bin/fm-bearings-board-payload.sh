@@ -21,6 +21,9 @@
 #                      `pr_url` and `repo` from the PR the task recorded, and a
 #                      freeform answer box (a card with no authored options). The
 #                      snapshot already buckets holds, so every row is a live call.
+#                      A hold whose reason is a wait or park rather than a question moves
+#                      to `waiting` instead (see below). Each remaining card leads with
+#                      its hold reason as `question`.
 #   contributions.captain
 #                   -> captains_call: one link-only `decision` card (key
 #                      `contribution.<task>`, `pr_url` the contribution's page) for
@@ -28,6 +31,13 @@
 #                      Captain's Call also shows what firstmate never held. A row
 #                      whose hold already has a card, or whose PR a card already
 #                      carries, adds none.
+#   waiting         -> waiting: a captain-held task whose reason is a wait or park on a
+#                      condition or date, with nothing for the captain to answer. The rule:
+#                      a reason with a question mark is a question; otherwise a reason that
+#                      opens with or contains park/paused/on hold/hold until/resume/
+#                      waiting for|on/until/re-runs is a wait; a hold carrying an `until`
+#                      date is a wait; anything else is a question. Waiting rows keep
+#                      snapshot order and are not part of the priority list.
 #   in_flight       -> underway: every row except state `done`, in snapshot order,
 #                      with the projected `name`.
 #   landed          -> landed: every row; `pr_url` and `repo` come from the
@@ -47,7 +57,7 @@
 #
 # Copy overlay (--copy): a JSON object whose optional maps are keyed by the row
 # key or id they refine, so a missing entry leaves the deterministic default.
-#   captains_call  {"<key>": {title, about, decide, detail, options, recommend_value,
+#   captains_call  {"<key>": {title, question, about, decide, detail, options, recommend_value,
 #                   type, close, risk, pr_url, links, subject, freeform_hint,
 #                   allow_freeform, repo} | null}   (null drops the card)
 #   captains_call_extra  [<call item>, ...]   merge, credential, and any other card
@@ -122,7 +132,7 @@ printf '%s\n' "$COPY_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 \
 
 overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
   { captains_call: ["title","about","decide","detail","options","recommend_value","type","close",
-                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo"],
+                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question"],
     underway: ["repo"],
     landed: ["repo","pr_url","subject"],
     charted: ["title","reason","repo","dispatchable","filed"] } as $allowed
@@ -145,7 +155,7 @@ PRIO_JSON=$("$SCRIPT_DIR/fm-board-priority.sh" show 2>/dev/null | jq -R . | jq -
 
 jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" '
   def card_fields: ["title","about","decide","detail","options","recommend_value","type","close",
-                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo"];
+                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question"];
   def underway_fields: ["repo"];
   def landed_fields: ["repo","pr_url","subject"];
   def charted_fields: ["title","reason","repo","dispatchable","filed"];
@@ -172,8 +182,22 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   | ($snap.landed // []) as $landed_rows
   | (($snap.omitted // []) | map(.surface)) as $omitted
 
-  | ( [ $snap.decisions_open[]? ]
-      | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end)
+  | def is_wait($d):
+      (($d.reason_full // $d.reason // "") | tostring) as $r
+      | if ($r | test("\\?")) then false
+        elif (($d.hold_until // $d.until // "") | tostring | length) > 0
+             and (($d.hold_until // $d.until) != "-") then true
+        else ($r | test("(^|[^a-z])(parked|paused|on hold|held until|hold until|resume|resuming|waiting (for|on)|wait (for|until|on)|until|re-?runs?)([^a-z]|$)"; "i")) end;
+    ( [ $snap.decisions_open[]? ]
+      | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end) ) as $held
+  | ( [ $held[] | select(is_wait(.) | not) ] ) as $question_rows
+  | ( [ $held[] | select(is_wait(.))
+        | . as $d
+        | { key: $d.key,
+            title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
+            reason: (($d.reason_full // $d.reason) | nz("waiting")),
+            repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null) } ] ) as $waiting
+  | ( $question_rows
       | map(
           . as $d
           | pr_for($d.id; $contrib; $recorded) as $pr
@@ -188,7 +212,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
               allow_freeform: true,
               freeform_hint: "answer in your own words (say later to defer)"
             }
-            + (if (($d.reason_full // $d.reason) | nz(null)) != null then {about: ($d.reason_full // $d.reason)} else {} end)
+            + (if (($d.reason_full // $d.reason) | nz(null)) != null then {question: ($d.reason_full // $d.reason)} else {} end)
             + (if $pr != null then {pr_url: $pr} else {} end) )
           + overlay("captains_call"; $d.key; card_fields)
           | . as $card
@@ -275,6 +299,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       prs_live: (($snap.prs // "") | startswith("checked")),
       captains_call: ($captains_call | by_priority(.key)),
       underway: ($underway | by_priority(.id)),
+      waiting: $waiting,
       landed: $landed,
       charted: $charted }
     + (if $gates_cut != null then {charted_more: (($gates_cut.m | tonumber) - ($gates_cut.n | tonumber))} else {} end)
