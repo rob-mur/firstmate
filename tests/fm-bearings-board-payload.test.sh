@@ -106,7 +106,7 @@ test_rows_map_deterministically_from_the_snapshot() {
 
   assert_equals "alpha-fix,old-row" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "captains_call is one card per open decision"
   assert_equals "Pick the alpha retry policy" "$(jq -r '.captains_call[0].title' <<<"$p")" "the card title comes from the clean title field"
-  assert_equals "two options measured" "$(jq -r '.captains_call[0].about' <<<"$p")" "the card about comes from the reason field"
+  assert_equals "two options measured" "$(jq -r '.captains_call[0].question' <<<"$p")" "the card leads with the hold reason as its question"
   assert_equals "Legacy fused summary" "$(jq -r '.captains_call[1].title' <<<"$p")" "a row with no title falls back to its summary"
   assert_equals "https://github.com/acme/alpha/pull/3" "$(jq -r '.captains_call[0].pr_url' <<<"$p")" "the recorded PR is attached to its card"
   assert_equals "alpha" "$(jq -r '.captains_call[0].repo' <<<"$p")" "the card repo comes from the recorded PR"
@@ -159,7 +159,7 @@ EOF
   p=$("$GEN" --snapshot "$snap" --copy "$copy") || fail "the generator refused a valid overlay"
   assert_equals "alpha-fix,merge-widgets" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "a null overlay drops its card and extra cards append"
   assert_equals "Alpha retry: pick one" "$(jq -r '.captains_call[0].title' <<<"$p")" "the overlay title wins"
-  assert_equals "two options measured" "$(jq -r '.captains_call[0].about' <<<"$p")" "unlisted fields keep the generated value"
+  assert_equals "two options measured" "$(jq -r '.captains_call[0].question' <<<"$p")" "unlisted fields keep the generated value"
   assert_equals "Queued, reworded" "$(jq -r '.charted[] | select(.id == "plain-queued") | .title' <<<"$p")" "the overlay can reword a charted row"
   printf '%s\n' "$p" > "$TMP_ROOT/with-copy.json"
   validates "$TMP_ROOT/with-copy.json" || fail "the payload with a copy overlay did not satisfy the board validator"
@@ -325,6 +325,30 @@ test_the_priority_digest_is_bounded_and_silent_when_unset() {
   pass "the priority digest is bounded and silent when unset"
 }
 
+test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards() {
+  local snap="$TMP_ROOT/wait-snap.json" p
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.decisions_open += [
+        {id: "w1", key: "w1", verb: "captain-hold", title: "Forge ops", reason: "Parked for the weekend; resume Monday", owner: "(main)"},
+        {id: "w2", key: "w2", verb: "captain-hold", title: "Release", reason: "hold until the captain re-runs forge ops", owner: "(main)"},
+        {id: "w3", key: "w3", verb: "captain-hold", title: "Dated", reason: "needs a call", hold_until: "2026-12-01", owner: "(main)"},
+        {id: "q1", key: "q1", verb: "captain-hold", title: "Resume?", reason: "Should we resume the migration until Monday or cancel it?", owner: "(main)"},
+        {id: "q2", key: "q2", verb: "captain-hold", title: "Pick a name", reason: "Choose the public name", owner: "(main)"}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "w1,w2,w3" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "waits and parks go to the waiting group, in snapshot order"
+  assert_equals "alpha-fix,old-row,q1,q2" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "a reason with a question mark, or no wait wording, stays a decision card"
+  assert_equals "Parked for the weekend; resume Monday" "$(jq -r '.waiting[0].reason' <<<"$p")" "a waiting row carries its hold reason"
+  assert_equals "Forge ops" "$(jq -r '.waiting[0].title' <<<"$p")" "a waiting row carries its task title"
+  assert_equals "Choose the public name" "$(jq -r '.captains_call[3].question' <<<"$p")" "a decision card leads with its hold reason as the question"
+  assert_equals "false" "$(jq -r '[.captains_call[] | has("about")] | any' <<<"$p")" "the reason is not repeated as about text"
+  printf '%s\n' "$p" > "$TMP_ROOT/wait.json"
+  validates "$TMP_ROOT/wait.json" || fail "a payload with a waiting group did not satisfy the board validator"
+  jq '.waiting[0].title = ""' "$TMP_ROOT/wait.json" > "$TMP_ROOT/wait-bad.json"
+  validates "$TMP_ROOT/wait-bad.json" && fail "the validator accepted a waiting row with no title"
+  pass "a wait or park hold is shown as waiting and each decision card leads with its question"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -336,4 +360,5 @@ fm_test_run \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
   test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
   test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably \
-  test_the_priority_digest_is_bounded_and_silent_when_unset
+  test_the_priority_digest_is_bounded_and_silent_when_unset \
+  test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards

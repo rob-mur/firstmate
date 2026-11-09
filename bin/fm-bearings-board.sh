@@ -180,6 +180,7 @@ validate_payload() {  # <data.json>
           and (.label | nonempty_string)
           and optional_string("hint")] | all)
       and (optional_string("about"))
+      and (optional_string("question"))
       and (optional_string("decide"))
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))
@@ -203,6 +204,9 @@ validate_payload() {  # <data.json>
       and (.what | nonempty_string) and (.owner | nonempty_string)
       and optional_https_url("pr_url")
       and optional_subject;
+    def waiting_item:
+      type == "object" and repo_marker and (.key | slug(128))
+      and (.title | nonempty_string) and (.reason | type == "string");
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
       and (.title | nonempty_string) and (.reason | type == "string")
@@ -225,6 +229,7 @@ validate_payload() {  # <data.json>
       or ((.charted_warning_more | type == "number") and (.charted_warning_more >= 0) and (.charted_warning_more | floor == .)))
     and ([.captains_call[] | call_item] | all)
     and ([.underway[] | underway_item] | all)
+    and ((has("waiting") | not) or ((.waiting | type == "array") and ([.waiting[] | waiting_item] | all)))
     and ([.landed[] | landed_item] | all)
     and ([.charted[] | charted_item] | all)
   ' "$1" >/dev/null
