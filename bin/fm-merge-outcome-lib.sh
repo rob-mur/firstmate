@@ -41,6 +41,14 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 #   self - this home performed the merge.
 #   poll - this home's merge poll detected the merge, so the canonical outcome
 #          also wakes this home after any upward hop needed by a secondmate.
+#   extra - this home merged one of the task's extra PRs (pr_extra=, recorded
+#          by bin/fm-pr-check.sh --extra). The task's canonical PR is still
+#          open, so this outcome neither reads nor marks the merge-notification
+#          marker, writes no ledger merged entry, and never uses the "merge
+#          landed" wake that starts cleanup: a secondmate reports
+#          "done [key=merged-extra-<id>-<number>]: merged extra PR <url> for
+#          <id>" upward, and a main home queues a "check: extra PR merged:"
+#          wake, each deduplicated by its exact line or wake key.
 # Optional <authority> is away, attended, or external (the retired yolo and
 # away-grant values are still accepted for a persisted authority written before
 # the words model landed). Away, external, and the retired tags are appended to
@@ -62,7 +70,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
-  case "$origin" in self|poll) ;; *) return 2 ;; esac
+  case "$origin" in self|poll|extra) ;; *) return 2 ;; esac
   case "$authority" in
     away|external|yolo|away-grant) suffix=" $authority" ;;
     attended|'') ;;
@@ -78,6 +86,8 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
 
   if destination=$(fm_parent_channel_destination "$home" "$state"); then
     line="done [key=merged-$id]: merged $id $FM_PR_URL$suffix"
+    [ "$origin" != extra ] \
+      || line="done [key=merged-extra-$id-$number]: merged extra PR $FM_PR_URL for $id$suffix"
   else
     self_rc=$?
     [ "$self_rc" -eq 1 ] || return 3
@@ -87,6 +97,15 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   STATE=$state
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
+  if [ "$origin" = extra ]; then
+    if [ -n "$destination" ]; then
+      fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || return 1
+    else
+      fm_wake_append check "merged-extra-$id-$FM_PR_URL" \
+        "check: extra PR merged: $id $FM_PR_URL$suffix (the task's recorded PR is still open)" || return 1
+    fi
+    return 0
+  fi
   lock="$state/$id.pr-poll-merge-notified.lock"
   fm_lock_acquire_wait "$lock" || return 1
   if fm_pr_poll_merge_already_notified "$state" "$id" \
