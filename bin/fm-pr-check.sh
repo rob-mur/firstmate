@@ -68,7 +68,16 @@
 # starts no further registration, so the cursor stays on the last task that
 # had a full turn; the first registration of a sweep still runs, and with no
 # time left to fetch it decides on the last-known refs.
+#
+# --extra records an additional PR the same task also merges, for example a
+# prep PR that must land before the main one. It appends one idempotent
+# pr_extra=<url> line and nothing else: pr= stays the task's single canonical
+# PR, so the poll, teardown, crew state, and the parent ready line all keep
+# reading only pr=. The canonical URL cannot also be an extra, and an extra
+# cannot later be registered as the canonical PR. bin/fm-pr-merge.sh owns
+# merging an extra PR.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
+#        fm-pr-check.sh <task-id> <pr-url> --extra
 #        fm-pr-check.sh scan
 set -eu
 
@@ -189,7 +198,10 @@ if [ "$#" -eq 1 ] && [ "$1" = scan ]; then
 fi
 
 
-if [ "$#" -ne 2 ]; then
+EXTRA=false
+if [ "$#" -eq 3 ] && [ "$3" = --extra ]; then
+  EXTRA=true
+elif [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
 fi
@@ -227,6 +239,46 @@ fi
 KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ "$KIND" = secondmate ]; then
   echo "error: $ID is a secondmate, not a delivery lane - $URL was reported on its status channel but belongs to a task in the mate's own home, which arms its own merge watch" >&2
+  exit 1
+fi
+
+# --extra records one more PR the task merges besides its canonical pr=, such
+# as a prep PR that must land first. It only appends pr_extra=<url> under the
+# meta lock; it arms no poll, runs no done gate, and publishes no ready line,
+# because pr= stays the one identity every reader of a task's PR uses.
+if [ "$EXTRA" = true ]; then
+  META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+  fm_lock_acquire_wait "$META_LOCK"
+  META_TMP=
+  trap '[ -z "$META_TMP" ] || rm -f -- "$META_TMP"; fm_lock_release "$META_LOCK" || true' EXIT
+  trap 'exit 1' HUP INT TERM
+  [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
+    || { echo "error: task metadata is unavailable" >&2; exit 1; }
+  if grep -qxF "pr=$URL" "$META"; then
+    echo "error: $URL is already $ID's recorded PR; record only additional PRs with --extra" >&2
+    exit 1
+  fi
+  grep -qxF "pr_extra=$URL" "$META" && exit 0
+  STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
+  [ "$(fm_pr_file_device "$META")" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+  META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
+  cat -- "$META" > "$META_TMP" || exit 1
+  [ -z "$(tail -c 1 -- "$META_TMP")" ] || printf '\n' >> "$META_TMP" || exit 1
+  printf 'pr_extra=%s\n' "$URL" >> "$META_TMP" || exit 1
+  chmod 0600 "$META_TMP" || exit 1
+  fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
+  if grep -q '^pr=' "$META_TMP"; then
+    fm_pr_metadata_identity_parse "$META_TMP" || { echo "error: task metadata is unavailable" >&2; exit 1; }
+  fi
+  fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
+  mv -f -- "$META_TMP" "$META" || exit 1
+  META_TMP=
+  exit 0
+fi
+
+# A URL recorded as an extra PR cannot also become the canonical one.
+if grep -qxF "pr_extra=$URL" "$META"; then
+  echo "error: $URL is recorded as an extra PR of $ID, not its main PR" >&2
   exit 1
 fi
 
