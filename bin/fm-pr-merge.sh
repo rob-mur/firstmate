@@ -230,7 +230,16 @@
 # unless that bound PR has already merged - proven by its recorded merge
 # notification - in which case the task's next PR is accepted so several PRs
 # from one task can each merge in turn; while the bound PR is still unmerged a
-# different URL is refused. Auto-merge (--auto), a protection bypass
+# different URL is refused.
+# A task may also merge extra PRs, such as a prep PR that must land before its
+# main one, once each is recorded with bin/fm-pr-check.sh <task-id> <url>
+# --extra. An extra PR meets every live gate above (green required checks, up
+# to date, head match, captain hold, away authority) but is never re-recorded as
+# pr= or pr_head=, needs no recorded head, persists no merge authority, refuses
+# an auto-merge because no merge poll watches it, and reports the distinct
+# extra outcome of bin/fm-merge-outcome-lib.sh rather than the task's landed
+# merge. The task's main PR stays its canonical pr= and merges as before.
+# Auto-merge (--auto), a protection bypass
 # (--admin), and branch
 # deletion (--delete-branch, -d and short-flag clusters, and GitLab's
 # --remove-source-branch) are refused by default; --attended-override, parsed
@@ -699,6 +708,15 @@ if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
   exit 1
 fi
 
+# An extra PR is one bin/fm-pr-check.sh --extra recorded as pr_extra=<url>
+# beside the task's canonical pr=. It meets every live gate below, but it never
+# rewrites pr= or pr_head=, has no merge poll or merge-authority record, and
+# reports a distinct extra-PR outcome instead of the task's landed merge.
+IS_EXTRA=false
+if grep -qxF "pr_extra=$URL" "$META"; then
+  IS_EXTRA=true
+fi
+
 # Reading the merge request state needs both tools. Report them together and
 # before anything is recorded, so a missing tool is a named prerequisite rather
 # than a merge that is armed and then refused for an unexplained reason.
@@ -748,8 +766,9 @@ fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
+# An extra PR has no recorded head, so its live read alone is authoritative.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
+if [ "$IS_EXTRA" != true ] && { [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; }; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -1428,7 +1447,7 @@ github_update_behind_branch() {
     fi
     if [ -z "$new_head" ] && [ "$FM_PR_GITHUB_LIVE_HEAD" != "$old_head" ]; then
       new_head=$FM_PR_GITHUB_LIVE_HEAD
-      if ! record_pr_metadata || ! grep -qxF "pr_head=$new_head" "$META"; then
+      if [ "$IS_EXTRA" != true ] && { ! record_pr_metadata || ! grep -qxF "pr_head=$new_head" "$META"; }; then
         echo "error: could not record the updated GitHub head $new_head" >&2
         rm -f "$attempt_error"
         return 1
@@ -1640,6 +1659,11 @@ METHODS
 }
 
 record_pr_metadata() {
+  if [ "$IS_EXTRA" = true ]; then
+    grep -qxF "pr_extra=$URL" "$META" && return 0
+    echo "error: extra PR metadata for $URL is no longer recorded" >&2
+    return 1
+  fi
   if ! FM_PR_CHECK_MERGE=1 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
     return 1
   fi
@@ -1708,6 +1732,11 @@ require_current_away_authority() {
       return 2
     fi
   fi
+  if [ "$IS_EXTRA" = true ] && { [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ] \
+    || [ "$FM_PR_GITLAB_ASYNC_REQUESTED" = true ] || [ "$FM_PR_GITLAB_ASYNC_CONFIGURED" = true ]; }; then
+    echo "error: an extra PR has no merge poll to finish an auto-merge, so only an immediate merge may run for $URL" >&2
+    return 1
+  fi
   fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
   resolve_merge_authority || return 1
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
@@ -1726,6 +1755,8 @@ require_current_away_authority() {
 
 persist_accepted_merge_authority() {
   local status=0
+  # The authority record binds the canonical pr= and is read only by its poll.
+  [ "$IS_EXTRA" != true ] || return 0
   MERGE_META_LOCK=$(fm_meta_lock_path "$META") || return 1
   fm_lock_acquire_wait "$MERGE_META_LOCK" || return 1
   fm_merge_authority_persist "$STATE" "$ID" "$META" \
@@ -1765,6 +1796,7 @@ refuse_github_queue_while_away() {
 
 require_recorded_pr_identity() {
   local existing
+  [ "$IS_EXTRA" != true ] || return 0
   existing=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$existing" ] || return 0
   [ "$existing" = "$URL" ] && return 0
@@ -1775,7 +1807,7 @@ require_recorded_pr_identity() {
       "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" ); then
     return 0
   fi
-  echo "error: task $ID is bound to $existing, not $URL" >&2
+  echo "error: task $ID is bound to $existing, not $URL; record an additional PR first with: bin/fm-pr-check.sh $ID $URL --extra" >&2
   return 1
 }
 
@@ -2028,6 +2060,9 @@ case "$PROVIDER" in
     elif [ "$FM_PR_GITHUB_QUEUED" = true ]; then
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+      if [ "$IS_EXTRA" = true ]; then
+        printf 'actionable: extra PR %s is queued, and no merge poll watches an extra PR; check it on the forge\n' "$URL" >&2
+      fi
       exit 0
     else
       github_report_forge_output "$merge_output"
@@ -2066,6 +2101,9 @@ case "$PROVIDER" in
     MERGE_CONTROL_LOCK=
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
+    if [ "$gitlab_confirm_rc" -ne 0 ] && [ "$IS_EXTRA" = true ]; then
+      printf 'actionable: GitLab accepted the merge request for extra PR %s but it does not read back as merged yet, and no merge poll watches an extra PR; check it on the forge\n' "$URL" >&2
+    fi
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
   forgejo)
@@ -2125,7 +2163,9 @@ esac
 # refused or failed merge above, and a queued forge merge exits without an
 # outcome while its existing poll remains armed.
 outcome_rc=0
-fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self \
+outcome_origin=self
+[ "$IS_EXTRA" != true ] || outcome_origin=extra
+fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" "$outcome_origin" \
   "${FM_PR_MERGE_AUTHORITY:-}" || outcome_rc=$?
 case "$outcome_rc" in
   0) ;;
