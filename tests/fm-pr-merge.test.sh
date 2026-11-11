@@ -16,6 +16,11 @@ fm_git_identity fmtest fmtest@example.invalid
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 BASE_PATH=$PATH
+# A script run without FM_HOME treats its code root as the home, and a code root
+# can hold a secondmate marker that sends parent-channel lines to a real home.
+# Pin a sandbox home for every invocation; each case still passes its own.
+export FM_HOME="$TMP_ROOT/unpinned-home"
+mkdir -p "$FM_HOME"
 
 # The GitLab fixture. A placeholder host that resolves nowhere, and a namespace
 # deeper than one group, because a GitLab project has no owner/repository pair.
@@ -2338,6 +2343,7 @@ test_gitlab_missing_tool_refuses_before_recording() {
 
     set +e
     FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$case_dir/home" \
     FM_STATE_OVERRIDE="$case_dir/state" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
     FM_TEST_GLAB_LOG="$case_dir/glab.log" \
@@ -2723,6 +2729,7 @@ test_forgejo_missing_tool_refuses_before_recording() {
 
     set +e
     FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$case_dir/home" \
     FM_STATE_OVERRIDE="$case_dir/state" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
     FM_TEST_TEA_LOG="$case_dir/tea.log" \
@@ -5762,3 +5769,230 @@ test_expected_head_later_preflight_does_not_adopt_a_new_head
 test_expected_head_bad_inputs_refuse_before_effects
 test_expected_head_keeps_existing_refusals
 test_allow_no_pipeline_waives_a_zero_status_forgejo_head
+
+# A task with a recorded main PR (pull/9, never merged here) and a second PR
+# recorded through fm-pr-check.sh --extra, so the extra-PR path is exercised
+# while the canonical pr= stays put.
+EXTRA_MAIN_URL=https://github.com/example/repo/pull/9
+EXTRA_PR_URL=https://github.com/example/repo/pull/10
+EXTRA_MAIN_HEAD=9999999999999999999999999999999999999999
+EXTRA_HEAD=1010101010101010101010101010101010101010
+
+record_extra_pr() {  # <case_dir> <url>
+  local case_dir=$1 url=$2
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+  HOME="$case_dir/user-home" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-x1 "$url" --extra
+}
+
+make_extra_case() {  # <name>
+  local name=$1 case_dir
+  case_dir=$(make_home_case "$name")
+  add_gh_mocks "$case_dir" "$EXTRA_HEAD"
+  : > "$case_dir/gh-axi.log"
+  printf 'pr=%s\npr_head=%s\n' "$EXTRA_MAIN_URL" "$EXTRA_MAIN_HEAD" >> "$case_dir/state/task-x1.meta"
+  record_extra_pr "$case_dir" "$EXTRA_PR_URL" > "$case_dir/record.out" 2>&1 \
+    || fail "$name: recording the extra PR failed: $(cat "$case_dir/record.out")"
+  printf '%s\n' "$case_dir"
+}
+
+run_extra_merge() {  # <case_dir> [args...]
+  local case_dir=$1
+  shift
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$@" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+}
+
+test_extra_pr_is_recorded_beside_the_main_pr() {
+  local case_dir rc
+  case_dir=$(make_extra_case extra-record)
+  assert_grep "pr_extra=$EXTRA_PR_URL" "$case_dir/state/task-x1.meta" \
+    "extra-record: the extra PR was not recorded"
+  [ "$(grep '^pr=' "$case_dir/state/task-x1.meta")" = "pr=$EXTRA_MAIN_URL" ] \
+    || fail "extra-record: recording an extra PR changed the main pr="
+  record_extra_pr "$case_dir" "$EXTRA_PR_URL" >/dev/null 2>&1 \
+    || fail "extra-record: recording the same extra PR again was not idempotent"
+  [ "$(grep -c "^pr_extra=$EXTRA_PR_URL\$" "$case_dir/state/task-x1.meta")" -eq 1 ] \
+    || fail "extra-record: a repeat recording duplicated the extra line"
+
+  set +e
+  record_extra_pr "$case_dir" "$EXTRA_MAIN_URL" > "$case_dir/canon.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "extra-record: the main PR was accepted as an extra PR"
+  assert_grep "recorded PR" "$case_dir/canon.out" \
+    "extra-record: the refusal did not name the main PR"
+  [ "$(grep -c '^pr_extra=' "$case_dir/state/task-x1.meta")" -eq 1 ] \
+    || fail "extra-record: the refused main PR was written as an extra line"
+  pass "fm-pr-check.sh --extra records a second PR without moving the main pr="
+}
+
+test_extra_pr_merges_without_touching_the_main_pr() {
+  local case_dir rc
+  case_dir=$(make_extra_case extra-merge)
+  set +e
+  run_extra_merge "$case_dir" "$EXTRA_PR_URL"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "extra-merge: the recorded extra PR should merge: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 10 example/repo --squash
+  [ "$(grep '^pr=' "$case_dir/state/task-x1.meta")" = "pr=$EXTRA_MAIN_URL" ] \
+    || fail "extra-merge: merging the extra PR moved the main pr="
+  [ "$(grep '^pr_head=' "$case_dir/state/task-x1.meta")" = "pr_head=$EXTRA_MAIN_HEAD" ] \
+    || fail "extra-merge: merging the extra PR rewrote the main pr_head="
+  assert_grep "check: extra PR merged: task-x1 $EXTRA_PR_URL" "$case_dir/state/.wake-queue" \
+    "extra-merge: no extra-PR wake was left"
+  assert_no_grep "merge landed" "$case_dir/state/.wake-queue" \
+    "extra-merge: an extra PR merge was reported as the task landing"
+  assert_absent "$case_dir/state/task-x1.pr-poll-merge-notified" \
+    "extra-merge: an extra PR merge marked the main PR as reported"
+  pass "fm-pr-merge merges a recorded extra PR and leaves the main PR open and canonical"
+}
+
+test_extra_pr_keeps_the_merge_guards() {
+  local case_dir rc
+  case_dir=$(make_extra_case extra-red)
+  write_github_red_json "$case_dir" "$EXTRA_HEAD" ci
+  set +e
+  run_extra_merge "$case_dir" "$EXTRA_PR_URL"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "extra-red: a red extra PR merged"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "extra-red: a red extra PR reached the forge"
+
+  case_dir=$(make_extra_case extra-behind)
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+  mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+  set +e
+  run_extra_merge "$case_dir" "$EXTRA_PR_URL"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "extra-behind: a stale extra PR merged"
+  assert_grep 'requires explicit --update-branch consent' "$case_dir/stderr" \
+    "extra-behind: the stale refusal did not explain the opt-in"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "extra-behind: a stale extra PR reached the forge"
+
+  case_dir=$(make_extra_case extra-head)
+  set +e
+  run_extra_merge "$case_dir" "$EXTRA_PR_URL" --expected-head 2020202020202020202020202020202020202020
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "extra-head: a head mismatch on an extra PR merged"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "extra-head: a mismatched extra PR reached the forge"
+
+  case_dir=$(make_extra_case extra-auto)
+  set +e
+  run_extra_merge "$case_dir" "$EXTRA_PR_URL" --attended-override -- --auto --merge
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "extra-auto: an auto-merge of an extra PR was accepted"
+  assert_grep 'only an immediate merge may run' "$case_dir/stderr" \
+    "extra-auto: the refusal did not explain why: $(cat "$case_dir/stderr")"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "extra-auto: an extra auto-merge reached the forge"
+  pass "a recorded extra PR keeps the green, up-to-date, and head-match guards"
+}
+
+test_unrecorded_second_pr_is_still_refused() {
+  local case_dir rc url
+  url=https://github.com/example/repo/pull/11
+  case_dir=$(make_extra_case extra-unrecorded)
+  set +e
+  run_extra_merge "$case_dir" "$url"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "extra-unrecorded: an unrecorded second PR merged"
+  assert_grep "fm-pr-check.sh task-x1 $url --extra" "$case_dir/stderr" \
+    "extra-unrecorded: the refusal did not name how to record an extra PR"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "extra-unrecorded: an unrecorded PR reached the forge"
+  pass "a PR that is neither the main PR nor a recorded extra PR is still refused"
+}
+
+test_extra_pr_merges_on_gitlab_and_forgejo() {
+  local case_dir rc merge_line main
+  case_dir=$(make_gitlab_case extra-gitlab)
+  main="$MR_PROJECT_URL/-/merge_requests/6"
+  printf 'pr=%s\n' "$main" >> "$case_dir/state/task-x1.meta"
+  record_extra_pr "$case_dir" "$MR_URL" > "$case_dir/record.out" 2>&1 \
+    || fail "extra-gitlab: recording failed: $(cat "$case_dir/record.out")"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "extra-gitlab: the extra merge request should merge: $(cat "$case_dir/stderr")"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+    || fail "extra-gitlab: unexpected merge invocation: '$merge_line'"
+  [ "$(grep '^pr=' "$case_dir/state/task-x1.meta")" = "pr=$main" ] \
+    || fail "extra-gitlab: merging the extra merge request moved the main pr="
+
+  case_dir=$(make_forgejo_case extra-forgejo)
+  main="https://$FJ_HOST/$FJ_OWNER/$FJ_REPO/pulls/8"
+  printf 'pr=%s\n' "$main" >> "$case_dir/state/task-x1.meta"
+  record_extra_pr "$case_dir" "$FJ_URL" > "$case_dir/record.out" 2>&1 \
+    || fail "extra-forgejo: recording failed: $(cat "$case_dir/record.out")"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "extra-forgejo: the extra pull request should merge: $(cat "$case_dir/stderr")"
+  merge_line=$(tea_merge_line "$case_dir/tea.log")
+  case "$merge_line" in
+    *"/repos/{owner}/{repo}/pulls/9/merge -f Do=merge -f head_commit_id=$FJ_HEAD"*) : ;;
+    *) fail "extra-forgejo: unexpected merge invocation: '$merge_line'" ;;
+  esac
+  [ "$(grep '^pr=' "$case_dir/state/task-x1.meta")" = "pr=$main" ] \
+    || fail "extra-forgejo: merging the extra pull request moved the main pr="
+  pass "a recorded extra PR merges through glab and tea as well"
+}
+
+# A code root that carries a secondmate marker (a live home's files in a pooled
+# copy) must never receive a merge outcome while the run's home is pinned to its
+# case dir, which is how every invocation in this suite runs.
+test_code_root_marker_cannot_redirect_outcomes() {
+  local case_dir rc fake_root parent
+  case_dir=$(make_case code-root-marker)
+  add_gh_mocks "$case_dir" 4242424242424242424242424242424242424242
+  : > "$case_dir/gh-axi.log"
+  fake_root="$case_dir/code-root"
+  parent="$case_dir/real-parent"
+  mkdir -p "$fake_root" "$parent/state"
+  ln -s "$ROOT/bin" "$fake_root/bin"
+  # The marked code root is a complete home, so a run that fell back to it
+  # would get as far as reporting on its parent channel.
+  cp -R "$case_dir/home/data" "$case_dir/home/config" "$case_dir/home/.tasks.toml" "$fake_root/"
+  printf '%s\n' intake > "$fake_root/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$fake_root/.fm-secondmate-parent"
+
+  set +e
+  FM_ROOT_OVERRIDE="$fake_root" \
+  FM_HOME="$case_dir/home" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_GH_VIEW_JSON="$case_dir/github-view.json" \
+  FM_TEST_GH_HEAD="$case_dir/github-head" \
+  FM_TEST_GH_BRANCH="$case_dir/github-branch.json" \
+  FM_TEST_GH_REQUIRED_RULES="$case_dir/github-required-rules.json" \
+  HOME="$case_dir/user-home" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/42 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "code-root-marker: the merge should succeed: $(cat "$case_dir/stderr")"
+  [ -z "$(find "$parent" -type f)" ] \
+    || fail "code-root-marker: a code-root marker redirected output to its parent: $(find "$parent" -type f)"
+  [ -z "$(find "$fake_root" -path "$fake_root/bin" -prune -o -newer "$fake_root/.fm-secondmate-parent" -type f -print)" ] \
+    || fail "code-root-marker: the run wrote into the code root"
+  pass "a secondmate marker in the code root cannot redirect this suite's merge outcomes"
+}
+
+test_extra_pr_is_recorded_beside_the_main_pr
+test_extra_pr_merges_without_touching_the_main_pr
+test_extra_pr_keeps_the_merge_guards
+test_unrecorded_second_pr_is_still_refused
+test_extra_pr_merges_on_gitlab_and_forgejo
+test_code_root_marker_cannot_redirect_outcomes
