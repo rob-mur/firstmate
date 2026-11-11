@@ -1396,6 +1396,7 @@ A preexisting project-bearing charter is also refused until it is re-scaffolded 
 
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
+Retirement archives a leased home's markers and operational directories under the parent's `data/<id>/` and records the retired route in `data/secondmates-retired.md`; [retirement](../.agents/skills/secondmate-provisioning/references/retirement.md) owns that behavior.
 
 ### Project modes and backlog handoff
 
