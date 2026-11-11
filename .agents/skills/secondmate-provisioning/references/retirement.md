@@ -9,12 +9,15 @@ Teardown refuses while its `state/*.meta` contains in-flight work.
 Non-forced retirement also refuses while any parent pending-reply for that id is still unresolved.
 A remote route delegates the in-flight guard to its configured host and additionally refuses while the primary has a pending handoff outbox.
 SSH exit 255 preserves the route and local records because remote completion is unknown.
-When retirement proceeds, teardown kills the direct endpoint, removes every parent pending-reply record for that id including resolved leftovers and its delivery confirmation, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
+When retirement proceeds, teardown kills the direct endpoint, removes every parent pending-reply record for that id including resolved leftovers and its delivery confirmation, appends the route row to `data/secondmates-retired.md` with the retirement time, home and archive, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
 An endpoint close that could not be made stops the retirement before any record naming that endpoint is removed, so a cleanup never reports success for an agent that may still be live with nothing left on disk naming it.
 [`bin/fm-teardown.sh`](../../../../bin/fm-teardown.sh)'s `endpoint_close_refusal` contract owns backend-specific `--force` limits; [endpoint-close verification](../../../../docs/verification/runtime-backends.md#endpoint-close) records what each backend can prove.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
 A plain-clone home with no pool slot is simply removed.
-If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
+`treehouse return` keeps ignored files, so before the return teardown moves the leased home's identity markers and its `data/`, `state/`, `config/` and `projects/` into `data/<id>/retired-home-<UTC time>` under the parent home.
+A reused slot then holds no marker that routes its reports into the retired mate's parent channel.
+If `treehouse return` fails for a leased home, teardown moves those files back and stops with state intact rather than raw-removing the directory and hiding a held lease.
+A rerun after an interrupted retirement restores an archive staged before the return started, and refuses one whose return had already started because the slot may now hold other work.
 Before either return or direct removal, teardown asks the target home's process-event runner to retire its registrations and physically owned machine-wide claims through the safe generation-bound path.
 It refuses retirement while that cleanup is uncertain or unavailable, preserving the home and retirement records for a later retry.
 Raw deletion is unsupported because a blocking process-event child can outlive its home.

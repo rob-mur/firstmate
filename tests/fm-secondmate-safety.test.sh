@@ -1969,6 +1969,9 @@ EOF
   grep -Fx "$subhome_abs" "$rearm_log" >/dev/null || fail "failed leased-home return did not rearm restored process-event sources"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared meta after leased home return failed"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null || fail "teardown removed registry route after leased home return failed"
+  [ -f "$subhome/.fm-secondmate-home" ] || fail "failed leased-home return did not restore the identity marker"
+  [ ! -e "$home/data/domain/retired-home.partial" ] || fail "failed leased-home return left its archive staging behind"
+  [ ! -e "$home/data/secondmates-retired.md" ] || fail "failed leased-home return recorded a retirement"
 
   set +e
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-return-fail-fake/pane.txt" \
@@ -1984,6 +1987,117 @@ EOF
     -exec test -e '{}/source.source' \; -print -quit)
   [ -n "$backup" ] && [ -e "$backup/source.source" ] || fail "failed process-event restoration did not retain its registration backup"
   pass "secondmate teardown refuses to hide failed leased-home return"
+}
+
+# A leased home returned to a pool that keeps ignored files: write the fixture
+# with markers and operational dirs, plus its parent meta and registry row.
+# Args: case name. Sets RESIDUE_HOME, RESIDUE_SUBHOME, RESIDUE_SUBHOME_ABS and
+# RESIDUE_FAKEBIN.
+make_leased_residue_fixture() {
+  local name=$1 fmroot
+  RESIDUE_HOME="$TMP_ROOT/$name-home"
+  RESIDUE_SUBHOME="$TMP_ROOT/$name-subhome"
+  fmroot="$TMP_ROOT/$name-fmroot"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$RESIDUE_SUBHOME" HEAD
+  mkdir -p "$RESIDUE_HOME/state" "$RESIDUE_HOME/data" \
+    "$RESIDUE_SUBHOME/state" "$RESIDUE_SUBHOME/data" "$RESIDUE_SUBHOME/config" "$RESIDUE_SUBHOME/projects/alpha"
+  RESIDUE_HOME=$(cd "$RESIDUE_HOME" && pwd -P)
+  RESIDUE_SUBHOME_ABS=$(cd "$RESIDUE_SUBHOME" && pwd -P)
+  printf 'domain\n' > "$RESIDUE_SUBHOME/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$RESIDUE_HOME" > "$RESIDUE_SUBHOME/.fm-secondmate-parent"
+  printf 'charter\n' > "$RESIDUE_SUBHOME/data/charter.md"
+  printf 'note\n' > "$RESIDUE_SUBHOME/state/child.status"
+  printf 'x\n' > "$RESIDUE_SUBHOME/config/crew-harness"
+  cat > "$RESIDUE_HOME/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$RESIDUE_SUBHOME
+project=$RESIDUE_SUBHOME
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$RESIDUE_SUBHOME
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$RESIDUE_SUBHOME"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$RESIDUE_HOME/data/secondmates.md"
+  RESIDUE_FAKEBIN=$(make_fake_tmux "$TMP_ROOT/$name-fake")
+  RESIDUE_ROOT=$fmroot
+}
+
+run_residue_teardown() {  # <name> <err>
+  PATH="$RESIDUE_FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$RESIDUE_ROOT" FM_HOME="$RESIDUE_HOME" \
+    FM_FAKE_TMUX_LOG="$TMP_ROOT/$1-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/$1-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_RETURN_KEEP_FILES=1 \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$2"
+}
+
+test_secondmate_teardown_archives_leased_home_residue() {
+  local err archive rc=0
+  make_leased_residue_fixture residue
+  err="$TMP_ROOT/residue.err"
+  run_residue_teardown residue "$err" || fail "teardown failed for a leased home whose pool keeps ignored files: $(cat "$err")"
+  grep -F "treehouse return --force $RESIDUE_SUBHOME_ABS" "$TMP_ROOT/residue-fake/tmux.log" >/dev/null \
+    || fail "residue: teardown did not return the leased home"
+  [ -d "$RESIDUE_SUBHOME" ] || fail "residue: fixture pool did not keep the returned slot"
+  for name in .fm-secondmate-home .fm-secondmate-parent data state config projects; do
+    [ ! -e "$RESIDUE_SUBHOME/$name" ] || fail "residue: returned slot kept $name"
+  done
+  archive=$(find "$RESIDUE_HOME/data/domain" -mindepth 1 -maxdepth 1 -type d -name 'retired-home-*' -print -quit 2>/dev/null || true)
+  [ -n "$archive" ] || fail "residue: no retired-home archive under the parent's data/domain"
+  [ ! -e "$RESIDUE_HOME/data/domain/retired-home.partial" ] || fail "residue: archive staging left behind"
+  [ "$(cat "$archive/data/charter.md")" = charter ] || fail "residue: charter not archived"
+  [ -f "$archive/state/child.status" ] && [ -f "$archive/config/crew-harness" ] && [ -d "$archive/projects/alpha" ] \
+    || fail "residue: operational dirs not archived"
+  [ "$(cat "$archive/.fm-secondmate-home")" = domain ] || fail "residue: identity marker not archived"
+  grep -F -- '- domain ' "$RESIDUE_HOME/data/secondmates.md" >/dev/null && fail "residue: registry row survived retirement"
+  grep -E "^- domain - retired [0-9]{4}-[0-9]{2}-[0-9]{2}T.*home: $RESIDUE_SUBHOME; archive: $archive; row: domain - design domain" \
+    "$RESIDUE_HOME/data/secondmates-retired.md" >/dev/null || fail "residue: no durable retirement record"
+  [ ! -e "$RESIDUE_HOME/state/domain.meta" ] || fail "residue: parent meta survived retirement"
+
+  # Work later leased to the slot must not reach the retired mate's parent channel.
+  rm -f "$RESIDUE_HOME/state/domain.status"
+  ( . "$ROOT/bin/fm-parent-channel-lib.sh"
+    fm_parent_channel_report "$RESIDUE_SUBHOME" "$RESIDUE_SUBHOME/state" "done: fixture line" ) || rc=$?
+  [ "$rc" -eq 1 ] || fail "residue: parent-channel append from the returned slot did not resolve as a main home (rc=$rc)"
+  [ ! -e "$RESIDUE_HOME/state/domain.status" ] || fail "residue: append from the returned slot wrote into the parent"
+  pass "secondmate teardown archives a leased home's markers and data and records the retirement"
+}
+
+test_secondmate_teardown_recovers_interrupted_archive() {
+  local err stage archive rc
+  make_leased_residue_fixture residue-rerun
+  err="$TMP_ROOT/residue-rerun.err"
+  # A run killed after staging, before the return started.
+  stage="$RESIDUE_HOME/data/domain/retired-home.partial"
+  mkdir -p "$stage"
+  printf '%s\n' "$RESIDUE_SUBHOME_ABS" > "$stage/.home"
+  mv "$RESIDUE_SUBHOME/data" "$RESIDUE_SUBHOME/.fm-secondmate-home" "$stage/"
+  run_residue_teardown residue-rerun "$err" || fail "rerun after an interrupted archive failed: $(cat "$err")"
+  archive=$(find "$RESIDUE_HOME/data/domain" -mindepth 1 -maxdepth 1 -type d -name 'retired-home-*' -print -quit 2>/dev/null || true)
+  [ -n "$archive" ] && [ "$(cat "$archive/data/charter.md")" = charter ] && [ -f "$archive/state/child.status" ] \
+    || fail "rerun did not archive the recovered home in full"
+  [ ! -e "$stage" ] || fail "rerun left the interrupted staging behind"
+  [ ! -e "$RESIDUE_SUBHOME/.fm-secondmate-home" ] || fail "rerun left the identity marker in the slot"
+
+  # A run killed after the return started may have handed the slot on: refuse
+  # and keep the files.
+  make_leased_residue_fixture residue-started
+  err="$TMP_ROOT/residue-started.err"
+  stage="$RESIDUE_HOME/data/domain/retired-home.partial"
+  mkdir -p "$stage"
+  printf '%s\n' "$RESIDUE_SUBHOME_ABS" > "$stage/.home"
+  : > "$stage/.return-started"
+  printf 'old\n' > "$stage/kept"
+  rc=0
+  run_residue_teardown residue-started "$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown proceeded past an archive whose return had already started"
+  grep -F 'started returning' "$err" >/dev/null || fail "started-return refusal did not explain itself"
+  [ -f "$stage/kept" ] || fail "started-return refusal did not keep the archived files"
+  [ -f "$RESIDUE_SUBHOME/.fm-secondmate-home" ] || fail "started-return refusal moved the identity marker"
+  [ -e "$RESIDUE_HOME/state/domain.meta" ] || fail "started-return refusal cleared the parent meta"
+  grep -F -- '- domain ' "$RESIDUE_HOME/data/secondmates.md" >/dev/null || fail "started-return refusal removed the route"
+  pass "secondmate teardown recovers an interrupted archive and refuses one whose return had started"
 }
 
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return() {
@@ -3183,6 +3297,8 @@ test_secondmate_teardown_preserves_process_events_on_later_refusal
 test_secondmate_force_teardown_sweeps_nested_homes
 test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return
+test_secondmate_teardown_archives_leased_home_residue
+test_secondmate_teardown_recovers_interrupted_archive
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_duplicated_child_slot
