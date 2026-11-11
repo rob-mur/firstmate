@@ -210,8 +210,14 @@
 # while any of those records is still unresolved. Teardown then discards child
 # work, kills child runtime endpoints, and removes the retired home. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
-# never left leased forever. If the treehouse return fails, teardown leaves the
-# leased home and state in place instead of hiding a still-held lease.
+# never left leased forever. Because the return keeps ignored files, teardown
+# first moves the home's identity markers and data/, state/, config/ and
+# projects/ into data/<id>/retired-home-<UTC> under this home, so a reused slot
+# keeps no channel to this parent. If the treehouse return fails, teardown moves
+# them back and leaves the leased home and state in place instead of hiding a
+# still-held lease. A rerun restores an archive staged by an interrupted run,
+# and refuses one whose return had already started. Before the route row is
+# removed, it is appended to data/secondmates-retired.md under the registry lock.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
@@ -1230,6 +1236,7 @@ remote_secondmate_teardown() {
     || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
   handoff_wake_retire \
     || { echo "error: remote receiver wake cleanup failed; preserving the local route for retry" >&2; return 1; }
+  record_secondmate_retirement "$ID" "$remote_host:$remote_home" none || return 1
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
@@ -2982,8 +2989,105 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   reap_task_worktree_processes "secondmate home" "$1"
 }
 
-remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
+# Retired-home archive. `treehouse return --force` keeps ignored files, so a
+# leased secondmate home returned as-is would leave its identity markers and its
+# data/, state/, config/ and projects/ in a pool slot the pool then hands to
+# unrelated work, where the leftover markers resolve that work's parent-channel
+# appends into the parent's state/<id>.status. Before the return, those dirs and
+# then the markers move into this home's data/<id>/retired-home.partial; a
+# successful return renames it to data/<id>/retired-home-<UTC stamp>, and a
+# failed return moves everything back. A staging dir a killed run left behind is
+# moved back by retired_home_stage_recover before the next run validates the
+# home; one whose return had already started refuses, because the slot may now
+# belong to other work, and keeps the archived files for inspection.
+RETIRED_HOME_ARCHIVE=
+
+retired_home_stage_path() {  # <task-id>
+  printf '%s/%s/retired-home.partial\n' "$DATA" "$1"
+}
+
+retired_home_stage_restore() {  # <home> <stage> <label>
+  local home=$1 stage=$2 label=$3 name
+  for name in data state config projects "$SUB_HOME_PARENT_MARKER" "$SUB_HOME_MARKER"; do
+    [ -e "$stage/$name" ] || [ -L "$stage/$name" ] || continue
+    if [ -e "$home/$name" ] || [ -L "$home/$name" ]; then
+      echo "error: cannot restore $label $home/$name from $stage: both copies exist; resolve by hand before retrying" >&2
+      return 1
+    fi
+    mv -- "$stage/$name" "$home/$name" || {
+      echo "error: cannot restore $label $home/$name from $stage" >&2
+      return 1
+    }
+  done
+  rm -f -- "$stage/.home" "$stage/.return-started"
+  rmdir -- "$stage" || {
+    echo "error: $label restore left unexpected files in $stage" >&2
+    return 1
+  }
+}
+
+retired_home_stage() {  # <home> <stage> <label>
+  local home=$1 stage=$2 label=$3 name
+  if [ -e "$stage" ] || [ -L "$stage" ]; then
+    echo "error: $label archive staging $stage already exists; refusing to overwrite it" >&2
+    return 1
+  fi
+  if ! { mkdir -p -- "$(dirname "$stage")" && mkdir -- "$stage"; }; then
+    echo "error: cannot create $label archive staging $stage" >&2
+    return 1
+  fi
+  printf '%s\n' "$home" > "$stage/.home" || { rm -rf -- "$stage"; return 1; }
+  # The identity markers move last, so an interrupted run leaves a home that
+  # still validates while its staging dir names what has already moved.
+  for name in data state config projects "$SUB_HOME_PARENT_MARKER" "$SUB_HOME_MARKER"; do
+    [ -e "$home/$name" ] || [ -L "$home/$name" ] || continue
+    mv -- "$home/$name" "$stage/$name" || {
+      echo "error: cannot archive $label $home/$name into $stage; restoring" >&2
+      retired_home_stage_restore "$home" "$stage" "$label" || true
+      return 1
+    }
+  done
+}
+
+retired_home_stage_finalize() {  # <stage> <task-id> <label>
+  local stage=$1 id=$2 label=$3 archive
+  archive="$DATA/$id/retired-home-$(date -u +%Y%m%dT%H%M%SZ)"
+  [ ! -e "$archive" ] || archive="$archive.$$"
+  rm -f -- "$stage/.return-started"
+  if mv -- "$stage" "$archive"; then
+    RETIRED_HOME_ARCHIVE=$archive
+  else
+    echo "warning: $label was returned but its archive stays at $stage; rename it to retired-home-<date> before retiring $id again" >&2
+    RETIRED_HOME_ARCHIVE=$stage
+  fi
+}
+
+# Move back a staging dir that an interrupted retirement of <task-id> left for
+# <home>. See the retired-home archive note above.
+retired_home_stage_recover() {  # <home> <task-id>
+  local home=$1 id=$2 stage recorded
+  stage=$(retired_home_stage_path "$id")
+  [ -e "$stage" ] || [ -L "$stage" ] || return 0
+  if [ -L "$stage" ] || [ ! -d "$stage" ]; then
+    echo "REFUSED: secondmate home archive staging $stage is not a directory" >&2
+    return 1
+  fi
+  if [ -e "$stage/.return-started" ]; then
+    echo "REFUSED: an earlier retirement of $id started returning $home to its pool; its archived files are kept at $stage. Check that slot, then rename $stage to retired-home-<date> or move its contents back before retrying" >&2
+    return 1
+  fi
+  recorded=$(cat "$stage/.home" 2>/dev/null || true)
+  [ -z "$home" ] || [ ! -d "$home" ] || home=$(cd "$home" && pwd -P)
+  if [ -z "$home" ] || [ "$recorded" != "$home" ] || [ ! -d "$home" ]; then
+    echo "REFUSED: secondmate home archive staging $stage belongs to ${recorded:-an unknown home}, not $home" >&2
+    return 1
+  fi
+  echo "teardown: restoring $id's home from an interrupted archive at $stage" >&2
+  retired_home_stage_restore "$home" "$stage" "secondmate home"
+}
+
+remove_firstmate_home() {  # <home> <label> <task-id> <backend> [archive]
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} archive=${5:-} abs_home_path process_event_backup stage=
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -3012,11 +3116,28 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    if [ "$archive" = archive ]; then
+      stage=$(retired_home_stage_path "$expected_id")
+      retired_home_stage "$abs_home_path" "$stage" "$label" || {
+        restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+        return 1
+      }
+      : > "$stage/.return-started" || {
+        retired_home_stage_restore "$abs_home_path" "$stage" "$label" || return 1
+        restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+        return 1
+      }
+    fi
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      if [ -n "$stage" ]; then
+        rm -f -- "$stage/.return-started"
+        retired_home_stage_restore "$abs_home_path" "$stage" "$label" || return 1
+      fi
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    [ -z "$stage" ] || retired_home_stage_finalize "$stage" "$expected_id" "$label"
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -3692,6 +3813,21 @@ cleanup_firstmate_home_children() {
   done
 }
 
+# Append the durable retirement record for <id> to data/secondmates-retired.md
+# before its registry row is removed, so a missing row always has a findable
+# reason. The caller holds the registry lock. An id with no row records nothing.
+record_secondmate_retirement() {  # <id> <home> <archive>
+  local id=$1 home=$2 archive=$3 row
+  row=$(grep -E "^- $id( |$)" "$SECONDMATE_REG" 2>/dev/null | head -n 1 || true)
+  [ -n "$row" ] || return 0
+  printf -- '- %s - retired %s (home: %s; archive: %s; row: %s)\n' \
+    "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$home" "$archive" "${row#- }" \
+    >> "$DATA/secondmates-retired.md" || {
+    echo "error: cannot record $id's retirement in $DATA/secondmates-retired.md; keeping its registry row" >&2
+    return 1
+  }
+}
+
 remove_secondmate_registry_entry() {
   local id=$1 tmp lock rc=0 acquired=0
   [ -f "$SECONDMATE_REG" ] || return 0
@@ -3700,9 +3836,12 @@ remove_secondmate_registry_entry() {
     fm_lock_acquire_wait "$lock" || return 1
     acquired=1
   fi
-  tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
-  mv "$tmp" "$SECONDMATE_REG" || rc=$?
+  record_secondmate_retirement "$id" "${HOME_PATH:-unknown}" "${RETIRED_HOME_ARCHIVE:-none}" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    tmp="$SECONDMATE_REG.tmp.$$"
+    grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
+    mv "$tmp" "$SECONDMATE_REG" || rc=$?
+  fi
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"
 }
@@ -3718,6 +3857,9 @@ if [ "$KIND" = secondmate ]; then
   LOCAL_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
   fm_lock_acquire_wait "$LOCAL_HANDOFF_LOCK" || exit 1
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  # The archive goes back first: it holds the home's state/, which the receiver
+  # wake recovery below may restore into.
+  retired_home_stage_recover "$HOME_PATH" "$ID" || exit 1
   handoff_wake_retire_stage_recover "$HOME_PATH" || exit 1
   handoff_wake_retire_validate || exit 1
   pending_replies_recovery_validate initial || exit 1
@@ -4165,7 +4307,7 @@ if [ "$KIND" = secondmate ]; then
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
     || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
-  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND"; then
+  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND" archive; then
     :
   else
     rc=$?
