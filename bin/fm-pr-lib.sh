@@ -486,6 +486,12 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
+      pr_extra=*)
+        # Extra PRs the task also merges (bin/fm-pr-check.sh --extra); pr=
+        # stays the one canonical identity, and each extra must be a PR URL.
+        value=${line#pr_extra=}
+        ( fm_pr_url_parse "$value" ) || post_pr_invalid=1
+        ;;
       control_relaunch_tx=*|x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         # Lifecycle and relay fields may be appended after the PR identity.
         ;;
