@@ -263,7 +263,7 @@ esac
 # background if fleet state moved (bin/fm-board-refresh.sh owns every guard).
 # Detached and best effort, so it can never delay or change the drain.
 if [ "$ACTOR" = main ] && [ -z "${ACK_THROUGH:-}" ] && [ -f "$FM_HOME/.lavish/bearings-board.html" ] && [ -x "$SCRIPT_DIR/fm-board-refresh.sh" ]; then
-  ( nohup "$SCRIPT_DIR/fm-board-refresh.sh" >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
+  "$SCRIPT_DIR/fm-board-refresh.sh" --kick >/dev/null 2>&1 || true
 fi
 
 # Defense in depth for the supervision chain: this script runs at the top of

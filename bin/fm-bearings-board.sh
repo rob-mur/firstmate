@@ -10,7 +10,7 @@
 # at invocation time.
 #
 # Usage:
-#   fm-bearings-board.sh build <data.json>
+#   fm-bearings-board.sh build [--no-reopen] <data.json>
 #   fm-bearings-board.sh path
 #
 # build      Validate the payload, drop the Captain's Call cards whose subject
@@ -35,6 +35,11 @@
 #            Every dropped card is named on stderr as a `dropped-landed-card:`
 #            line, so a rebuild states what it removed instead of quietly
 #            shrinking Captain's Call.
+#            --no-reopen is the automatic refresh's form
+#            (bin/fm-board-refresh.sh): the board file is still rewritten, but
+#            a session the captain ended is left ended and the build refuses
+#            instead of reopening it, because reopening opens a browser tab
+#            nobody asked for.
 # path       Print the stable board path for this home.
 #
 # A LIVE SESSION IS PROVED, NEVER ASSUMED. `lavish-axi <file>` exits 0 even
@@ -276,8 +281,8 @@ lavish_board_live() {  # <establish output> <canonical-board-path>
 # this board, which is exactly the attention `--reopen` exists for - and a
 # session that is still not live after that refuses the build rather than
 # arming a poll that can never attach.
-establish_board_session() {  # <board>
-  local board=$1 real out status version
+establish_board_session() {  # <board> <reopen-0-or-1>
+  local board=$1 reopen=$2 real out status version
   BOARD_SESSION_REOPENED=0
   real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
   # --no-open: a rebuild must never open another browser tab. A window that is
@@ -288,6 +293,8 @@ establish_board_session() {  # <board>
     printf 'session: live\n'
     return 0
   fi
+  [ "$reopen" = 1 ] \
+    || fail "the board Lavish session is not live and --no-reopen leaves an ended session ended; the rewritten board shows on the next /bearings"
   out=$(lavish-axi "$board" --reopen) || fail "cannot reopen the ended board Lavish session"
   printf '%s\n' "$out"
   if lavish_board_live "$out" "$real"; then
@@ -391,8 +398,10 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner
+  local data board json tmp sid extracted effective owner version pre_reopen_owner reopen=1
+  if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  data=$1
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
   jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"
@@ -442,7 +451,7 @@ command_build() {
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
     || fail "cannot derive the board source id"
   pre_reopen_owner=$(source_owner "$sid")
-  establish_board_session "$board"
+  establish_board_session "$board" "$reopen"
   if [ "$BOARD_SESSION_REOPENED" = 1 ]; then
     "$SCRIPT_DIR/fm-procevent-lavish.sh" retire "$board" >/dev/null \
       || fail "cannot retire the pre-reopen source generation (observed owner: ${pre_reopen_owner:-none})"
