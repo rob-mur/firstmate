@@ -440,6 +440,72 @@ test_a_tailnet_review_page_link_and_a_review_card_get_choices() {
   pass "a ready review page is a card with reviewed/later choices and a clickable tailnet link"
 }
 
+# Every regression below runs the generator against its own fresh FM_HOME and
+# parent home, so nothing reads or writes a real firstmate home.
+fresh_homes() {  # <name>
+  FM_HOME=$(mktemp -d "$TMP_ROOT/$1-home.XXXXXX"); export FM_HOME
+  FM_PARENT_HOME=$(mktemp -d "$TMP_ROOT/$1-parent.XXXXXX"); export FM_PARENT_HOME
+}
+
+test_a_secondmate_status_question_is_titled_from_its_decision_not_its_home() {
+  local snap="$TMP_ROOT/st-title.json" p
+  fresh_homes st-title
+  write_snapshot "$TMP_ROOT/st-title-base.json"
+  jq '.decisions_open = [
+        {id: "fm-patches", key: "status.fm-patches.retire-slot", task: "fm-patches", decision_key: "retire-slot", source: "status", verb: "needs-decision", title: "fm-patches", reason: "corr=ab12 (1) land now (2) drop it", owner: "fm-patches", mate: "fm-patches"},
+        {id: "fm-patches/retire-slot", key: "retire-slot", verb: "captain-hold", title: "Retire slot residue", reason: "until 2026-12-01: parked", owner: "fm-patches"},
+        {id: "fos", key: "status.fos.default", task: "fos", decision_key: "default", source: "status", verb: "needs-decision", title: "fos", reason: "PR 13 updated per the picks at https://github.com/acme/fos/pull/13; two calls left. (1) Build it (2) skip", owner: "fos", mate: "fos"},
+        {id: "fos2", key: "status.fos.arm", task: "fos", decision_key: "arm", source: "status", verb: "needs-decision", title: "fos", reason: "Run the minimal arm now?", owner: "fos", mate: "fos"}]' \
+    "$TMP_ROOT/st-title-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "fm-patches: Retire slot residue" "$(jq -r '[.captains_call[], .waiting[]] | map(select(.key == "status.fm-patches.retire-slot")) | .[0].title' <<<"$p")" "a status key that names a task takes that task title"
+  assert_equals "fos: PR 13 updated per the picks; two calls left" "$(jq -r '.captains_call[] | select(.key == "status.fos.default") | .title' <<<"$p")" "a default-key status question takes its first sentence, without the URL"
+  assert_equals "fos: Run the minimal arm now?" "$(jq -r '.captains_call[] | select(.key == "status.fos.arm") | .title' <<<"$p")" "an unknown task key falls back to the question text"
+  assert_equals "0" "$(jq '[.captains_call[], .waiting[]] | map(select(.title == "fos" or .title == "fm-patches")) | length' <<<"$p")" "no card is titled with only the home name"
+  printf '%s\n' "$p" > "$TMP_ROOT/st-title-payload.json"
+  validates "$TMP_ROOT/st-title-payload.json" || fail "a payload with derived status titles did not satisfy the board validator"
+  pass "a secondmate status question is titled from its task or question, never the bare home name"
+}
+
+test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice() {
+  local snap="$TMP_ROOT/twin.json" p
+  fresh_homes twin
+  write_snapshot "$TMP_ROOT/twin-base.json"
+  jq '.decisions_open = [
+        {id: "mate/slot", key: "slot", verb: "captain-hold", title: "Retire slot residue", reason: "Should I land the slot fix?", owner: "mate"},
+        {id: "mate", key: "status.mate.slot", task: "mate", decision_key: "slot", source: "status", verb: "needs-decision", title: "mate", reason: "corr=9f (1) land now (2) wait for the dedupe fix (3) drop it", owner: "mate", mate: "mate"},
+        {id: "other", key: "status.other.slot", task: "other", decision_key: "slot", source: "status", verb: "needs-decision", title: "other", reason: "Ship the other slot fix?", owner: "other", mate: "other"},
+        {id: "mate2", key: "status.mate.upstream", task: "mate", decision_key: "upstream", source: "status", verb: "needs-decision", title: "mate", reason: "Open the upstream PRs now?", owner: "mate", mate: "mate"}]' \
+    "$TMP_ROOT/twin-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "0" "$(jq '[.captains_call[], .waiting[]] | map(select(.key == "status.mate.slot")) | length' <<<"$p")" "the status twin does not render its own card or waiting row"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "slot" and (.title | test("Retire")))] | length' <<<"$p")" "the hold renders exactly one card"
+  assert_equals "Yes,No,land now,wait for the dedupe fix,drop it" "$(jq -r '.captains_call[] | select(.key == "slot" and (.title | test("Retire"))) | .options | map(.label) | join(",")' <<<"$p")" "the card keeps every choice from both the hold and its status twin"
+  jq -e '.captains_call[] | select(.key == "slot" and (.title | test("Retire"))) | [.question, (.about // "")] | join(" ") | test("land now") and test("Should I land")' <<<"$p" >/dev/null || fail "the card keeps the text of both questions"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.other.slot")] | length' <<<"$p")" "a status question with the same key in another home stays its own card"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.mate.upstream")] | length' <<<"$p")" "a status question with no hold twin stays its own card"
+  printf '%s\n' "$p" > "$TMP_ROOT/twin-payload.json"
+  validates "$TMP_ROOT/twin-payload.json" || fail "a payload with a merged twin card did not satisfy the board validator"
+  pass "one question renders one card that keeps the richer text and loses no choice"
+}
+
+test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question() {
+  local snap="$TMP_ROOT/parked.json" p
+  fresh_homes parked
+  write_snapshot "$TMP_ROOT/parked-base.json"
+  jq '.decisions_open = [
+        {id: "relock", key: "relock", verb: "captain-hold", title: "Aegis relock", reason: "Parked by the captain on 2026-11-10 to focus on the release. Start the relock MR? Do it before the registry switch.", owner: "(main)"},
+        {id: "ask", key: "ask", verb: "captain-hold", title: "Plain question", reason: "Start the relock MR before the registry switch?", owner: "(main)"},
+        {id: "worker-parked", key: "worker-parked", verb: "captain-hold", title: "Worker parked", reason: "Worker parked the branch; should the captain review it now?", owner: "(main)"}]' \
+    "$TMP_ROOT/parked-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "relock" "$(jq -r '.waiting | map(.key) | join(",")' <<<"$p")" "a hold the captain parked is a waiting row"
+  assert_equals "ask,worker-parked" "$(jq -r '.captains_call | map(.key) | sort | join(",")' <<<"$p")" "a question with no captain park stays a card"
+  printf '%s\n' "$p" > "$TMP_ROOT/parked-payload.json"
+  validates "$TMP_ROOT/parked-payload.json" || fail "a payload with a parked hold did not satisfy the board validator"
+  pass "a captain-parked hold waits while an open question remains a card"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -457,4 +523,7 @@ fm_test_run \
   test_every_question_card_gets_real_default_choices \
   test_a_task_status_question_becomes_a_card_and_a_wait_a_waiting_row \
   test_urls_in_a_question_become_card_links \
-  test_a_tailnet_review_page_link_and_a_review_card_get_choices
+  test_a_tailnet_review_page_link_and_a_review_card_get_choices \
+  test_a_secondmate_status_question_is_titled_from_its_decision_not_its_home \
+  test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice \
+  test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question

@@ -29,6 +29,14 @@
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
 #                      its hold reason as `question`.
+#                      A `source:"status"` row is titled from its decision, never the
+#                      asking home: the task its decision key names, else a given title
+#                      that is not just the task or home, else the question's first
+#                      sentence, prefixed `<home>: ` for a secondmate. A status row whose
+#                      decision key names a captain-held task in the same home is the
+#                      same question: it adds no card or waiting row of its own, and an
+#                      asked hold card merges its text into `question`/`about` and its
+#                      choices into `options`, so no answer choice is lost.
 #   contributions.captain
 #                   -> captains_call: one link-only `decision` card (key
 #                      `contribution.<task>`, `pr_url` the contribution's page) for
@@ -38,7 +46,9 @@
 #                      carries, adds none.
 #   waiting         -> waiting: a captain-held task whose reason is a wait or park on a
 #                      condition or date, with nothing for the captain to answer. The rule:
-#                      a reason with a question mark is a question; otherwise a reason that
+#                      a reason whose first sentence records that the captain parked,
+#                      deferred, or paused it is a wait; else a reason with a question
+#                      mark is a question; otherwise a reason that
 #                      opens with or contains park/paused/on hold/hold until/resume/
 #                      waiting for|on/until/re-runs is a wait; a hold carrying an `until`
 #                      date is a wait; anything else is a question. Waiting rows keep
@@ -195,8 +205,53 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
            | ($u | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")) and (($u[:10]) <= $today) );
     ( [ $snap.decisions_open[]? | select(released(.) | not) ]
       | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end) ) as $held
-  | ( [ $held[] | select(is_wait(.) | not) ] ) as $question_rows
-  | ( [ $held[] | select(is_wait(.))
+  # A status decision row (source "status") carries the asking task or home as its
+  # title; the card title says what the question is instead.
+  | def short_text:
+      tostring | gsub("[[:space:]]+"; " ") | sub("^ "; "")
+      | ([match("^.*?[.?!](?=[[:space:]]|$)").string][0] // .)
+      | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?]"; "")
+      | sub("[[:space:]]*[.,;:]$"; "")
+      | if length > 80 then (.[:79] | sub(" [^ ]*$"; "")) + "…" else . end;
+    def task_title($owner; $k):
+      ( [ $snap.decisions_open[]?
+          | select((.verb // "") == "captain-hold" and (.owner // "(main)") == $owner
+                   and (.key == $k or ((.id // "") | split("/") | last) == $k))
+          | (.title_full // .title) | select(. != null) | nz(null) | select(. != null) ][0] )
+      // ( [ $in_flight[] | select(.id == (if $owner == "(main)" then $k else $owner + "/" + $k end))
+             | .name | nz(null) | select(. != null) ][0] )
+      // ( [ ($snap.gates // [])[] | select(.id == $k and (.owner // "(main)") == $owner)
+             | .title | nz(null) | select(. != null) ][0] );
+    def status_title($d):
+      ($d.owner // "(main)") as $owner
+      | ($d.decision_key // "default") as $k
+      | (($d.title_full // $d.title // "") | tostring) as $given
+      | ( (if $k != "default" then task_title($owner; $k) else null end)
+          // (if $given != "" and ([$d.task, $d.id, $d.mate, $owner, $d.key] | index($given) | not)
+              then $given else null end)
+          // ((($d.reason_full // $d.reason // "") | sub("^corr=[0-9a-f]+ "; "")
+               | sub("^captain hold [^:]+: "; "") | short_text) | nz(null))
+          // (if $k != "default" then $k else $d.key end) ) as $t
+      | if $owner != "(main)" and ($t | startswith($owner + ": ") | not) then $owner + ": " + $t else $t end;
+    [ $held[] | if (.source // "") == "status" then .title_full = status_title(.) else . end ] as $held
+  | ( [ $held[] | select(is_wait(.) | not) ] ) as $asked
+  # One question, one card: a status decision whose key names a captain-held
+  # task in the same home is the same question, so it folds into that hold card
+  # with its text and choices. A hold that is a wait absorbs nothing, so a
+  # status question about a parked task still shows.
+  | def same_question($s; $h):
+      ($s.source // "") == "status" and ($h.verb // "") == "captain-hold"
+      and (($s.decision_key // "default") != "default")
+      and (($s.owner // "(main)") == ($h.owner // "(main)"))
+      and ($h.key == $s.decision_key or (($h.id // "") | split("/") | last) == $s.decision_key);
+    ( [ $asked[] | select((.verb // "") == "captain-hold") ] ) as $asked_holds
+  | ( [ $held[] | select(. as $r | any($asked_holds[]; same_question($r; .))) | .key ] ) as $folded
+  | ( [ $asked[] | . as $r
+        | if ($folded | index([$r.key])) then empty
+          elif ($r.verb // "") == "captain-hold" then
+            . + {twins: [ $held[] | select(same_question(.; $r)) ]}
+          else . end ] ) as $question_rows
+  | ( [ $held[] | select(is_wait(.)) | select(.key as $k | $folded | index([$k]) | not)
         | . as $d
         | { key: $d.key,
             title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
@@ -213,13 +268,21 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                       // ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0])
                       // null ),
               title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
-              options: default_options($d),
+              options: ( [ default_options($d)[], ($d.twins // [])[] as $tw | default_options($tw)[] ]
+                         | reduce .[] as $o ([];
+                             if any(.[]; (.label | ascii_downcase) == ($o.label | ascii_downcase)) then .
+                             elif any(.[]; .value == $o.value) then . + [$o + {value: ($o.value + "-" + ((length + 1) | tostring))}]
+                             else . + [$o] end) ),
               allow_freeform: true,
               freeform_hint: "answer in your own words (say later to defer)"
             }
-            + (if (($d.reason_full // $d.reason) | nz(null)) != null then {question: ($d.reason_full // $d.reason)} else {} end)
+            + ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason) | tostring | sub("^corr=[0-9a-f]+ "; "")) ]
+                | map(nz(null) | select(. != null)) | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end) as $texts
+                | ($texts | max_by(length)) as $q
+                | (if $q != null then {question: $q} else {} end)
+                  + ([ $texts[] | select(. != $q) ] | if length > 0 then {about: join("\n\n")} else {} end) )
             + (if $pr != null then {pr_url: $pr} else {} end)
-            + ( [ (($d.reason_full // $d.reason // "") | tostring | scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") )
+            + ( [ (([($d.reason_full // $d.reason // ""), (($d.twins // [])[] | (.reason_full // .reason // ""))] | map(tostring) | join(" ")) | scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") )
                   | sub("[.,;:!?]+$"; "") ] | unique | .[:5]
                 | if length > 0 then {links: map({url: ., label: (sub("^https?://"; "") | .[:60])})} else {} end ) )
           + overlay("captains_call"; $d.key; card_fields)
