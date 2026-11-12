@@ -97,6 +97,8 @@ $ bash bin/fm-pr-poll.sh --validated gerrit https://review.internal/c/group/apps
 
 The merged change emits one `merged` line.
 The open change and a change that does not exist both emit nothing.
+This transcript was captured before the poll reported open states, so the current poll prints `open` for an open change and `closed` for an abandoned one.
+Gerrit work-in-progress state is not read, so a Gerrit change never stops being tracked because it left draft.
 
 ## The merge path refuses
 

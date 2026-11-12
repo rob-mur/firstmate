@@ -57,6 +57,8 @@ index,state
 
 A list read is bounded by `--limit`, so a watched pull request older than that window would never be seen merged.
 The merge watch (`bin/fm-pr-poll.sh`), the terminal-run PR detail (`bin/fm-crew-state.sh`), and teardown's merged-PR proof (`bin/fm-teardown.sh`) therefore read the one pull request by number through `tea api ... /repos/{owner}/{repo}/pulls/{n}`, the same REST record the merge path below reads, and accept only a record whose `merged` field is a boolean (`fm_pr_forgejo_read_record` in `bin/fm-pr-lib.sh`).
+The merge watch prints `merged`, `closed`, `open`, or `draft`, where draft means `draft` is true or the title starts with `WIP:` or `[WIP]`.
+The watcher stops tracking a pull request that is closed without merging, or one that it saw as a draft and now sees as open, with one outcome and no merge.
 **Not verified here:** that by-number read was not re-run against the evidence instance; it relies on the same `tea api` pull request record whose `state`, `merged`, and `head.sha` fields the merge path's read-back below did verify.
 
 ## Why the login is resolved fresh, and how
