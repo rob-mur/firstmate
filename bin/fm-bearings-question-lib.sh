@@ -9,9 +9,12 @@
 # offers. Both read the same reason text, so the wait test and the default
 # choices live here and neither program restates them.
 #
-# is_wait($row): a reason with a question mark is a question; otherwise a
-# hold_until or until date, or a reason that parks, pauses, resumes, holds until,
-# waits for or on, or says until or re-runs, is a wait.
+# is_wait($row): a reason whose first sentence records that the captain parked,
+# deferred, or paused it ("Parked by the captain on <date> ...") is a wait even
+# when it also carries the question to ask later, because the captain already
+# answered it with that park; otherwise a reason with a question mark is a
+# question; otherwise a hold_until or until date, or a reason that parks, pauses,
+# resumes, holds until, waits for or on, or says until or re-runs, is a wait.
 #
 # default_options($row): the choices a question card offers when no copy overlay
 # authors its own, tried in order -
@@ -29,6 +32,7 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
   def is_wait($d):
     (($d.reason_full // $d.reason // "") | tostring) as $r
     | if ($d.verb // "") == "review-ready" then false
+      elif ($r | test("^[[:space:]]*((parked|deferred|paused|put on hold|on hold)[^.?!]*[^a-z]captain([^a-z]|$)|(the )?captain (has )?(parked|deferred|paused)[^a-z])"; "i")) then true
       elif ($r | test("\\?")) then false
       elif (($d.hold_until // $d.until // "") | tostring | length) > 0
            and (($d.hold_until // $d.until) != "-") then true
