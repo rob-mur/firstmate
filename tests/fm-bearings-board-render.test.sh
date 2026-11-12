@@ -297,8 +297,37 @@ test_every_card_type_renders_its_links() {
   pass "decision, merge, and credential cards each render their PR and extra links"
 }
 
+# Lavish annotate mode is on by default and lets native controls act, but it
+# turns a click on a plain <a href> into an annotation note. Every card link must
+# carry data-lavish-action so a click opens it while annotate mode stays on.
+test_every_card_link_opens_in_annotate_mode() {
+  local home data out
+  home=$(make_home link-actions)
+  data="$home/payload.json"
+  jq -n '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
+    captains_call:[
+      {key:"held-decision", type:"decision", title:"A held decision", repo:"r", about:"a",
+       options:[], allow_freeform:true, pr_url:"https://example.test/o/r/pull/7",
+       links:[{url:"https://example.test/console", label:"Console"}]}]}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null 2>&1 || fail "the board did not build"
+  require_listener_reached_poll "$home"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") \
+    || fail "the built board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    ([.call[].links[]] | length) == 2 and all(.call[].links[]; .action == true)
+  ' >/dev/null || fail "a card link would open an annotation note instead of the link: $out"
+  pass "every card link carries data-lavish-action so it opens in annotate mode"
+}
+
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
 test_every_card_type_renders_its_links
+test_every_card_link_opens_in_annotate_mode
 
 test_board_renders_only_the_captains_call() {
   local home out
