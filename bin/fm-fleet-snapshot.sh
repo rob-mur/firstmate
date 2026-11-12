@@ -840,6 +840,13 @@ task_json_row() {  # <captured-meta> <id>
        || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
     open_decisions_tsv=""
   fi
+  # A decision the captain already answered on its captain call is not still
+  # waiting on the captain, so it never surfaces as one (owner of the match:
+  # status_open_decisions_tag_answered in fm-classify-lib.sh).
+  if [ -n "$open_decisions_tsv" ]; then
+    open_decisions_tsv=$(printf '%s\n' "$open_decisions_tsv" \
+      | status_open_decisions_unanswered "$id" "$status_log")
+  fi
   open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
     [ splits("\n") | select(length > 0)
       | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)

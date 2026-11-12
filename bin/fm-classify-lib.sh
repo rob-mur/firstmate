@@ -1036,6 +1036,50 @@ status_open_decisions() {  # <status-file> [<kind>]
   printf '%s' "$open"
 }
 
+# The emission epoch of the line that opened keyed decision <key> in the log -
+# the newest needs-decision/blocked line carrying it, which is the record the
+# fold keeps open. Prints nothing and returns 1 when that line has no [at=] time.
+status_decision_opened_epoch() {  # <status-file> <key>
+  local f=$1 want=$2 line verb key epoch='' found=1
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb "$line" verb
+    case "$verb" in needs-decision|blocked) ;; *) continue ;; esac
+    key=$(_fm_decision_key "$line") || continue
+    [ "$key" = "$want" ] || continue
+    if _fm_status_at_epoch "$line" epoch; then found=0; else found=1; fi
+  done < "$f"
+  [ "$found" -eq 0 ] || return 1
+  printf '%s\n' "$epoch"
+}
+
+# Tag each line of an open-decision set ("<key>\t<verb>\t<note>" on stdin, as
+# status_open_decisions prints) for task <task> with the captain call that
+# already answered it: prints "<answered-task-id>\t<line>", with an empty first
+# field while the decision is still unanswered. A surface that asks the captain
+# shows only the empty-tagged lines. bin/fm-captain-hold.sh `answered` owns the
+# matching rule and keeps every uncertain call unanswered; so does a home
+# without that script and a line whose opening time is unknown.
+status_open_decisions_tag_answered() {  # <task> <status-file>
+  local task=$1 f=$2 line key opened answered_id
+  local hold="$_FM_CLASSIFY_LIB_DIR/fm-captain-hold.sh"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    key=${line%%$'\t'*}
+    answered_id=''
+    if [ -x "$hold" ] && opened=$(status_decision_opened_epoch "$f" "$key"); then
+      answered_id=$("$hold" answered "$task" "$key" --opened-at "$opened" 2>/dev/null) || answered_id=''
+    fi
+    printf '%s\t%s\n' "$answered_id" "$line"
+  done
+}
+
+# The lines of an open-decision set (stdin) for <task> that no captain call has
+# answered yet: the set every surface that asks the captain shows.
+status_open_decisions_unanswered() {  # <task> <status-file>
+  status_open_decisions_tag_answered "$1" "$2" | awk 'index($0, "\t") == 1 { print substr($0, 2) }'
+}
+
 # Resolve the log's current declaration at one boundary for crew-state consumers.
 # Any decision the fold still holds open wins over unrelated events, and the
 # fold's most recently opened record supplies it; a standing declared wait, then
