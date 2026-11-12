@@ -5,7 +5,7 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text}]}],
+//     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text,action}]}],
 //     empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -146,7 +146,8 @@ const call = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
   key: card.findAll((n) => n.attributes["data-lavish-question"] != null)
     .map((n) => n.attributes["data-lavish-question"])[0] ?? "",
   links: card.findAll((n) => n.tagName === "a")
-    .map((a) => ({ href: a.href ?? "", text: a.textContent })),
+    .map((a) => ({ href: a.href ?? "", text: a.textContent,
+      action: a.attributes["data-lavish-action"] != null })),
 }));
 const waitingNode = byId.get("bb-waiting");
 const waiting = {
