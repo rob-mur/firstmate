@@ -72,6 +72,9 @@
 # starts no further registration, so the cursor stays on the last task that
 # had a full turn; the first registration of a sweep still runs, and with no
 # time left to fetch it decides on the last-known refs.
+# The scan also skips a task whose poll stopped tracking that exact PR because
+# it was closed without merging or left draft (bin/fm-watch.sh,
+# state/<task>.pr-poll-untracked); recording it explicitly follows it again.
 #
 # --extra records an additional PR the same task also merges, for example a
 # prep PR that must land before the main one. It appends one idempotent
@@ -151,6 +154,7 @@ pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line f
 pr_check_pr_retired() {  # <id> <recorded-url>
   [ -n "$2" ] && fm_pr_url_parse "$2" || return 1
   fm_pr_poll_merge_already_notified "$STATE" "$1" "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" && return 0
+  fm_pr_poll_identity_marker_matches "$STATE" "$1" untracked "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" >/dev/null && return 0
   fm_pr_poll_retirement_parse "$STATE/$1.pr-poll-retirement" && [ "$FM_PR_RETIRE_URL" = "$2" ]
 }
 
@@ -635,6 +639,10 @@ fi
 if fm_pr_poll_publish_prepared; then
   fm_lock_release "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   PR_POLL_PUBLISH_LOCK_HELD=0
+  # An explicit record follows the PR again even after its poll stopped
+  # tracking it; only the scan honours that stop.
+  fm_pr_poll_identity_marker_remove "$STATE" "$ID" untracked \
+    || echo "warning: could not clear the stopped-tracking record for $ID" >&2
 else
   fm_lock_release "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   PR_POLL_PUBLISH_LOCK_HELD=0

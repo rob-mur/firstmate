@@ -4022,13 +4022,14 @@ fi
 
 # Shared by both the first-notification and already-notified paths below so
 # the retirement sequence (bin/fm-pr-lib.sh) is stated once.
-retire_merged_pr_poll() {  # <id>
-  local id=$1
-  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
+# <result> is merged, or closed or ready when the poll stopped tracking the PR.
+retire_merged_pr_poll() {  # <id> [result]
+  local id=$1 result=${2:-merged}
+  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$result"; then
     fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-      || triage_log "merged PR poll retirement remains recoverable for $id"
+      || triage_log "$result PR poll retirement remains recoverable for $id"
   else
-    triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+    triage_log "$result PR poll retirement deferred because its canonical snapshot changed for $id"
   fi
 }
 
@@ -4322,6 +4323,63 @@ EOF
         # One line, as the queued row stores it: wake consumers keep only
         # prefixed lines, so a later output line would otherwise be dropped.
         reason="check: $c: $(printf '%s' "$out" | fm_wake_clean_field)"
+        # Any other poll reading decides only whether the task keeps following
+        # its PR (bin/fm-pr-poll.sh header): closed, or open after this change
+        # was seen as a draft, stops tracking with one outcome; a draft is
+        # remembered; anything else stays silent. Stopping never merges, cleans
+        # up, or discards work: it retires only this poll's own files.
+        if [ "$is_pr_poll" -eq 1 ] && { [ "$out" = closed ] || [ "$out" = draft ] || [ "$out" = open ]; }; then
+          untrack_reason=$(fm_pr_poll_identity_marker_matches "$STATE" "$id" untracked \
+            "$provider" "$host" "$path" "$number") || untrack_reason=
+          untrack_recorded=$untrack_reason
+          if [ -z "$untrack_reason" ]; then
+            case "$out" in
+              closed) untrack_reason=closed ;;
+              open)
+                if fm_pr_poll_identity_marker_matches "$STATE" "$id" draft-seen \
+                    "$provider" "$host" "$path" "$number" >/dev/null; then
+                  untrack_reason=ready
+                fi
+                ;;
+              draft)
+                fm_pr_poll_identity_marker_matches "$STATE" "$id" draft-seen \
+                    "$provider" "$host" "$path" "$number" >/dev/null \
+                  || fm_pr_poll_identity_marker_write "$STATE" "$id" draft-seen \
+                    "$provider" "$host" "$path" "$number" \
+                  || triage_log "could not record that the PR for $id is a draft"
+                ;;
+            esac
+          fi
+          if [ -n "$untrack_reason" ]; then
+            if [ -z "$untrack_recorded" ] \
+              && [ "$(fm_meta_get "$STATE/$id.meta" kind)" != secondmate ]; then
+              untrack_rc=0
+              fm_pr_untrack_outcome_report "$FM_HOME" "$STATE" "$id" "$url" \
+                "$untrack_reason" || untrack_rc=$?
+              if [ "$untrack_rc" -ne 0 ]; then
+                triage_log "stopped-tracking outcome for $id could not be recorded (rc=$untrack_rc)"
+                exit 1
+              fi
+            fi
+            if [ -z "$untrack_recorded" ] && ! fm_pr_poll_identity_marker_write "$STATE" "$id" untracked \
+                "$provider" "$host" "$path" "$number" "$untrack_reason"; then
+              triage_log "published stopped-tracking outcome for $id but could not record it"
+              exit 1
+            fi
+            retire_merged_pr_poll "$id" "$untrack_reason"
+            fm_pr_poll_identity_marker_remove "$STATE" "$id" draft-seen \
+              || triage_log "could not remove the draft record for $id"
+            pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
+            if [ -n "$untrack_recorded" ] || [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
+              triage_log "stopped tracking the PR for $id without a new outcome"
+              continue
+            fi
+            wake "check: stopped tracking: $id $url"
+          fi
+          pr_poll_control_release || exit 1
+          continue
+        fi
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
             # A merge poll armed on a secondmate is residue: the mate is a
