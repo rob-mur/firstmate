@@ -609,6 +609,12 @@ __FM_BEARINGS_BOARD_DATA__
     cardLinks(item).forEach(function (l) {
       var a = el("a", "bb-decision__link", l.label ? l.label + " - " + l.url : l.url);
       a.href = l.url; a.target = "_blank"; a.rel = "noopener";
+      /* Lavish annotate mode lets native controls act but turns a plain link
+         click into an annotation note; data-lavish-action makes it navigate.
+         Only these new-tab links carry it: the header link reloads the board
+         inside Lavish's frame without Lavish's page script, where a queued
+         answer never reaches Lavish, so annotate mode keeps blocking it. */
+      a.setAttribute("data-lavish-action", "");
       pad.appendChild(a);
     });
 
