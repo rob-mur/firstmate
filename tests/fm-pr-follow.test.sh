@@ -14,6 +14,7 @@ cat > "$TMP_ROOT/tools/gh" <<'SH'
 printf 'read\n' >> "$FM_FOLLOW_READS"
 case "$*" in
   *'--json state --jq .state') jq -r .state "$FM_FOLLOW_FIXTURE" ;;
+  *'--json state,isDraft -q '*) jq -r '.state + (if .isDraft == true then " DRAFT" else "" end)' "$FM_FOLLOW_FIXTURE" ;;
   *) cat "$FM_FOLLOW_FIXTURE" ;;
 esac
 SH

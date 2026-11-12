@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
-# It emits exactly one merged line for a merged change, exactly one degraded
-# line for a ready change that degraded after its ready report (a failing
-# check on GitHub, a failing head pipeline on GitLab), and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. A degraded line names the head or pipeline that degraded, the
-# failed jobs with the forge's failure reasons, and the pipeline or check
-# URL, so the wake says which test broke without a job-log dig; the watcher
-# dedupes one wake per transition on that head/pipeline (bin/fm-watch.sh).
-# The provider-tagged identity is data in the sidecar and is never
+# It emits one line naming the change's state (the arming baseline read may add
+# a merge-train line), and stays silent on every
+# error, so a failed lookup can never be read as a merge or a closure:
+#   merged - the change is merged;
+#   closed - the change is closed without merging (a Gerrit change abandoned);
+#   draft  - the change is open and marked as a draft;
+#   open   - the change is open, not a draft, and nothing below applies.
+# With the degraded watch on (config/pr-degraded-watch) it instead emits one
+# degraded line for a ready change that degraded after its ready report (a
+# failing check on GitHub, a failing head pipeline on GitLab), naming the head
+# or pipeline that degraded, the failed jobs with the forge's failure reasons,
+# and the pipeline or check URL, so the wake says which test broke without a
+# job-log dig; the watcher dedupes one wake per transition on that
+# head/pipeline (bin/fm-watch.sh). A draft is reported as draft, never as
+# degraded. Gerrit emits only merged and closed, because its work-in-progress
+# flag is not read here. bin/fm-watch.sh stops tracking a task on closed, and
+# on open after it saw draft for the same change, which is the change becoming
+# ready for human review. The provider-tagged identity is data in the sidecar
+# and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
@@ -105,8 +115,14 @@ case "$provider" in
       exit 0
     fi
     if [ "$degraded_enabled" != 1 ]; then
-      result=$(GH_HOST=$host gh pr view "$url" --json state --jq '.state' 2>/dev/null) || exit $unknown
-      [ "$result" = MERGED ] && printf '%s\n' merged
+      result=$(GH_HOST=$host gh pr view "$url" --json state,isDraft \
+        -q '.state + (if .isDraft == true then " DRAFT" else "" end)' 2>/dev/null) || exit $unknown
+      case "$result" in
+        MERGED) printf '%s\n' merged ;;
+        CLOSED) printf '%s\n' closed ;;
+        'OPEN DRAFT') printf '%s\n' draft ;;
+        OPEN) printf '%s\n' open ;;
+      esac
       exit 0
     fi
     # One read answers both questions this poll owns: the merged wake it has
@@ -122,9 +138,13 @@ case "$provider" in
     # this branch, and the head is validated here so the watcher's dedupe
     # marker never sees another byte.
     # shellcheck disable=SC2016  # The filter's $f and $r are jq variables, expanded by jq, not the shell.
-    result=$(GH_HOST=$host gh pr view "$url" --json state,headRefOid,statusCheckRollup --jq '
+    result=$(GH_HOST=$host gh pr view "$url" --json state,isDraft,headRefOid,statusCheckRollup --jq '
       if .state == "MERGED" then
         "merged"
+      elif .state == "CLOSED" then
+        "closed"
+      elif .state == "OPEN" and .isDraft == true then
+        "draft"
       elif .state == "OPEN"
         and ([.statusCheckRollup[]?
                 | select((.conclusion // .state // "") as $r
@@ -144,12 +164,14 @@ case "$provider" in
                           | gsub("[\\n\\r\\t]"; " ")))]
             | join(",") | .[:300])
           + (if $u == "" then "" else " url=" + ($u | gsub("[\\n\\r\\t]"; " ")) end)
+      elif .state == "OPEN" then
+        "open"
       else
         ""
       end' 2>/dev/null) || exit $unknown
     case $result in
-      merged)
-        printf '%s\n' merged
+      merged|closed|draft|open)
+        printf '%s\n' "$result"
         ;;
       'degraded head='*)
         case $result in
@@ -198,10 +220,29 @@ case "$provider" in
       GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null || exit 3
       exit 0
     fi
+    # The plain field read needs no JSON processor; only an exact known state is
+    # reported, so a changed format or an unreadable merge request stays silent
+    # instead of reporting a merge. That output has no draft field, so a draft
+    # is read from the title prefix GitLab itself uses to mark one: Draft:,
+    # [Draft], or (Draft), in any case.
+    gitlab_field_state() {  # <glab mr view output>
+      local state title
+      state=$(printf '%s\n' "$1" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
+      title=$(printf '%s\n' "$1" | sed -n 's/^title:[[:space:]]*//p' | head -1) || exit $unknown
+      case "$state" in
+        merged) printf '%s\n' merged ;;
+        closed) printf '%s\n' closed ;;
+        open|opened)
+          case "$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]')" in
+            'draft:'*|'[draft]'*|'(draft)'*) printf '%s\n' draft ;;
+            *) printf '%s\n' open ;;
+          esac
+          ;;
+      esac
+    }
     if [ "$degraded_enabled" != 1 ]; then
       raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit $unknown
-      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
-      [ "$state" = merged ] && printf '%s\n' merged
+      gitlab_field_state "$raw"
       exit 0
     fi
     # glab resolves the instance from the project URL passed to -R, so the host
@@ -306,8 +347,7 @@ case "$provider" in
     }
     if ! command -v jq >/dev/null 2>&1; then
       raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit $unknown
-      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
-      [ "$state" = merged ] && printf '%s\n' merged
+      gitlab_field_state "$raw"
       exit 0
     fi
     raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit $unknown
@@ -319,6 +359,15 @@ case "$provider" in
       then
         if .state == "merged" then
           "merged"
+        elif .state == "closed" then
+          "closed"
+        elif (.state == "opened" or .state == "locked")
+             and (.draft == true
+                  or ((.title | type) == "string"
+                      and (.title | ascii_downcase
+                           | startswith("draft:") or startswith("[draft]") or startswith("(draft)"))))
+        then
+          "draft"
         elif (.state == "opened" or .state == "locked")
              and (.head_pipeline | type) == "object"
              and (.head_pipeline.status | type) == "string"
@@ -337,6 +386,10 @@ case "$provider" in
       end' 2>/dev/null) || exit $unknown
     case $result in
       open\ *)
+        # The train reads below print a train or merge line, or nothing; an
+        # opened merge request with nothing else to say prints open, while a
+        # locked one stays silent, as any state other than an exact known one.
+        train_out=$(
         reason=${result#open }
         pipeline=${reason%% *}
         reason=${reason#* }
@@ -384,7 +437,7 @@ case "$provider" in
           case $current_state in
             merged) printf '%s\n' merged; exit 0 ;;
             opened|locked) ;;
-            closed) exit 0 ;;
+            closed) printf '%s\n' closed; exit 0 ;;
             *) current_state=unknown ;;
           esac
           line="degraded train=dropped url=$url"
@@ -395,11 +448,20 @@ case "$provider" in
           printf '%s\n' "$line"
         fi
         exit 0
+        )
+        train_rc=$?
+        [ -z "$train_out" ] || printf '%s\n' "$train_out"
+        [ "$train_rc" -eq 0 ] || exit "$train_rc"
+        if [ -z "$train_out" ] \
+          && [ "$(printf '%s' "$raw" | jq -r '.state' 2>/dev/null)" = opened ]; then
+          printf '%s\n' open
+        fi
+        exit 0
         ;;
     esac
     case $result in
-      merged)
-        printf '%s\n' merged
+      merged|closed|draft)
+        printf '%s\n' "$result"
         ;;
       'degraded pipeline='*)
         case $result in
@@ -506,7 +568,10 @@ case "$provider" in
       else
         error("invalid gerrit record")
       end' 2>/dev/null) || exit $unknown
-    [ "$status" = MERGED ] && printf '%s\n' merged
+    case "$status" in
+      MERGED) printf '%s\n' merged ;;
+      ABANDONED) printf '%s\n' closed ;;
+    esac
     ;;
   forgejo)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -558,15 +623,28 @@ case "$provider" in
     # tea's single-PR view ignores field selection, so the one pull request
     # is read by number from the REST record through "tea api", which keeps
     # the credential inside tea. "tea api" exits 0 on an HTTP error with the
-    # error body as output, so only a boolean merged field of true wakes this
-    # poll and every other reading stays silent.
-    merged=$(tea api --login "$login" --repo "$owner/$repo" \
+    # error body as output, so only a record with a boolean merged field and an
+    # open or closed state is reported and every other reading stays silent.
+    # A draft is a true draft field or the title prefix Forgejo uses to mark
+    # one, WIP: or [WIP] in any case.
+    state=$(tea api --login "$login" --repo "$owner/$repo" \
       "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
         if type == "object" and (.merged | type) == "boolean"
-        then .merged | tostring
+          and (.state == "open" or .state == "closed")
+        then
+          if .merged then "merged"
+          elif .state == "closed" then "closed"
+          elif .draft == true
+            or ((.title | type) == "string"
+                and (.title | ascii_downcase | startswith("wip:") or startswith("[wip]")))
+          then "draft"
+          else "open"
+          end
         else error("invalid pull request record")
         end' 2>/dev/null) || exit $unknown
-    [ "$merged" = true ] && printf '%s\n' merged
+    case "$state" in
+      merged|closed|draft|open) printf '%s\n' "$state" ;;
+    esac
     ;;
   *) exit 0 ;;
 esac

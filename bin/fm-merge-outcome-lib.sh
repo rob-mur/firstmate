@@ -22,6 +22,9 @@
 # is committed, so a failed commit stays eligible for at-least-once retry and
 # may rarely duplicate rather than leave a merge silent.
 #
+# fm_pr_untrack_outcome_report below is the same kind of outcome for a PR the
+# poll stopped tracking without a merge.
+#
 # Sourced by bin/fm-pr-merge.sh, bin/fm-watch.sh, and tests. No side effects on
 # source beyond its sourced libraries.
 
@@ -131,4 +134,46 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
   [ ! -e "${FM_CONFIG_OVERRIDE:-$home/config}/fleet-ledger" ] || [ "$status" -ne 0 ] || FM_HOME=$home FM_STATE_OVERRIDE=$state "$_FM_MERGE_OUTCOME_LIB_DIR/fm-fleet-ledger.sh" merged "$id" pr "$FM_PR_URL" || true
   return "$status"
+}
+
+# fm_pr_untrack_outcome_report <home> <state> <task-id> <pr-url> <reason>
+#
+# The one plain outcome for a poll that stopped tracking a task's PR without a
+# merge, routed by the home's role like the merge outcome above. <reason> is
+# closed (closed without merging) or ready (it left draft, so it is ready for
+# human review). A secondmate reports "done [key=untracked-<id>]: ..." on its
+# parent channel and also wakes itself; a main home queues one
+# "check: stopped tracking:" wake keyed by the task and PR. bin/fm-watch.sh
+# calls this before it writes the untracked marker (bin/fm-pr-lib.sh), and it
+# skips the call once that marker matches, so the outcome is told once.
+# Stopping tracking never merges, cleans up, or discards anything.
+#
+# Returns 0 when recorded, 2 on an invalid request, 3 when this home's role or
+# parent binding cannot be read, and 1 on any other failure to record.
+fm_pr_untrack_outcome_report() {  # <home> <state> <task-id> <pr-url> <reason>
+  local home=$1 state=$2 id=$3 url=$4 reason=$5 text destination='' rc=0
+  # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  case "$reason" in
+    closed) text='it was closed without merging' ;;
+    ready) text='it left draft and is ready for human review' ;;
+    *) return 2 ;;
+  esac
+  fm_pr_task_id_valid "$id" || return 2
+  fm_pr_url_parse "$url" || return 2
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 1 ] || return 3
+    destination=''
+  fi
+  STATE=$state
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
+  if [ -n "$destination" ]; then
+    fm_parent_channel_append_once "$destination" \
+      "$(status_stamp_line "done [key=untracked-$id]: stopped tracking $id $FM_PR_URL: $text")" || return 1
+  fi
+  fm_wake_append check "untracked-$id-$FM_PR_URL" \
+    "check: stopped tracking: $id $FM_PR_URL - $text" || return 1
 }
