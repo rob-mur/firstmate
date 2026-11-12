@@ -304,6 +304,10 @@ CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
 CAPTAIN_CONTROL_LOCK=
 CAPTAIN_CONTROL_LOCK_HELD=0
+# Set by the commands that can open or close a captain call, so their exit asks
+# an open bearings board to catch up (bin/fm-board-refresh.sh owns the debounce
+# and is a no-op for a home without a board).
+KICK_BOARD=0
 captain_hold_cleanup() {
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
@@ -314,6 +318,9 @@ captain_hold_cleanup() {
     CAPTAIN_CONTROL_LOCK_HELD=0
   fi
   fm_afk_contract_lock_release || true
+  if [ "$KICK_BOARD" = 1 ]; then
+    "$SCRIPT_DIR/fm-board-refresh.sh" --kick >/dev/null 2>&1 || true
+  fi
 }
 trap captain_hold_cleanup EXIT
 
@@ -2460,6 +2467,9 @@ run_then_refresh_home_summary() {  # <command-function> <args...>
   exit "$rc"
 }
 
+case "${1:-}" in
+  hold|answer|answers|reconcile) KICK_BOARD=1 ;;
+esac
 case "${1:-}" in
   hold) shift; run_then_refresh_home_summary command_hold "$@" ;;
   answer) shift; run_then_refresh_home_summary command_answer "$@" ;;
