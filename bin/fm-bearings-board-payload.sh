@@ -11,8 +11,10 @@
 #   fm-bearings-board-payload.sh [--snapshot <file|->] [--copy <file>] [--include-prs]
 #
 # The payload goes to stdout. With no --snapshot the script runs
-# `fm-bearings-snapshot.sh --json` itself (--include-prs is passed through);
-# with --snapshot it reads that JSON from the file or stdin instead.
+# `fm-bearings-snapshot.sh --json --all-decisions` itself (--include-prs is passed
+# through), so every open captain hold - live, blocked, dated, or aged, past the
+# snapshot's decision cap - yields exactly one card or waiting row and none is
+# charted as a gate; with --snapshot it reads that JSON from the file or stdin instead.
 #
 # Mapping (snapshot field -> board section):
 #   decisions_open  -> captains_call: one `decision` card per captain-held task id,
@@ -22,8 +24,8 @@
 #                      derived default choices (bin/fm-bearings-question-lib.sh: yes/no,
 #                      numbered parts, two-way or, else approve/decline; an authored
 #                      overlay `options` still wins) with reconcile secondary, and any
-#                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`. The
-#                      snapshot already buckets holds, so every row is a live call.
+#                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`. Every
+#                      open captain hold is a row here (see --all-decisions above).
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
 #                      its hold reason as `question`.
@@ -112,9 +114,9 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 
 if [ -z "$SNAPSHOT" ]; then
   if [ "$INCLUDE_PRS" = 1 ]; then
-    SNAP_JSON=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" --json --include-prs) || fail "snapshot failed"
+    SNAP_JSON=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" --json --all-decisions --include-prs) || fail "snapshot failed"
   else
-    SNAP_JSON=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" --json) || fail "snapshot failed"
+    SNAP_JSON=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" --json --all-decisions) || fail "snapshot failed"
   fi
 elif [ "$SNAPSHOT" = - ]; then
   SNAP_JSON=$(cat)

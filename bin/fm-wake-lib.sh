@@ -2881,6 +2881,12 @@ fm_wake_append_locked() {
   else
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
+    # Every wake is a fleet state change, so an open bearings board is asked to
+    # catch up; bin/fm-board-refresh.sh owns the debounce and runs detached.
+    if [ -f "$FM_HOME/.lavish/bearings-board.html" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$FM_WAKE_LIB_DIR/fm-board-refresh.sh" --kick >/dev/null 2>&1 || true
+    fi
   fi
   return "$status"
 }
