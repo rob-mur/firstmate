@@ -316,7 +316,8 @@ osc_plan() { # <task> <kind> <state> <busy|idle|unknown> [busy-mark]
   W_KIND=
   W_MSG=
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  line=$(status_open_decisions "$file" "$kind" 2>/dev/null | tail -n 1)
+  line=$(status_open_decisions "$file" "$kind" 2>/dev/null \
+    | status_open_decisions_unanswered "$task" "$file" | tail -n 1)
   verb=$(printf '%s' "$line" | cut -f2)
   note=$(printf '%s' "$line" | cut -f3- | tr '\t\r\n' '   ')
   case "$verb" in

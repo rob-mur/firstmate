@@ -196,6 +196,7 @@ scan_open_blockers() {  # -> tab-separated blocker rows
       STATUS_SCAN_ERROR=$status
       return 1
     fi
+    [ -z "$open" ] || open=$(printf '%s\n' "$open" | status_open_decisions_unanswered "$id" "$status")
     while IFS="$(printf '\t')" read -r key verb summary; do
       [ "$verb" = blocked ] || continue
       clean_summary=$(printf '%s' "$summary" | clean_field)
@@ -613,7 +614,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-
       count=$((count + 1))
       printf '  - %s [key=%s] needs your decision: %s\n' "$task" "$key" "$(printf '%s' "$summary" | clean_field)"
     done <<EOF
-$(status_open_decisions "$status")
+$(status_open_decisions "$status" | status_open_decisions_unanswered "$task" "$status")
 EOF
   done
   rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" && $6 != "true" { printf "  - %s: %s\n", $2, $5 }')
