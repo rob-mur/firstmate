@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
-# It emits exactly one merged line for a merged change and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# It emits at most one word naming the change's state, and stays silent on every
+# error, so a failed lookup can never be read as a merge or a closure:
+#   merged - the change is merged;
+#   closed - the change is closed without merging (a Gerrit change abandoned);
+#   draft  - the change is open and marked as a draft;
+#   open   - the change is open and not marked as a draft.
+# Gerrit emits only merged and closed, because its work-in-progress flag is not
+# read here. bin/fm-watch.sh stops tracking a task on closed, and on open after
+# it saw draft for the same change, which is the change becoming ready for
+# human review. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
@@ -73,8 +80,14 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
-    state=$(GH_HOST=$host gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    state=$(GH_HOST=$host gh pr view "$url" --json state,isDraft \
+      -q '.state + (if .isDraft == true then " DRAFT" else "" end)' 2>/dev/null) || exit 0
+    case "$state" in
+      MERGED) printf '%s\n' merged ;;
+      CLOSED) printf '%s\n' closed ;;
+      'OPEN DRAFT') printf '%s\n' draft ;;
+      OPEN) printf '%s\n' open ;;
+    esac
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -110,11 +123,23 @@ case "$provider" in
     # to git for the current repository, and the watcher runs in no repository.
     # The state is read from glab's own field output rather than its JSON,
     # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
+    # JSON processor; only an exact known state is reported, so a changed format
+    # or an unreadable merge request stays silent instead of reporting a merge.
+    # That output has no draft field, so a draft is read from the title prefix
+    # GitLab itself uses to mark one: Draft:, [Draft], or (Draft), in any case.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    [ "$state" = merged ] && printf '%s\n' merged
+    title=$(printf '%s\n' "$raw" | sed -n 's/^title:[[:space:]]*//p' | head -1) || exit 0
+    case "$state" in
+      merged) printf '%s\n' merged ;;
+      closed) printf '%s\n' closed ;;
+      open|opened)
+        case "$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]')" in
+          'draft:'*|'[draft]'*|'(draft)'*) printf '%s\n' draft ;;
+          *) printf '%s\n' open ;;
+        esac
+        ;;
+    esac
     ;;
   gerrit)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -177,7 +202,10 @@ case "$provider" in
       else
         error("invalid gerrit record")
       end' 2>/dev/null) || exit 0
-    [ "$status" = MERGED ] && printf '%s\n' merged
+    case "$status" in
+      MERGED) printf '%s\n' merged ;;
+      ABANDONED) printf '%s\n' closed ;;
+    esac
     ;;
   forgejo)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -229,15 +257,28 @@ case "$provider" in
     # tea's single-PR view ignores field selection, so the one pull request
     # is read by number from the REST record through "tea api", which keeps
     # the credential inside tea. "tea api" exits 0 on an HTTP error with the
-    # error body as output, so only a boolean merged field of true wakes this
-    # poll and every other reading stays silent.
-    merged=$(tea api --login "$login" --repo "$owner/$repo" \
+    # error body as output, so only a record with a boolean merged field and an
+    # open or closed state is reported and every other reading stays silent.
+    # A draft is a true draft field or the title prefix Forgejo uses to mark
+    # one, WIP: or [WIP] in any case.
+    state=$(tea api --login "$login" --repo "$owner/$repo" \
       "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
         if type == "object" and (.merged | type) == "boolean"
-        then .merged | tostring
+          and (.state == "open" or .state == "closed")
+        then
+          if .merged then "merged"
+          elif .state == "closed" then "closed"
+          elif .draft == true
+            or ((.title | type) == "string"
+                and (.title | ascii_downcase | startswith("wip:") or startswith("[wip]")))
+          then "draft"
+          else "open"
+          end
         else error("invalid pull request record")
         end' 2>/dev/null) || exit 0
-    [ "$merged" = true ] && printf '%s\n' merged
+    case "$state" in
+      merged|closed|draft|open) printf '%s\n' "$state" ;;
+    esac
     ;;
   *) exit 0 ;;
 esac

@@ -533,7 +533,13 @@ passed_pr_detail() {
     printf 'run passed: PR state unknown (no PR identity)'
     return
   fi
+  case "$(fm_pr_poll_identity_marker_matches "$STATE" "$ID" untracked \
+      "$provider" "$host" "$path" "$number" 2>/dev/null || true)" in
+    closed) printf 'run passed: PR closed without merging; tracking stopped'; return ;;
+    ready) printf 'run passed: PR ready for human review; tracking stopped'; return ;;
+  esac
   if fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
+    && [ "$FM_PR_RETIRE_RESULT" = merged ] \
     && [ "$FM_PR_RETIRE_PROVIDER" = "$provider" ] \
     && [ "$FM_PR_RETIRE_URL" = "$url" ] \
     && [ "$FM_PR_RETIRE_HOST" = "$host" ] \

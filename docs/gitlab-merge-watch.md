@@ -53,7 +53,9 @@ Two things about plain `glab` were established by running it, because assuming e
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+Only an exact state value is read, so a changed output format produces no wake rather than a false merge.
+The poll now also prints `closed` for a closed merge request, `open` for an open one, and `draft` for an open one whose title starts with `Draft:`, `[Draft]` or `(Draft)`.
+The watcher stops tracking a closed merge request, or one that it saw as a draft and now sees as open, with one outcome and no merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
@@ -144,6 +146,7 @@ $ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e3.pr-poll)
 
 The merged fixture merge request produces exactly one `merged` line.
 The open one produces nothing, and the unreachable placeholder host produces nothing rather than a false merge.
+This transcript was captured before the poll reported open states, so the current poll prints `open` for the open merge request.
 
 The same bytes work in the watcher's sidecar-driven mode, where the published check locates its own record:
 

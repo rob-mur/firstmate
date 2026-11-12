@@ -23,8 +23,9 @@
 # state-file copy. Control relaunch metadata may follow the preserved PR identity
 # fields.
 #
-# A validated exact merged result is retired through a private receipt only
-# after its durable wake is appended.
+# A validated exact terminal result is retired through a private receipt only
+# after its durable outcome is recorded: merged, closed without merging, or
+# ready for human review after the change left draft.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
@@ -103,6 +104,7 @@ FM_PR_RETIRE_REG_HASH=
 FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
+FM_PR_RETIRE_RESULT=
 FM_PR_RECORD_STATE=
 FM_PR_RECORD_MERGED=
 FM_PR_POLL_RETIREMENT_REJECTED=
@@ -936,6 +938,12 @@ fm_pr_poll_snapshot_matches() {
   [ "$reg_identity" = "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" ]
 }
 
+# The terminal observations a poll retirement may record.
+fm_pr_poll_retirement_result_valid() {  # <result>
+  case "$1" in merged|closed|ready) return 0 ;; esac
+  return 1
+}
+
 fm_pr_poll_retirement_parse() {
   local file=$1 version id provider url host path number data_hash template_hash
   local data_identity check_identity reg_hash reg_identity result _extra
@@ -951,6 +959,7 @@ fm_pr_poll_retirement_parse() {
   FM_PR_RETIRE_CHECK_IDENTITY=
   FM_PR_RETIRE_REG_HASH=
   FM_PR_RETIRE_REG_IDENTITY=
+  FM_PR_RETIRE_RESULT=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 9< "$file" || return 1
   IFS= read -r version <&9 || { exec 9<&-; return 1; }
@@ -985,7 +994,7 @@ fm_pr_poll_retirement_parse() {
   [[ "$check_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   [[ "$reg_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$reg_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
-  [ "$result" = merged ] || return 1
+  fm_pr_poll_retirement_result_valid "$result" || return 1
   FM_PR_RETIRE_ID=$id
   FM_PR_RETIRE_PROVIDER=$provider
   FM_PR_RETIRE_URL=$url
@@ -998,6 +1007,8 @@ fm_pr_poll_retirement_parse() {
   FM_PR_RETIRE_CHECK_IDENTITY=$check_identity
   FM_PR_RETIRE_REG_HASH=$reg_hash
   FM_PR_RETIRE_REG_IDENTITY=$reg_identity
+  # shellcheck disable=SC2034 # read by fm-crew-state.sh
+  FM_PR_RETIRE_RESULT=$result
 }
 
 fm_pr_poll_retirement_receipt_valid() {
@@ -1435,7 +1446,7 @@ fm_pr_poll_retirement_discard_obsolete() {
 
 fm_pr_poll_retirement_publish() {
   local state=$1 id=$2 template=$3 result=$4 receipt state_device tmp
-  [ "$result" = merged ] || return 1
+  fm_pr_poll_retirement_result_valid "$result" || return 1
   fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   receipt="$state/$id.pr-poll-retirement"
@@ -1457,7 +1468,7 @@ fm_pr_poll_retirement_publish() {
       "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" \
       "$FM_PR_POLL_SNAPSHOT_REG_HASH" \
       "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" \
-      merged > "$tmp" \
+      "$result" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
     || ! fm_pr_poll_retirement_parse "$tmp" \
@@ -1595,6 +1606,85 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   local state=$1 id=$2 marker
   fm_pr_task_id_valid "$id" || return 1
   marker="$state/$id.pr-poll-merge-notified"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  rm -f -- "$marker"
+}
+
+# --- draft-seen and untracked canonical-identity markers ---------------------
+# Two more per-task markers carry a canonical PR identity across poll cycles and
+# registrations, in the same private format as the merge-notification marker.
+#   state/<id>.pr-poll-draft-seen: the poll saw this change as a draft, so a
+#     later open reading for the same change means it left draft.
+#   state/<id>.pr-poll-untracked: tracking of this change stopped because it was
+#     closed without merging (closed) or left draft (ready). bin/fm-pr-check.sh
+#     scan does not re-arm a poll for it, and an explicit arm clears it.
+# Only an exact identity match counts, so a different PR for the same task is
+# tracked as usual. bin/fm-teardown.sh removes both with the task's other
+# PR-poll artifacts.
+fm_pr_poll_identity_marker_path() {  # <state> <id> <kind>
+  case "$3" in
+    draft-seen|untracked) printf '%s/%s.pr-poll-%s\n' "$1" "$2" "$3" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Prints the marker's recorded detail (empty for draft-seen) when it matches.
+fm_pr_poll_identity_marker_matches() {  # <state> <id> <kind> <provider> <host> <path> <number>
+  local state=$1 id=$2 kind=$3 marker state_device
+  local version provider host path number detail='' _extra
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  marker=$(fm_pr_poll_identity_marker_path "$state" "$id" "$kind") || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_private_file_valid "$marker" 600 "$state_device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  if [ "$kind" = untracked ]; then
+    IFS= read -r detail <&8 || { exec 8<&-; return 1; }
+    case "$detail" in closed|ready) ;; *) exec 8<&-; return 1 ;; esac
+  fi
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = "fm-pr-poll-$kind-v1" ] \
+    && [ "$provider" = "$4" ] \
+    && [ "$host" = "$5" ] \
+    && [ "$path" = "$6" ] \
+    && [ "$number" = "$7" ] || return 1
+  printf '%s\n' "$detail"
+}
+
+fm_pr_poll_identity_marker_write() {  # <state> <id> <kind> <provider> <host> <path> <number> [detail]
+  local state=$1 id=$2 kind=$3 detail=${8-} marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  marker=$(fm_pr_poll_identity_marker_path "$state" "$id" "$kind") || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-$kind.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n' "fm-pr-poll-$kind-v1" "$4" "$5" "$6" "$7" > "$tmp" \
+    || { [ "$kind" = untracked ] && ! printf '%s\n' "$detail" >> "$tmp"; } \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_identity_marker_matches "$state" "$id" "$kind" "$4" "$5" "$6" "$7" >/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_pr_poll_identity_marker_remove() {  # <state> <id> <kind>
+  local marker
+  fm_pr_task_id_valid "$2" || return 1
+  marker=$(fm_pr_poll_identity_marker_path "$1" "$2" "$3") || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"

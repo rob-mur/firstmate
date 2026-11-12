@@ -196,11 +196,11 @@ case " $* " in
     printf '%s\n' '{"permissions":{"push":false}}'
     ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
-  *" state "*)
+  *" state "*|*" state,isDraft "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
-    printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
+    printf '%s\n' "${FM_TEST_GH_STATE-OPEN}"
     ;;
 esac
 SH
@@ -222,7 +222,7 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+printf 'title:\t%s\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_TITLE:-fixture merge request}" "${FM_TEST_GLAB_STATE-opened}"
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -1361,15 +1361,18 @@ test_static_poll_contract() {
   dir=$(make_case poll-contract)
   make_poll_fixture "$dir"
 
-  for state in OPEN CLOSED EMPTY MALFORMED; do
-    case "$state" in
-      EMPTY) value= ;;
-      MALFORMED) value='not-a-state' ;;
-      *) value=$state ;;
-    esac
+  for value in '' not-a-state 'MERGED DRAFT' open; do
     out=$(FM_TEST_GH_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "static poll emitted for non-merged state"
+    [ -z "$out" ] || fail "static poll emitted for unrecognized state '$value'"
   done
+  out=$(FM_TEST_GH_STATE=OPEN run_poll "$dir")
+  [ "$out" = open ] || fail "static poll did not emit open for an open pull request"
+  out=$(FM_TEST_GH_STATE='OPEN DRAFT' run_poll "$dir")
+  [ "$out" = draft ] || fail "static poll did not emit draft for a draft pull request"
+  out=$(FM_TEST_GH_STATE=CLOSED run_poll "$dir")
+  [ "$out" = closed ] || fail "static poll did not emit closed for a closed pull request"
+  grep -qF -- '--json state,isDraft' "$dir/gh.log" \
+    || fail "static poll did not read the draft flag with the state"
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
@@ -1894,6 +1897,8 @@ test_teardown_removes_poll_artifacts() {
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
   printf 'https://github.com/o/r/pull/9\n' > "$dir/home/state/task-a.pr-register-refused"
+  printf 'untracked\n' > "$dir/home/state/task-a.pr-poll-untracked"
+  printf 'draft\n' > "$dir/home/state/task-a.pr-poll-draft-seen"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1909,6 +1914,8 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
   [ ! -e "$dir/home/state/task-a.pr-register-refused" ] || fail "teardown left the PR registration refusal marker"
+  [ ! -e "$dir/home/state/task-a.pr-poll-untracked" ] || fail "teardown left the stopped-tracking record"
+  [ ! -e "$dir/home/state/task-a.pr-poll-draft-seen" ] || fail "teardown left the draft record"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -2008,13 +2015,15 @@ gerrit.example
 group/apps/console
 4201" ] || fail "published Gerrit sidecar bytes were not exact"
 
-  # Only an exact MERGED status wakes firstmate. Every other reading, including
-  # an abandoned change, a lowercase spelling, and a changed format, stays
-  # silent rather than reporting a merge.
-  for value in NEW ABANDONED merged Merged MERGED_LATER '' not-a-status; do
+  # Only an exact MERGED status reports a merge and only an exact ABANDONED
+  # status reports a close. Every other reading, including an open change, a
+  # lowercase spelling, and a changed format, stays silent.
+  for value in NEW abandoned merged Merged MERGED_LATER '' not-a-status; do
     out=$(FM_TEST_GERRIT_STATUS="$value" run_poll "$dir")
     [ -z "$out" ] || fail "Gerrit poll emitted for status '$value'"
   done
+  out=$(FM_TEST_GERRIT_STATUS=ABANDONED run_poll "$dir")
+  [ "$out" = closed ] || fail "Gerrit poll did not emit closed for an abandoned change"
 
   # Readiness is not merge. A change that is fully submittable - nothing in its
   # blocked_on list, submit OK, submittable true - is exactly what an approved
@@ -2434,8 +2443,11 @@ fi
 [ -z "${FM_TEST_TEA_FAIL:-}" ] || exit 1
 case "${FM_TEST_TEA_PULL:-open}" in
   merged) printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n' ;;
+  closed) printf '{"state":"closed","merged":false,"head":{"sha":"abc"}}\n' ;;
+  draft) printf '{"state":"open","merged":false,"draft":true,"title":"x","head":{"sha":"abc"}}\n' ;;
+  wip) printf '{"state":"open","merged":false,"title":"WIP: x","head":{"sha":"abc"}}\n' ;;
   error) printf '{"message":"The target couldn'"'"'t be found.","url":"x"}\n' ;;
-  *) printf '{"state":"open","merged":false,"head":{"sha":"abc"}}\n' ;;
+  *) printf '{"state":"open","merged":false,"title":"x","head":{"sha":"abc"}}\n' ;;
 esac
 SH
   chmod +x "$dir/fakebin/tea"
@@ -2447,9 +2459,11 @@ SH
     || fail "could not prepare a Forgejo poll"
   fm_pr_poll_publish_prepared || fail "could not publish a Forgejo poll"
 
-  for value in open error; do
-    out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=$value run_poll "$dir")
-    [ -z "$out" ] || fail "Forgejo poll emitted for a $value reading"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=error run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for an error reading"
+  for value in open:open closed:closed draft:draft wip:draft; do
+    out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=${value%%:*} run_poll "$dir")
+    [ "$out" = "${value#*:}" ] || fail "Forgejo poll did not emit ${value#*:} for a ${value%%:*} reading"
   done
   out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged FM_TEST_TEA_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "Forgejo poll emitted after a tea failure"
@@ -2564,12 +2578,20 @@ gitlab.example
 group/subgroup/project
 7" ] || fail "published GitLab sidecar bytes were not exact"
 
-  # Only an exact merged state wakes firstmate. Every other reading, including
-  # an unreadable merge request and a changed output format, stays silent.
-  for value in opened closed locked '' not-a-state MERGED merged-but-not; do
+  # Exact merged, closed, and open states are reported, and an open merge
+  # request whose title carries the draft prefix reads as a draft. Every other
+  # reading, including an unreadable merge request and a changed output
+  # format, stays silent.
+  for value in locked '' not-a-state MERGED merged-but-not; do
     out=$(FM_TEST_GLAB_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "GitLab poll emitted for a non-merged state"
+    [ -z "$out" ] || fail "GitLab poll emitted for unrecognized state '$value'"
   done
+  out=$(FM_TEST_GLAB_STATE=opened run_poll "$dir")
+  [ "$out" = open ] || fail "GitLab poll did not emit open for an open merge request"
+  out=$(FM_TEST_GLAB_STATE=closed run_poll "$dir")
+  [ "$out" = closed ] || fail "GitLab poll did not emit closed for a closed merge request"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TITLE='Draft: fixture' run_poll "$dir")
+  [ "$out" = draft ] || fail "GitLab poll did not emit draft for a draft-titled merge request"
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
@@ -3205,15 +3227,12 @@ test_external_merge_transition_retires_only_terminal_poll() {
   add_stop_custom_check "$dir"
   before=$(poll_artifact_snapshot "$state" task-a)
 
-  for label in open-green open-red closed-unmerged forge-error malformed; do
+  for label in open-green open-red forge-error malformed; do
     rm -f "$state/.last-check"
     set +e
     case "$label" in
       open-green|open-red)
         FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
-        ;;
-      closed-unmerged)
-        FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
         ;;
       forge-error)
         FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
@@ -3238,7 +3257,81 @@ test_external_merge_transition_retires_only_terminal_poll() {
   [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
   case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
   assert_poll_absent "$state" task-a
-  pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
+  pass "open/red, malformed, and forge errors remain armed until an exact merged transition"
+}
+
+# A PR closed without merging, or one seen as a draft and then open, stops
+# being tracked: one plain outcome is queued, the poll retires, nothing is
+# merged or cleaned up, and the scan does not arm it again. An explicit record
+# follows it again.
+test_closed_or_ready_poll_stops_tracking_once() {
+  local dir state rc url out
+  dir=$(make_case untrack-closed)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/31
+  write_poll_meta "$state" task-a "$url" 'kind=ship' 'mode=no-mistakes'
+  seed_canonical_poll "$dir" task-a "$url"
+  set +e
+  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "closed watcher cycle failed: $(cat "$dir/watch-1.err")"
+  [ "$(cat "$dir/watch-1.out")" = "check: stopped tracking: task-a $url" ] \
+    || fail "closed PR did not wake once with the stopped-tracking outcome: $(cat "$dir/watch-1.out")"
+  [ "$(grep -c "stopped tracking: task-a $url - it was closed without merging" "$state/.wake-queue")" -eq 1 ] \
+    || fail "closed PR did not queue exactly one plain outcome"
+  assert_poll_absent "$state" task-a
+  [ -d "$dir/wt" ] || fail "stopping tracking removed the worktree"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "stopping tracking changed the task record"
+  ! grep -q 'pr merge\|api.*merge' "$dir/gh.log" 2>/dev/null || fail "stopping tracking tried to merge"
+  [ "$(fm_pr_poll_identity_marker_matches "$state" task-a untracked github github.com o/r 31)" = closed ] \
+    || fail "closed PR left no stopped-tracking record"
+  ack_watcher_cycle "$state" || fail "closed outcome acknowledgement failed"
+
+  printf '%s\n' "done [at=2]: PR $url checks green" > "$state/task-a.status"
+  run_check_entry "$dir" scan > /dev/null 2> "$dir/scan.err" || fail "the scan failed: $(cat "$dir/scan.err")"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the scan re-armed a PR that stopped being tracked"
+  run_check_entry "$dir" task-a "$url" > /dev/null 2> "$dir/arm.err" \
+    || fail "explicitly recording the PR again failed: $(cat "$dir/arm.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "an explicit record did not follow the PR again"
+  [ ! -e "$state/task-a.pr-poll-untracked" ] || fail "an explicit record kept the stopped-tracking record"
+
+  dir=$(make_case untrack-ready)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/32
+  write_poll_meta "$state" task-a "$url" 'kind=ship' 'mode=no-mistakes'
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE='OPEN DRAFT' run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/draft.out" 2> "$dir/draft.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "draft watcher cycle failed: $(cat "$dir/draft.err")"
+  case "$(cat "$dir/draft.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a draft PR woke firstmate: $(cat "$dir/draft.out")" ;; esac
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "a draft PR stopped being tracked"
+  fm_pr_poll_identity_marker_matches "$state" task-a draft-seen github github.com o/r 32 >/dev/null \
+    || fail "a draft PR was not remembered"
+  ack_watcher_cycle "$state" || fail "draft cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/ready.out" 2> "$dir/ready.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "ready watcher cycle failed: $(cat "$dir/ready.err")"
+  [ "$(cat "$dir/ready.out")" = "check: stopped tracking: task-a $url" ] \
+    || fail "a PR that left draft did not wake with the stopped-tracking outcome: $(cat "$dir/ready.out")"
+  grep -qF "stopped tracking: task-a $url - it left draft and is ready for human review" "$state/.wake-queue" \
+    || fail "a PR that left draft queued no plain outcome"
+  assert_poll_absent "$state" task-a
+  [ ! -e "$state/task-a.pr-poll-draft-seen" ] || fail "stopping tracking left the draft record"
+  ack_watcher_cycle "$state" || fail "ready outcome acknowledgement failed"
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/after.out" 2> "$dir/after.err"
+  rc=$?
+  set -e
+  case "$(cat "$dir/after.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a PR that stopped being tracked woke again: $(cat "$dir/after.out")" ;; esac
+  pass "a closed PR, or a draft PR that became ready, stops being tracked with one outcome"
 }
 
 test_retirement_refuses_replacement_and_nonterminal_results() {
@@ -4113,6 +4206,7 @@ test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree
 test_gerrit_nm_ready_gate_requires_recovered_custody
 test_merged_poll_retires_once
+test_closed_or_ready_poll_stops_tracking_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
