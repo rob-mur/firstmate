@@ -2776,6 +2776,9 @@ EOF
       [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$delay" ] || continue
       status_is_paused_or_captain_held "$(status_declared_wait_line "$f")" && continue
       task_captain_call_open "$task" && continue
+      # Already answered on its captain call: relay it, never chase the captain.
+      [ -n "$(printf '%s\t%s\t%s\n' "$key" "$verb" "$note" \
+        | status_open_decisions_unanswered "$task" "$f")" ] || continue
       if [ -z "$due_opened" ] || [ "$opened" -lt "$due_opened" ]; then
         due_task=$task; due_key=$key; due_opened=$opened; due_delay=$delay
         if [ "$last" -ne 0 ]; then

@@ -31,6 +31,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh answered <origin-task-id> <decision-key> --opened-at <epoch>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -202,6 +203,20 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+#
+# `answered` is the read-only check a surface asks before it shows a keyed
+# status decision (<origin-task-id>, <decision-key>) as a captain call: has the
+# captain already answered it? It matches only the identities --resolve-key in
+# bin/fm-send.sh resolves - the key as a task id, then the legacy
+# `<origin>-decision-<key>` - and exit 0 (printing the answered task id) needs
+# all of: that task is no longer an open captain call, it carries a resolution
+# record, any `Captain hold origin:` it records names this origin, and the
+# newest record's `Resolved at:` stamp is at or after <epoch>, the time the
+# status line opened the decision. A record without that stamp counts only when
+# its close date is a later UTC day than <epoch>. Everything else, including a
+# question re-raised after the answer, an unknown time, or an unreadable
+# backlog, exits 1 so the surface keeps showing the call. It never closes,
+# answers, or writes anything.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -541,8 +556,8 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 resolution_block() {  # <mode>
   local label='Captain decision:'
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\nResolved at: %s\n\n%s\n%s\n' \
+    "$DECISION_DIGEST" "$1" "${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$label" "$DECISION_TEXT"
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -2298,6 +2313,61 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+# Has the captain already answered this keyed status decision? Exit 0 with the
+# answered task id printed, else 1 (see the header). Every doubt is a 1.
+command_answered() {  # <origin-task-id> <decision-key> --opened-at <epoch>
+  local origin='' key='' opened='' id show body decoded stamp resolved closed origins
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --opened-at) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; opened=$2; shift ;;
+      -*) usage >&2; exit 2 ;;
+      *)
+        if [ -z "$origin" ]; then origin=$1
+        elif [ -z "$key" ]; then key=$1
+        else usage >&2; exit 2
+        fi
+        ;;
+    esac
+    shift
+  done
+  case "$origin" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$opened" in ''|*[!0-9]*) return 1 ;; esac
+  for id in "$key" "$origin-decision-$key"; do
+    # Still an open captain call (0) or cannot tell (2): not answered.
+    ( command_open "$id" ) >/dev/null 2>&1 && return 1
+    [ "$?" -eq 1 ] || return 1
+    if task_show "$id" 2>/dev/null; then :
+    elif task_show_archived "$id" 2>/dev/null; then :
+    else continue
+    fi
+    show=$TASK_SHOW_OUTPUT
+    body=$(show_field "$show" body)
+    body_has_resolution_record "$body" || continue
+    decoded=$(decode_shown_value "$body") || return 1
+    origins=$(printf '%s\n' "$decoded" | sed -n 's/^Captain hold origin: //p')
+    if [ -n "$origins" ] && ! printf '%s\n' "$origins" | grep -Fxq -- "$origin"; then
+      continue
+    fi
+    stamp=$(printf '%s\n' "$decoded" | sed -n 's/^Resolved at: //p' | head -1)
+    if [ -n "$stamp" ]; then
+      resolved=$(fm_utc_iso_to_epoch "$stamp") || return 1
+      [ "$resolved" -ge "$opened" ] || return 1
+    else
+      closed=$(show_field_value "$show" closed)
+      case "$closed" in
+        [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) ;;
+        *) return 1 ;;
+      esac
+      resolved=$(fm_utc_iso_to_epoch "${closed}T00:00:00Z") || return 1
+      [ "$resolved" -gt "$opened" ] || return 1
+    fi
+    printf '%s\n' "$id"
+    return 0
+  done
+  return 1
+}
+
 # A hold or answer changes what this home's published summary says about open
 # captain calls, so a successful one republishes it. The refresh is side-band
 # and best-effort: it can never change the hold's or answer's result.
@@ -2325,6 +2395,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  answered) shift; command_answered "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;

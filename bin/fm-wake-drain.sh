@@ -496,7 +496,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line answered item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
   if [ -n "$snapshot" ]; then
@@ -511,6 +511,13 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
+    # A decision the captain already answered on its captain call is never
+    # asked again: it is listed as answered so its recorded answer is relayed to
+    # the worker instead (owner of the match: status_open_decisions_tag_answered
+    # in fm-classify-lib.sh).
+    answered=$(printf '%s\t%s\t%s\n' "$key" "$verb" "$note" \
+      | status_open_decisions_tag_answered "$task" "$STATE/$task.status")
+    answered=${answered%%$'\t'*}
     # State the folded key on EVERY entry, "default" included. This section's
     # own hint asks the operator to pass that key to fm-send, and the note is
     # unedited worker prose that may itself carry a "[key=...]" token the key
@@ -520,6 +527,8 @@ print_open_decisions_section() {
     # folded, and the advised command then refused. An entry must always carry
     # the token that closes it.
     line="$task [key=$key] $verb: $note"
+    [ -z "$answered" ] \
+      || line="$task [key=$key] already answered on captain call $answered - relay that recorded answer with --resolve-key; do not ask the captain again"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
