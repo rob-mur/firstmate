@@ -93,7 +93,7 @@ It requires a non-empty captain decision file of at most 8192 bytes.
 A quiet record is a present captain and does not refuse.
 It then works in this order:
 
-1. It durably writes a resolution block carrying the decision digest and a `Resolution mode:`.
+1. It durably writes a resolution block carrying the decision digest, a `Resolution mode:`, and a UTC `Resolved at:` time.
 2. It retains the leading hold-set stamp until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds.
 3. It then restores the successful record's resolution-first body ordering.
    The previous body remains preserved below the block and archived through tasks-axi `--archive-body`.
@@ -485,6 +485,24 @@ Three states are deliberately not divergence:
 - A still-open keyed status decision belongs to the OPEN DECISIONS fold.
 - The absence of a routed work item is legitimate rather than incomplete.
   When the decision is the deliverable, there is nothing to route, so routed work is no part of the test.
+
+### Answered calls with a still-open status decision
+
+The opposite disagreement is also handled: the captain answered the call, but the worker's status log still has the keyed decision open.
+This happens when the answer was recorded but never relayed back to the worker.
+`bin/fm-captain-hold.sh answered` is the read-only match, and `status_open_decisions_tag_answered` in `bin/fm-classify-lib.sh` applies it to the fold.
+A decision counts as answered only when all of these hold:
+
+- Its key names a closed call (the key is the task id, or the legacy `<origin>-decision-<key>` id) that is not an open captain call and has a resolution record.
+- Any `Captain hold origin:` that call records names the same worker.
+- The answer's `Resolved at:` time is at or after the time the question was raised.
+  A record with no `Resolved at:` time counts only when the call closed on a later UTC day.
+  A question with no recorded time never counts.
+
+When the match is uncertain, the decision keeps being shown.
+The fleet snapshot (and so the Bearings board), the away-return summary, the terminal notification, and the overdue-decision reminder all drop an answered decision.
+OPEN DECISIONS lists it as already answered, so firstmate relays the recorded answer with `--resolve-key` instead of asking the captain again.
+Nothing is closed or answered on the captain's behalf.
 
 ### Cost and scope
 
