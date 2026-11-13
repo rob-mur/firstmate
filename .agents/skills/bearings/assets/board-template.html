@@ -236,6 +236,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 .is-queued .bb-queued { display: inline-flex; }
 .bb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
 .bb-limit.is-visible { display: inline; }
+.bb-submit-error { display: none; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0; padding: 8px 12px; border: 2px solid var(--status-danger); border-radius: var(--radius-sm); background: var(--status-danger-soft); color: var(--status-danger); font-size: var(--fs-xs); font-weight: 700; }
+.bb-submit-error.is-visible { display: flex; }
 .bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
@@ -364,6 +366,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       </span>
       <span class="fm-sign fm-sign--muted" id="bb-call-sub"></span>
     </div>
+    <!-- the priority's queue error; shown in step 1 and step 2 alike -->
+    <div id="bb-priority-error"></div>
     <div class="bb-order" id="bb-order" hidden>
       <p class="bb-order__help">Step 1 of 2 - put the tasks in priority order, most important first (drag a row, or use the arrows). Firstmate keeps this order and reads it when it picks what to work on or answer next. Open a decision to answer it, or press Start answering to deal the cards in this order.</p>
       <ol class="bb-order__list" id="bb-order-list"></ol>
@@ -405,6 +409,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     <button type="button" class="fm-btn fm-btn--sm" id="bb-page-max" aria-pressed="false" title="Fill the window with this page (Esc to leave)">Full screen</button>
     <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-page-end">End this page</button>
   </div>
+  <div class="bb-submit-error" id="bb-page-error" role="alert"></div>
   <div id="bb-pageframes"></div>
 </section>
 
@@ -421,8 +426,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 
   /* Fail closed: a board with unreadable or wrong-schema data says so plainly
      instead of rendering an empty page that looks like an empty fleet. */
-  function renderBoardError(msg) {
-    var main = document.querySelector(".bb-main");
+  function renderBoardError(msg, host) {
+    var main = host || document.querySelector(".bb-main");
     main.innerHTML = "";
     var card = document.createElement("div");
     card.className = "fm-card fm-card--poster bb-decision";
@@ -455,13 +460,50 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     });
     return callItemsValid ? "" : "The board data does not have the required structure";
   }
+  var DATA_FILE = "bearings-board.data.js";
   var data = window.FM_BEARINGS_BOARD_DATA;
   var problem = dataProblem(data);
-  if (problem) {
-    renderBoardError(problem);
-    return;
+  if (problem) waitForData(problem); else startBoard();
+
+  /* A data file that did not load is not the end of the board. A fetch can
+     race a rebuild and arrive cut short, which the browser reports as a
+     failed or broken script, so the page says plainly that it is waiting,
+     keeps re-reading the file, and starts the board in place, with no page
+     reload, the moment a good payload arrives. The page's own data tag still
+     reports its failure to Lavish; these retries are marked data-lavish-ui so
+     a retry that races again is not reported as a second failure. */
+  function waitForData(why) {
+    var main = document.querySelector(".bb-main");
+    var kept = [];
+    Array.prototype.forEach.call(main.children, function (c) { kept.push([c, c.hidden]); c.hidden = true; });
+    var note = document.createElement("div");
+    note.id = "bb-load-problem";
+    note.setAttribute("role", "alert");
+    main.appendChild(note);
+    renderBoardError(why + ". The board keeps trying to load it and starts on its own when it arrives; if this stays", note);
+    var tries = 0;
+    var timer = setInterval(function () {
+      var s = document.createElement("script");
+      s.setAttribute("data-lavish-ui", "");
+      function done() { if (s.parentNode) s.parentNode.removeChild(s); }
+      s.onload = function () {
+        done();
+        var next = window.FM_BEARINGS_BOARD_DATA;
+        if (timer === null || dataProblem(next)) return;
+        clearInterval(timer);
+        timer = null;
+        main.removeChild(note);
+        kept.forEach(function (k) { k[0].hidden = k[1]; });
+        data = next;
+        startBoard();
+      };
+      s.onerror = done;
+      s.src = DATA_FILE + "?r=boot" + (++tries);
+      document.body.appendChild(s);
+    }, 3000);
   }
 
+  function startBoard() {
   try {
   function el(tag, cls, text) {
     var n = document.createElement(tag);
@@ -534,7 +576,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     var hidden = document.createElement("input");
     hidden.type = "hidden"; hidden.name = "lavish-state"; hidden.value = "";
     host.appendChild(hidden);
-    var t = { id: id, el: anchorEl, badge: badgeEl, hidden: hidden, local: false, seen: false };
+    var t = { id: id, el: anchorEl, badge: badgeEl, hidden: hidden, local: false, seen: false,
+      pending: null, errorBox: null, errorText: null, resend: null, onFail: null };
     targets[id] = t;
     return t;
   }
@@ -549,18 +592,79 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     /* a sent priority is what firstmate now records */
     if (state === "sent" && t.id === "board-priority" && queuedPriority) baselineKeys = queuedPriority.slice();
   }
+  /* An answer never vanishes silently. Lavish's queue call returns nothing,
+     and its chrome drops a message it does not accept without a word, so an
+     answer counts as queued only once Lavish's queue report lists its anchor
+     (onAnchors below). A missing Lavish, a throwing call, or no report within
+     CONFIRM_MS shows an error beside the control, with a button that queues
+     the same answer again; the typed answer itself is never cleared. A
+     replaced answer whose anchor the last report already listed is confirmed
+     at once, because Lavish reports the queue only when its anchors change. */
+  var CONFIRM_MS = 4000;
+  var lastAnchorEls = null;
+  /* the error box beside a target: <errorBox> holds a text span and a
+     "Queue again" button that calls t.resend */
+  function attachSubmitError(t, box) {
+    box.classList.add("bb-submit-error");
+    box.setAttribute("role", "alert");
+    var text = el("span", "bb-submit-error__text");
+    var again = el("button", "fm-btn fm-btn--sm", "Queue again");
+    again.type = "button";
+    again.addEventListener("click", function () { if (t.resend) t.resend(); });
+    box.appendChild(text);
+    box.appendChild(again);
+    t.errorBox = box;
+    t.errorText = text;
+  }
+  function showSubmitError(t, msg) {
+    if (!t.errorBox) return;
+    t.errorText.textContent = msg;
+    if (msg) t.errorBox.classList.add("is-visible"); else t.errorBox.classList.remove("is-visible");
+  }
+  function failSubmit(t, msg) {
+    if (t.pending) { clearTimeout(t.pending.timer); t.pending = null; }
+    if (t.hidden.value === "queued") setState(t, "");
+    showSubmitError(t, msg + " Your answer is still here; press Queue again.");
+    if (t.onFail) t.onFail();
+  }
+  function confirmQueued(t) {
+    var p = t.pending;
+    t.seen = true;
+    showSubmitError(t, "");
+    if (!p) return;
+    t.pending = null;
+    clearTimeout(p.timer);
+    if (p.onQueued) p.onQueued();
+  }
   /* queue through Lavish, keeping the unsent prompt for a later restore */
-  function queueAnswer(t, prompt, opts, ids) {
-    if (window.lavish && window.lavish.queuePrompt) {
-      var o = {};
-      Object.keys(opts).forEach(function (k) { o[k] = opts[k]; });
-      o.element = t.el;
-      window.lavish.queuePrompt(prompt, o);
-      ownQueued[t.id] = { prompt: prompt, opts: opts, ids: ids || null };
-      ownSave();
+  function queueAnswer(t, prompt, opts, ids, onQueued) {
+    if (t.pending) { clearTimeout(t.pending.timer); t.pending = null; }
+    showSubmitError(t, "");
+    var lavish = window.lavish;
+    if (!lavish || typeof lavish.queuePrompt !== "function") {
+      failSubmit(t, "This answer was not queued: Lavish is not connected to this board.");
+      return;
     }
+    var o = {};
+    Object.keys(opts).forEach(function (k) { o[k] = opts[k]; });
+    o.element = t.el;
+    try {
+      lavish.queuePrompt(prompt, o);
+    } catch (e) {
+      failSubmit(t, "This answer was not queued: Lavish refused it (" + (e && e.message ? e.message : String(e)) + ").");
+      return;
+    }
+    ownQueued[t.id] = { prompt: prompt, opts: opts, ids: ids || null };
+    ownSave();
     t.local = true; t.seen = false;
     setState(t, "queued");
+    var p = { onQueued: onQueued || null, timer: null };
+    t.pending = p;
+    if (lastAnchorEls && lastAnchorEls.indexOf(t.el) >= 0) { confirmQueued(t); return; }
+    p.timer = setTimeout(function () {
+      if (t.pending !== p) return;
+      failSubmit(t, "Lavish did not confirm this answer, so it may not be in the queue.");
+    }, CONFIRM_MS);
   }
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
@@ -794,9 +898,21 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     answerLimit.setAttribute("role", "alert");
     foot.appendChild(answerLimit);
     form.appendChild(foot);
+    var submitError = el("div");
+    attachSubmitError(target, submitError);
+    form.appendChild(submitError);
+    target.resend = submitAnswer;
+    /* a failed answer brings its card back into view */
+    target.onFail = function () {
+      var i = cards.indexOf(card);
+      if (i >= 0 && i !== active) showCard(i);
+    };
 
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
+      submitAnswer();
+    });
+    function submitAnswer() {
       answerLimit.classList.remove("is-visible");
       var fd = new FormData(form);
       var value = fd.get("answer");
@@ -823,11 +939,14 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       ctxData.order = rank;
       ctxData.order_total = orderKeys.length;
       var tagText = "[priority " + rank + " of " + orderKeys.length + "] ";
+      /* deal the next card once Lavish confirms this one is queued */
       queueAnswer(target, "Captain's Call answer " + tagText + "- " + item.title + ": " + displayAnswer,
-        { tag: "choice", text: tagText + item.title + " -> " + displayAnswer, data: ctxData });
-      /* deal the next card once this one is answered */
-      setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
-    });
+        { tag: "choice", text: tagText + item.title + " -> " + displayAnswer, data: ctxData }, null, function () {
+          setTimeout(function () {
+            if (cards[active] === card) showCard(active < cards.length - 1 ? active + 1 : active);
+          }, 450);
+        });
+    }
 
     pad.appendChild(form);
     card.appendChild(pad);
@@ -959,6 +1078,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   priorityScope.setAttribute("data-lavish-question", "board-priority");
   document.getElementById("bb-order").appendChild(priorityScope);
   var priorityTarget = makeTarget("board-priority", priorityScope, el("span"), priorityScope);
+  attachSubmitError(priorityTarget, document.getElementById("bb-priority-error"));
+  priorityTarget.resend = function () { sendPriority(); };
   var reorderTimer = null;
   var queuedPriority = null;
   function sameKeys(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
@@ -1063,12 +1184,13 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     selectors.forEach(function (sel) {
       try { var n = document.querySelector(sel); if (n) inQueue.push(n); } catch (e) { /* bad selector */ }
     });
+    lastAnchorEls = inQueue;
     Object.keys(targets).forEach(function (id) {
       var t = targets[id];
       var state = t.hidden.value;
       if (inQueue.indexOf(t.el) >= 0) {
-        t.seen = true;
         if (state !== "queued") setState(t, "queued");
+        confirmQueued(t);
         return;
       }
       /* gone from the queue after it held the answer: it was sent, so it
@@ -1270,23 +1392,49 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     annotateOn = !!d.enabled;
     Object.keys(pageById).forEach(function (k) { tellAnnotate(pageById[k].frame); });
   });
-  function queueForPage(p, tag, prompt, opts) {
-    if (!window.lavish || !window.lavish.queuePrompt) return;
+  /* A page answer Lavish cannot take shows an error under the page bar with
+     a button that queues the same answer again, never a silent drop. */
+  var pageError = document.getElementById("bb-page-error");
+  var pageErrorText = el("span", "bb-submit-error__text");
+  var pageRetry = el("button", "fm-btn fm-btn--sm", "Queue again");
+  pageRetry.type = "button";
+  var pageRetryFn = null;
+  pageRetry.addEventListener("click", function () { if (pageRetryFn) pageRetryFn(); });
+  pageError.appendChild(pageErrorText);
+  pageError.appendChild(pageRetry);
+  function queueForPage(p, tag, prompt, opts, retry) {
+    var lavish = window.lavish, why = "";
     var o = opts && typeof opts === "object" ? opts : {};
     var said = typeof o.text === "string" ? o.text : "";
-    window.lavish.queuePrompt(String(prompt == null ? "" : prompt), {
-      tag: "page",
-      text: p.title + ": " + (said || tag),
-      queueKey: typeof o.queueKey === "string" && o.queueKey ? "page:" + p.id + ":" + o.queueKey : "",
-      element: p.frame,
-      data: { schema: "fm-board-page.v1", page: p.id, tag: tag, text: said, data: o.data === undefined ? null : o.data }
-    });
+    if (!lavish || typeof lavish.queuePrompt !== "function") why = "Lavish is not connected to this board";
+    else {
+      try {
+        lavish.queuePrompt(String(prompt == null ? "" : prompt), {
+          tag: "page",
+          text: p.title + ": " + (said || tag),
+          queueKey: typeof o.queueKey === "string" && o.queueKey ? "page:" + p.id + ":" + o.queueKey : "",
+          element: p.frame,
+          data: { schema: "fm-board-page.v1", page: p.id, tag: tag, text: said, data: o.data === undefined ? null : o.data }
+        });
+      } catch (e) { why = "Lavish refused it (" + (e && e.message ? e.message : String(e)) + ")"; }
+    }
+    if (!why) {
+      pageRetryFn = null;
+      pageError.classList.remove("is-visible");
+      return true;
+    }
+    pageRetryFn = retry || function () { queueForPage(p, tag, prompt, opts); };
+    pageErrorText.textContent = "An answer from " + p.title + " was not queued: " + why + ". Press Queue again to resend it.";
+    pageError.classList.add("is-visible");
+    return false;
   }
   function sendAll() {
     if (window.lavish && window.lavish.sendQueuedPrompts) window.lavish.sendQueuedPrompts();
   }
   function endPage(p) {
-    queueForPage(p, "page-end", "The captain ended the page " + p.title + ".", { text: "ended" });
+    /* a page whose end did not reach the queue stays open */
+    if (!queueForPage(p, "page-end", "The captain ended the page " + p.title + ".", { text: "ended" },
+      function () { endPage(p); })) return;
     sendAll();
     endedHere[p.id] = true;
     dropPage(p.id);
@@ -1379,7 +1527,6 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     showStep();
     deferred = pinned;
   }
-  var DATA_FILE = "bearings-board.data.js";
   var liveJson = JSON.stringify(data);
   var polling = null, pollWaits = 0, pollSeq = 0;
   function pollData() {
@@ -1391,6 +1538,9 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     }
     pollWaits = 0;
     var s = document.createElement("script");
+    /* a poll that races a rebuild is retried on the next round, not
+       reported to Lavish as a page failure */
+    s.setAttribute("data-lavish-ui", "");
     polling = s;
     function done() {
       if (s.parentNode) s.parentNode.removeChild(s);
@@ -1412,6 +1562,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   setInterval(pollData, 3000);
   } catch (e) {
     renderBoardError("The board data could not be rendered");
+  }
   }
 })();
 </script>

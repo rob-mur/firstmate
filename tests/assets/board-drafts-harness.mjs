@@ -37,11 +37,26 @@
 //                   its element p#why ("Why this change") with the note "unclear"
 //   pagetoggle:<id> the in-place page <id>'s relay asks to toggle annotate mode
 //   stranger        an unknown frame passes up an annotation
-// Pending timers fire after each chrome message and at the end of the run.
+//   chrome:<mode>   the simulated Lavish from now on: ok (queues and reports
+//                   its anchors), drops (accepts the call but queues nothing
+//                   and reports nothing, like a chrome that ignores a stale
+//                   message), throws (the queue call throws), or gone (the
+//                   page has no window.lavish); CHROME_MODE sets the start mode
+//   retry:<key>     press "Queue again" in that card's error box; retry:priority
+//                   and retry:page press the priority's and the page view's
+//   wait            the board's own wait for Lavish's confirmation runs out
+//                   (the same as tick: every pending timer fires)
+// Pending timers fire after each chrome message and at the end of the run, in
+// the order they were set. Like the real chrome, the simulated one reports its
+// queued anchors after a queue call only when the set of anchors changed.
 // The page's data file is read from beside <built-board.html> each time the
 // page loads it, so a rebuild between polls is seen by the next poll.
 // Prints { cards, storage, calls, queue, anchors, ids, order, reloads,
-//   opens, pageView, snaps, framePosts, keys }; opens lists every url the
+//   opens, pageView, snaps, framePosts, keys, errors, boot, polls }; each card
+//   also carries error {shown, text} from the box beside its answer, errors
+//   has the priority's and the page view's boxes, boot is the load problem
+//   the page shows while it waits for its data ({shown, text}), and polls
+//   counts the page's live intervals; opens lists every url the
 //   page asked to open elsewhere, framePosts every message the board sent
 //   each page frame, keyed by page id, and keys every key press the board
 //   dispatched to itself. Lavish's own elements (ids starting "lavish-")
@@ -118,8 +133,15 @@ globalThis.KeyboardEvent = class extends Event {
 };
 
 const byId = new Map();
+// Any other selector the page asks for is one stable element per selector.
+const bySel = new Map();
 const dataPath = boardPath.replace(/\.html$/, ".data.js");
-const loadData = () => { if (existsSync(dataPath)) new Function(readFileSync(dataPath, "utf8"))(); };
+// A data file that is cut short still "loads": the browser runs what arrived,
+// which throws, and fires the script's load event anyway.
+const loadData = () => {
+  if (!existsSync(dataPath)) return;
+  try { new Function(readFileSync(dataPath, "utf8"))(); } catch { /* a broken script sets nothing */ }
+};
 // Anything that would replace the whole page is recorded, never performed.
 const reloads = [];
 const opens = [];
@@ -177,7 +199,8 @@ globalThis.document = {
   querySelector: (sel) => {
     if (sel.startsWith("#")) return findId(sel.slice(1));
     if (sel.startsWith("pos:")) return (byId.get("bb-call")?.querySelectorAll("form") || [])[Number(sel.slice(4))] || null;
-    return new Node("div");
+    if (!bySel.has(sel)) bySel.set(sel, new Node("div"));
+    return bySel.get(sel);
   },
 };
 
@@ -193,7 +216,8 @@ globalThis.setTimeout = (fn) => { const id = ++timerSeq; timers.push({ id, fn })
 globalThis.clearTimeout = (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); };
 const flush = () => { while (timers.length) timers.shift().fn(); };
 const intervals = [];
-globalThis.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
+globalThis.setInterval = (fn) => { const id = ++timerSeq; intervals.push({ id, fn }); return id; };
+globalThis.clearInterval = (id) => { const i = intervals.findIndex((t) => t.id === id); if (i >= 0) intervals.splice(i, 1); };
 
 globalThis.window = {
   parent,
@@ -206,17 +230,25 @@ globalThis.window = {
         getItem: (k) => (k in store ? store[k] : null),
         setItem: (k, v) => { store[k] = String(v); writeFileSync(storagePath, JSON.stringify(store)); },
       },
-  lavish: {
-    // Lavish keys a queued prompt by the explicit queueKey, else by the
-    // anchoring element's question; the same key replaces the unsent entry.
-    queuePrompt: (prompt, opts) => {
-      const anchor = anchorFor(opts.element);
-      const key = opts.queueKey !== undefined ? opts.queueKey : "question:" + opts.element.attributes["data-lavish-question"];
-      calls.push({ key, anchor, prompt, tag: opts.tag, text: opts.text, data: opts.data });
-      session.queue[key] = { anchor, prompt };
-    },
+};
+// Lavish keys a queued prompt by the explicit queueKey, else by the anchoring
+// element's question; the same key replaces the unsent entry.
+let chromeMode = process.env.CHROME_MODE || "ok";
+const dropped = [];
+const lavish = {
+  queuePrompt: (prompt, opts) => {
+    if (chromeMode === "throws") throw new Error("queue refused");
+    const anchor = anchorFor(opts.element);
+    const key = opts.queueKey !== undefined ? opts.queueKey : "question:" + opts.element.attributes["data-lavish-question"];
+    const call = { key, anchor, prompt, tag: opts.tag, text: opts.text, data: opts.data };
+    if (chromeMode === "drops") { dropped.push(call); return; }
+    calls.push(call);
+    session.queue[key] = { anchor, prompt };
+    setTimeout(() => anchors(false));
   },
 };
+const setChrome = (mode) => { chromeMode = mode; window.lavish = mode === "gone" ? undefined : lavish; };
+setChrome(chromeMode);
 globalThis.FormData = class {
   constructor(form) { this.form = form; }
   get(name) {
@@ -231,12 +263,22 @@ loadData();
 new Function(html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>")))();
 
 const post = (data) => { for (const fn of listeners) fn({ data, source: parent }); flush(); };
-const anchors = () => post({ type: "lavish:queuedAnchors", selectors: Object.values(session.queue).map((q) => q.anchor) });
+// A frame load or a send always reports; a queue call reports only a change
+// from what the chrome last reported, which for a run that starts on an open
+// page is the queue it starts with.
+let reported = JSON.stringify(Object.values(session.queue).map((q) => q.anchor).sort());
+const anchors = (always = true) => {
+  const selectors = Object.values(session.queue).map((q) => q.anchor);
+  const sig = JSON.stringify([...selectors].sort());
+  if (!always && sig === reported) return;
+  reported = sig;
+  post({ type: "lavish:queuedAnchors", selectors });
+};
 // Lavish collects every control under a data-lavish-question scope.
 const scopes = () => {
   const out = [];
   const walk = (n) => { for (const c of n.children) { if (c.attributes["data-lavish-question"]) out.push(c); walk(c); } };
-  for (const id of ["bb-call", "bb-order"]) walk({ children: [byId.get(id)] });
+  for (const id of ["bb-call", "bb-order"]) walk({ children: [byId.get(id)].filter(Boolean) });
   return out;
 };
 const controls = () => scopes().flatMap((scope) =>
@@ -245,8 +287,10 @@ const controls = () => scopes().flatMap((scope) =>
     key: [scope.attributes["data-lavish-question"], el.name, el.type, el.type === "hidden" ? "" : el.value].join("|"),
   })));
 
-const forms = () => byId.get("bb-call").querySelectorAll("form");
-const frames = () => byId.get("bb-pageframes").children;
+// A board still waiting for its data has built none of its sections.
+const get = (id) => byId.get(id) || new Node("div");
+const forms = () => get("bb-call").querySelectorAll("form");
+const frames = () => get("bb-pageframes").children;
 const shownFrame = () => frames().find((f) => !f.hidden);
 const snaps = [];
 for (const act of actionList.split(",").filter(Boolean)) {
@@ -282,9 +326,16 @@ for (const act of actionList.split(",").filter(Boolean)) {
   } else if (name === "run") {
     execSync(process.env.FM_HARNESS_RUN, { stdio: ["ignore", "ignore", "inherit"] });
   } else if (name === "poll") {
-    for (const fn of intervals) fn();
+    for (const t of [...intervals]) if (intervals.includes(t)) t.fn();
     flush();
-  } else if (name === "tick") {
+  } else if (name === "tick" || name === "wait") {
+    flush();
+  } else if (name === "chrome") {
+    setChrome(arg);
+  } else if (name === "retry") {
+    const box = arg === "priority" ? byId.get("bb-priority-error") : arg === "page" ? byId.get("bb-page-error")
+      : forms().find((f) => f.attributes["data-lavish-question"] === arg).querySelector(".bb-submit-error");
+    box.querySelector("button").fire("click");
     flush();
   } else if (name === "go") {
     byId.get("bb-order-go").fire("click");
@@ -326,6 +377,11 @@ session.review = controls().map((c) => ({
 }));
 writeFileSync(sessionPath, JSON.stringify(session));
 
+const errorOf = (box) => ({
+  shown: !!box && box.classList.contains("is-visible"),
+  text: box?.querySelector(".bb-submit-error__text")?.textContent ?? "",
+});
+const loadNote = (bySel.get(".bb-main")?.children || []).find((c) => c.id === "bb-load-problem");
 const cards = forms().map((f) => ({
   key: f.attributes["data-lavish-question"],
   selection: f.querySelectorAll("input").find((r) => r.type === "radio" && r.checked)?.value ?? "",
@@ -334,6 +390,7 @@ const cards = forms().map((f) => ({
   state: f.querySelectorAll("input").find((i) => i.name === "lavish-state")?.value ?? "",
   title: f.parentNode.parentNode.querySelector(".bb-decision__title")?.textContent ?? "",
   hidden: f.parentNode.parentNode.hidden,
+  error: errorOf(f.querySelector(".bb-submit-error")),
 }));
 process.stdout.write(JSON.stringify({
   cards, storage: store, calls, queue: Object.keys(session.queue),
@@ -342,20 +399,23 @@ process.stdout.write(JSON.stringify({
   reloads,
   opens,
   pageView: {
-    shown: !byId.get("bb-pageview").hidden, title: byId.get("bb-page-title").textContent,
-    max: byId.get("bb-pageview").classList.contains("is-max"),
-    maxPressed: byId.get("bb-page-max").getAttribute("aria-pressed"),
+    shown: !get("bb-pageview").hidden, title: get("bb-page-title").textContent,
+    max: get("bb-pageview").classList.contains("is-max"),
+    maxPressed: get("bb-page-max").getAttribute("aria-pressed"),
   },
   snaps,
   framePosts,
   keys,
   polls: intervals.length,
-  sub: byId.get("bb-call-sub").textContent,
+  dropped: dropped.length,
+  errors: { priority: errorOf(get("bb-priority-error")), page: errorOf(get("bb-page-error")) },
+  boot: { shown: !!loadNote, text: loadNote?.textContent ?? "" },
+  sub: get("bb-call-sub").textContent,
   order: {
-    stepShown: !byId.get("bb-order").hidden,
-    deckShown: !byId.get("bb-callwrap").hidden,
-    list: byId.get("bb-order-list").children.map((r) => r.attributes["data-order-key"]),
-    titles: byId.get("bb-order-list").children.map((r) => r.children[1].children[0].textContent),
-    reorderDisabled: byId.get("bb-reorder").disabled,
+    stepShown: !get("bb-order").hidden,
+    deckShown: !get("bb-callwrap").hidden,
+    list: get("bb-order-list").children.map((r) => r.attributes["data-order-key"]),
+    titles: get("bb-order-list").children.map((r) => r.children[1].children[0].textContent),
+    reorderDisabled: get("bb-reorder").disabled,
   },
 }) + "\n");
