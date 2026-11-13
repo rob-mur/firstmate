@@ -113,6 +113,7 @@ run_board() {  # <home> <args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     LAVISH_FAKE_STATE="$home/lavish-state" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    FM_BEARINGS_BOARD_REFRESH="${FM_BEARINGS_BOARD_REFRESH:-true}" \
     "$BOARD" "$@"
 }
 
@@ -782,13 +783,15 @@ test_url_prints_only_the_live_link_without_a_browser() {
   run_board "$home" build "$data" >/dev/null || fail "the first build failed"
   rm -f "$home/lavish-state/browser-allowed"
   cp "$board" "$home/board-before"
-  out=$(run_board "$home" url 2>"$home/url.err") || fail "url failed on a live board: $(cat "$home/url.err")"
+  out=$(FM_BEARINGS_BOARD_REFRESH="touch $home/refresh-kicked" run_board "$home" url 2>"$home/url.err") \
+    || fail "url failed on a live board: $(cat "$home/url.err")"
   err=$(cat "$home/url.err")
   [ "$out" = "http://127.0.0.1:4387/session/0123456789abcdef" ] \
     || fail "url did not print exactly the listed board link: $out"
   case "$err" in *reopened*) fail "url reported a reopen for a live board: $err" ;; esac
   [ ! -e "$home/lavish-state/browser-allowed" ] || fail "url let Lavish open a browser"
   cmp -s "$board" "$home/board-before" || fail "url rebuilt the board instead of only serving it"
+  [ ! -e "$home/refresh-kicked" ] || fail "url started a refresh for a board that was already live"
   sid=$(run_lavish_source_id "$home" "$board")
   [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
     || fail "url left the live board without a listener"
@@ -814,12 +817,14 @@ test_url_reopens_a_board_the_captain_ended() {
   sleep 0.5
   rm -f "$home/lavish-state/poll-trigger"
   end_session_as_captain "$home"
-  out=$(run_board "$home" url 2>"$home/url.err") || fail "url refused a recoverable ended board: $(cat "$home/url.err")"
+  out=$(FM_BEARINGS_BOARD_REFRESH="touch $home/refresh-kicked" run_board "$home" url 2>"$home/url.err") \
+    || fail "url refused a recoverable ended board: $(cat "$home/url.err")"
   err=$(cat "$home/url.err")
   [ "$out" = "http://127.0.0.1:4387/session/0123456789abcdef" ] \
     || fail "url did not print the reopened board link: $out"
   assert_contains "$err" "reopened: yes" "url did not report the reopen: $err"
   [ -s "$home/lavish-state/open" ] || fail "url printed a link while the session stayed ended"
+  [ -e "$home/refresh-kicked" ] || fail "url did not start a refresh to bring the reopened board current"
   [ "$(sed -n '2p' "$claim")" != "$old_pid" ] || [ "$(sed -n '3p' "$claim")" != "$old_token" ] \
     || fail "url kept the pre-reopen source generation"
   [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
@@ -842,6 +847,52 @@ test_url_refuses_when_the_board_stays_ended() {
   [ "$rc" -ne 0 ] || fail "url succeeded on a board that stayed ended"
   [ -z "$out" ] || fail "url printed a link to a board that stayed ended: $out"
   pass "url prints no link when the board cannot be brought back"
+}
+
+# --- whether anyone can see the board ------------------------------------------
+
+# Write Lavish's saved session record with one session per <status> for <file>.
+write_lavish_state() {  # <home> <file> <status...>
+  local home=$1 file=$2 n=0
+  shift 2
+  printf '{"sessions":{}}\n' > "$home/lavish-state/state.json"
+  for status in "$@"; do
+    n=$((n + 1))
+    jq --arg id "s$n" --arg file "$file" --arg status "$status" \
+      '.sessions[$id] = {file: $file, status: $status, url: "http://127.0.0.1:4387/session/\($id)"}' \
+      "$home/lavish-state/state.json" > "$home/lavish-state/state.tmp" \
+      && mv "$home/lavish-state/state.tmp" "$home/lavish-state/state.json"
+  done
+}
+
+board_ended() {  # <home>
+  run_board "$1" ended >/dev/null 2>&1
+}
+
+test_ended_reads_the_saved_session_record_without_the_server() {
+  local home data real
+  home=$(make_home ended-record)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  real=$(cd "$home/.lavish" && pwd -P)/bearings-board.html
+  : > "$home/lavish-state/open-calls"
+  write_lavish_state "$home" "$real" ended user-ended
+  board_ended "$home" || fail "a board whose every session ended was not reported ended"
+  write_lavish_state "$home" "$real" ended open
+  ! board_ended "$home" || fail "a board with an open session was reported ended"
+  write_lavish_state "$home" "$real" feedback
+  ! board_ended "$home" || fail "a board waiting on feedback was reported ended"
+  write_lavish_state "$home" "$home/other.html" ended
+  ! board_ended "$home" || fail "another page's ended session ended this board"
+  printf '{"pages":[]}\n' > "$home/lavish-state/state.json"
+  ! board_ended "$home" || fail "an unfamiliar record was read as ended"
+  printf 'not json\n' > "$home/lavish-state/state.json"
+  ! board_ended "$home" || fail "an unreadable record was read as ended"
+  rm -f "$home/lavish-state/state.json"
+  ! board_ended "$home" || fail "a missing record was read as ended"
+  [ ! -s "$home/lavish-state/open-calls" ] || fail "ended called the Lavish server"
+  pass "ended reports an ended board only from a saved record it understands, without the server"
 }
 
 # --- part 2: a landed subject is not a live call ----------------------------
@@ -1036,6 +1087,7 @@ test_url_refuses_before_any_board_is_built
 test_url_prints_only_the_live_link_without_a_browser
 test_url_reopens_a_board_the_captain_ended
 test_url_refuses_when_the_board_stays_ended
+test_ended_reads_the_saved_session_record_without_the_server
 test_build_drops_decision_cards_whose_subject_already_landed
 test_build_keeps_a_decision_absent_from_the_main_backlog
 test_build_fails_when_reconcile_cannot_establish_a_listener
