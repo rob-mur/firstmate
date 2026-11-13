@@ -40,7 +40,8 @@
 # question (contains a question mark) is promoted to decisions_open so a real
 # question is never hidden in a gate bucket. Every captain-hold row, main or
 # secondmate, carries its hold_until and hold_bucket so a consumer can tell a
-# dated deferral from a live call. A needs-decision or blocked status
+# dated deferral from a live call, plus hold_set and origin for the hand-off
+# check below (a decision handed to a worker gains handed_* fields). A needs-decision or blocked status
 # on a task under way, main or secondmate, also reaches decisions_open as a
 # source:"status" row with task, decision_key and mate for routing the answer. A
 # secondmate question the parent status log shows (the wake drain's open
@@ -162,7 +163,9 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,title,reason,title_full,reason_full,summary,question,owner,
-    hold_until,hold_bucket (captain holds only)}, landed{id,what,artifact,owner},
+    hold_until,hold_bucket,hold_set,origin (captain holds only),
+    handed_at,handed_via,handed_task,raised_at (handed decisions only)},
+  landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
@@ -580,7 +583,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             title_full:(.title // .id),reason_full:(.hold_reason // "-"),
             summary:hold_summary(.title; .hold_reason),
             question:(.title + ": " + .hold_reason),owner:"(main)",
-            hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null)} ]
+            hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null),
+            hold_set:(.hold_set // null),
+            origin:([(.body_lines // [])[]
+                     | capture("^Captain hold origin:[[:space:]]*(?<v>[^[:space:]]+)")?
+                     | .v][0] // null)} ]
      + [ . as $root | .tasks[]? | . as $t
          # A secondmate home that is valid and reports no active work is
          # authoritative: a parent-log question for it is stale (contradiction
@@ -609,7 +616,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                  summary:hold_summary((.summary // .id);
                                       (.reason // "captain decision pending")),
                  question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id,
-                 hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null)} ]
+                 hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null),
+                 hold_set:(.hold_set // null),origin:(.origin // null)} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -777,6 +785,158 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
+
+# --- handed-off decisions -----------------------------------------------------
+# A decision row is handed off when, after the decision was last raised, the
+# captain's answer or the work it waits on went to a worker. The evidence is the
+# durable record of each home involved, never the hold reason: a steer (state/
+# <task>.inbox, pending or handled) whose body names the decision as a whole
+# word - the hold id, sent to a task the hold tracks (the hold id, its recorded
+# origin, or a task a `captain-held` line names) or, for a hold a secondmate
+# owns, from main to that secondmate; or the decision key, sent to the task that
+# raised it (a `default` key is never named, so only a resolved line hands it);
+# a `resolved [key=...]` line for the hold or its parent-log mirror; or a
+# pending reconcile request for it, which the captain's board selection records
+# when a card is out of date. A steer that does not name the decision (a page
+# feedback relay, a process rule) or merely mentions it to some other task is
+# not a hand-off, and neither is one that tells the worker to wait for the
+# captain (for example "stay parked until the captain answers" or "keep the
+# question held: the captain decides"). The decision is raised at the latest of its hold set stamp and
+# every needs-decision or blocked line its tracked tasks append, so a worker
+# that raises a fresh question puts the decision back in front of the captain.
+# A handed row gains handed_at, handed_via (steer, resolved, or reconcile),
+# handed_task, and raised_at; it stays in decisions_open, and the board payload
+# shows it as a wait instead of a Captain's Call.
+handoff_records() {  # <home-label> <state-dir>
+  local label=$1 st=$2
+  [ -d "$st" ] || return 0
+  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose.
+  find "$st" -maxdepth 3 -type f \( -path "$st/*.inbox/*.msg" -o -path "$st/*.inbox/handled/*.msg" \
+      -o -path "$st/*.status" -o -path "$st/reconcile-requests/*.request" \) -print0 2>/dev/null \
+    | xargs -0 -r awk -v label="$label" -v st="$st/" '
+      function flush() {
+        if (kind == "S" && at != "") printf "%s\tS\t%s\t%s\t%s\n", label, task, at, body
+        if (kind == "R" && at != "") printf "%s\tR\t%s\t%s\t\n", label, task, at
+      }
+      function oneline(s) { gsub(/[\t\r\n]/, " ", s); return s }
+      FNR == 1 {
+        flush(); kind = ""; at = ""; body = ""; inbody = 0
+        rel = substr(FILENAME, length(st) + 1)
+        if (rel ~ /\.inbox\//) { kind = "S"; task = rel; sub(/\.inbox\/.*$/, "", task) }
+        else if (rel ~ /^reconcile-requests\//) { kind = "R"; task = rel; sub(/^.*\//, "", task); sub(/\.request$/, "", task) }
+        else if (rel !~ /\//) { kind = "L"; task = rel; sub(/\.status$/, "", task) }
+        if (task !~ /^[A-Za-z0-9._-]+$/) kind = ""
+      }
+      kind == "S" && !inbody {
+        if ($0 == "--") inbody = 1
+        else if ($0 ~ /^at=/) at = substr($0, 4)
+        next
+      }
+      kind == "S" { if (length(body) < 2000) body = substr(body " " oneline($0), 1, 2000); next }
+      kind == "R" { if ($0 ~ /^requested=/) at = substr($0, 11); next }
+      kind == "L" {
+        if (!match($0, /^(needs-decision|blocked|resolved|captain-held)[ :]/)) next
+        verb = $0; sub(/[ :].*$/, "", verb)
+        key = "default"
+        if (match($0, /\[key=[^]]*\]/)) key = substr($0, RSTART + 5, RLENGTH - 6)
+        a = ""
+        if (match($0, /\[at=[0-9]+\]/)) a = substr($0, RSTART + 4, RLENGTH - 5)
+        text = $0; sub(/^[^:]*: ?/, "", text)
+        printf "%s\tL\t%s\t%s\t%s\t%s\t%s\n", label, task, verb, key, a, substr(oneline(text), 1, 300)
+      }
+      END { flush() }'
+}
+
+MAIN_STATE="${FM_STATE_OVERRIDE:-$(printf '%s' "$SNAP" | jq -r '.fm_home')/state}"
+MATE_HOMES=$(printf '%s' "$SNAP" | jq -r '
+  (.secondmate_current.records // [])[]
+  | select((.provenance.structured_home | type) == "string")
+  | select(((.provenance.summary_source // "") | startswith("remote")) | not)
+  | select(.id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+  | [.id, .provenance.structured_home] | @tsv')
+HANDOFF_EVIDENCE=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-handoff.XXXXXX") \
+  || { echo "fm-bearings-snapshot: cannot create a temporary file" >&2; exit 1; }
+trap 'rm -f "$HANDOFF_EVIDENCE"' EXIT
+{
+  {
+    handoff_records "(main)" "$MAIN_STATE"
+    while IFS=$'\t' read -r mate_id mate_home; do
+      [ -n "$mate_id" ] && [ -d "$mate_home/state" ] || continue
+      handoff_records "$mate_id" "$mate_home/state"
+    done <<<"$MATE_HOMES"
+  } | jq -R -s '
+    def epoch: if test("^[0-9]+$") then tonumber
+               else (try fromdateiso8601 catch null) end;
+    [ split("\n")[] | select(length > 0) | split("\t")
+      | if .[1] == "S" then {home:.[0], kind:"steer", task:.[2], at:(.[3] | epoch), body:(.[4] // "")}
+        elif .[1] == "R" then {home:.[0], kind:"request", task:.[2], at:(.[3] | epoch)}
+        else {home:.[0], kind:"status", task:.[2], verb:.[3], key:.[4],
+              at:(if .[5] == "" then null else (.[5] | epoch) end), text:(.[6] // "")} end ]
+    | group_by(.home) | map({key:.[0].home, value:.}) | from_entries' >"$HANDOFF_EVIDENCE"
+} || printf '{}\n' >"$HANDOFF_EVIDENCE"
+
+MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
+  def iso: if . == null then null else todate end;
+  def set_epoch:
+    if (type) != "string" then null
+    elif test("T") then (try fromdateiso8601 catch null)
+    else (try ((. + "T00:00:00Z") | fromdateiso8601) catch null) end;
+  def word_re: "(^|[^A-Za-z0-9._-])" + gsub("\\."; "\\.") + "($|[^A-Za-z0-9._-])";
+  def names($id): test($id | word_re);
+  def wait_steer:
+    test("(once|when|until|after) the captain (answers|decides|replies|rules|responds)|the captain (decides|will decide)|stay(s)? parked|keep (it|the [a-z -]+) held|wait(ing|s)? (for|on) the captain|until the captain"; "i");
+  def handoff_steers($recs; $after):
+    [ $recs[] | select(.kind == "steer" and .at != null and .at > $after)
+      | select(.body | wait_steer | not) ];
+  # The earliest hand-off after the raise, as the flat fields a row gains.
+  def handed($cands; $raised):
+    ($cands | sort_by(.at) | first) as $h
+    | if $h == null then {}
+      else {handed_at:($h.at | iso), handed_via:$h.via, handed_task:$h.task,
+            raised_at:($raised | iso)} end;
+  ($evs[0] // {}) as $ev
+  | ($ev["(main)"] // []) as $main
+  | .decisions_open |= map(
+      . as $row
+      | (if .verb == "captain-hold" then
+           (if .owner == "(main)" then "(main)" else .owner end) as $home
+           | ($ev[$home] // []) as $recs
+           | .key as $id
+           | ($id | tostring) as $id
+           | ([ $recs[] | select(.kind == "status" and .verb == "captain-held" and (.text | names($id))) | .task ]
+              + [$id] + (if $row.origin == null then [] else [$row.origin] end) | unique) as $tracked
+           | ("^captain-hold-" + ($id | gsub("\\."; "\\.")) + "-[0-9]+$") as $mirror
+           | ($recs + (if $home == "(main)" then [] else
+                         [ $main[] | select(.task == $home)
+                           | select(.kind != "status" or .key == $id or (.key | test($mirror))) ] end)) as $scope
+           | ([ $scope[] | select(.kind == "status" and .at != null)
+                | select(.verb == "needs-decision" or .verb == "blocked")
+                | select((.task as $t | $tracked | index($t)) or (.key | test($mirror))) | .at ]
+              + [ ($row.hold_set | set_epoch) // 0 ] | max) as $raised
+           | handed(
+               [ handoff_steers($recs; $raised)[]
+                 | select((.task as $t | $tracked | index($t)) and (.body | names($id)))
+                 | . + {via:"steer"} ]
+               + [ handoff_steers([ $main[] | select($home != "(main)" and .task == $home) ]; $raised)[]
+                   | select(.body | names($id)) | . + {via:"steer"} ]
+               + [ $scope[] | select(.kind == "status" and .verb == "resolved" and .at != null and .at > $raised)
+                   | select(.key == $id or (.key | test($mirror))) | . + {via:"resolved"} ]
+               + [ $recs[] | select(.kind == "request" and .task == $id and .at != null and .at > $raised)
+                   | . + {via:"reconcile", task:"firstmate"} ];
+               $raised)
+         elif .source == "status" then
+           (if .mate == null then "(main)" else .mate end) as $home
+           | ($ev[$home] // []) as $recs
+           | .task as $task | (.decision_key // "default") as $k
+           | ([ $recs[] | select(.kind == "status" and .task == $task and .key == $k and .at != null)
+                | select(.verb == "needs-decision" or .verb == "blocked") | .at ] | max) as $raised
+           | if $raised == null then {}
+             else handed(
+               [ handoff_steers([ $recs[] | select(.task == $task) ]; $raised)[]
+                 | select($k != "default" and (.body | names($k))) | . + {via:"steer"} ];
+               $raised) end
+         else {} end) as $h
+      | . + $h)')
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"

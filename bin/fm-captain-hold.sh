@@ -2596,7 +2596,7 @@ run_then_refresh_home_summary() {  # <command-function> <args...>
 }
 
 case "${1:-}" in
-  hold|answer|answers|reconcile) KICK_BOARD=1 ;;
+  hold|answer|answers|reconcile|reconcile-requests) KICK_BOARD=1 ;;
 esac
 case "${1:-}" in
   hold) shift; run_then_refresh_home_summary command_hold "$@" ;;
