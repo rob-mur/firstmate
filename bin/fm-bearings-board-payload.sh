@@ -13,8 +13,26 @@
 # The payload goes to stdout. With no --snapshot the script runs
 # `fm-bearings-snapshot.sh --json --all-decisions` itself (--include-prs is passed
 # through), so every open captain hold - live, blocked, dated, or aged, past the
-# snapshot's decision cap - yields exactly one card or waiting row and none is
-# charted as a gate; with --snapshot it reads that JSON from the file or stdin instead.
+# snapshot's decision cap - yields at most one card, waiting row, or dated charted
+# row; with --snapshot it reads that JSON from the file or stdin instead.
+#
+# Stale rows never reach Captain's Call:
+#   - a hold deferred to a later date (hold_until after today, or fleet bucket
+#     `dated`), from any home, is charted with `until <date>: <reason>` instead;
+#   - a card whose every PR/MR (recorded, or named in its reason) merged or closed
+#     is dropped, as is a contribution card whose PR did. Landed artifacts count as
+#     merged; open PRs are read live from GitHub, GitLab, and Forgejo through
+#     bin/fm-pr-lib.sh, in parallel, each bounded by FM_BEARINGS_BOARD_PR_TIMEOUT
+#     seconds (default 5), at most FM_BEARINGS_BOARD_PR_MAX URLs (default 24). A
+#     lookup that fails or times out keeps the card. FM_BEARINGS_BOARD_PR_CHECK=0
+#     turns the live read off;
+#   - a hold whose id is a round (`<base>-r<N>`, `-round<N>`, `-v<N>`) is dropped
+#     when the same home has a higher round of the same base in decisions, work
+#     under way, landed work, or gates;
+#   - a status row that only announces a page or PR is live or ready
+#     (is_announcement in bin/fm-bearings-question-lib.sh) is never a card: its
+#     links fold into the card for the same work (same home and task or decision
+#     key, or a shared PR/MR URL), and it is dropped when no such card exists.
 #
 # Mapping (snapshot field -> board section):
 #   decisions_open  -> captains_call: one `decision` card per captain-held task id,
@@ -24,7 +42,11 @@
 #                      derived default choices (bin/fm-bearings-question-lib.sh: yes/no,
 #                      numbered or lettered parts, two-way or, else approve/decline; an authored
 #                      overlay `options` still wins) with reconcile secondary, and any
-#                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`. Every
+#                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`.
+#                      A link is labelled by what it points at - `PR <n>`, `MR <n>`,
+#                      `Issue <n>`, or for a Lavish page `Understand page`, `Review page`,
+#                      or `Report` from the words just before it (else `Lavish page`) -
+#                      and `question`/`about` show that label in place of the URL. Every
 #                      open captain hold is a row here (see --all-decisions above).
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
@@ -50,12 +72,10 @@
 #                      carries, adds none.
 #   waiting         -> waiting: a captain-held task whose reason is a wait or park on a
 #                      condition or date, with nothing for the captain to answer. The rule:
-#                      a reason whose first sentence records that the captain parked,
-#                      deferred, or paused it is a wait; else a reason with a question
-#                      mark is a question; otherwise a reason that
-#                      opens with or contains park/paused/on hold/hold until/resume/
-#                      waiting for|on/until/re-runs is a wait; a hold carrying an `until`
-#                      date is a wait; anything else is a question. Waiting rows keep
+#                      is_wait in bin/fm-bearings-question-lib.sh owns it - a captain
+#                      park is a wait; a question mark or numbered options make a
+#                      question; a blocked hold, a time gate naming a date, or a reason
+#                      that opens with wait wording is a wait. Waiting rows keep
 #                      snapshot order and are not part of the priority list.
 #   in_flight       -> underway: every row except state `done`, in snapshot order,
 #                      with the projected `name`.
@@ -173,7 +193,68 @@ overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
 PRIO_JSON=$("$SCRIPT_DIR/fm-board-priority.sh" show 2>/dev/null | jq -R . | jq -s . 2>/dev/null) || PRIO_JSON='[]'
 [ -n "$PRIO_JSON" ] || PRIO_JSON='[]'
 
-jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" --arg today "$(date -u +%Y-%m-%d)" "$FM_BEARINGS_QUESTION_JQ_DEFS"'
+# Live state of every PR/MR a decision or contribution names, so a card whose
+# PR/MR already merged or closed leaves the board. Each lookup is one bounded
+# forge read; a failed, slow, or unparseable lookup records nothing, and an
+# unknown state keeps its card.
+pr_state_of() {  # <url> -> prints "<url>\t<merged|closed|open>" or nothing
+  local url=$1 record state merged
+  fm_pr_url_parse "$url" || return 0
+  case "$FM_PR_PROVIDER" in
+    github) set -- github "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" ;;
+    gitlab|forgejo) set -- "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" ;;
+    *) return 0 ;;
+  esac
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  record=$(fm_run_timed "$PR_TIMEOUT" bash -c '
+    . "$1"; p=$2; shift 2
+    "fm_pr_${p}_read_record" "$@" || exit 1
+    printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$@" 2>/dev/null) || return 0
+  state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1 | tr '[:upper:]' '[:lower:]')
+  merged=$(printf '%s\n' "$record" | sed -n 's/^merged=//p' | head -1)
+  if [ "$merged" = true ] || [ "$state" = merged ]; then state=merged
+  elif [ "$state" = closed ]; then state=closed
+  elif [ "$state" = open ] || [ "$state" = opened ]; then state=open
+  else return 0; fi
+  printf '%s\t%s\n' "$url" "$state"
+}
+
+PR_STATES_JSON='{}'
+if [ "${FM_BEARINGS_BOARD_PR_CHECK:-1}" != 0 ]; then
+  PR_TIMEOUT=${FM_BEARINGS_BOARD_PR_TIMEOUT:-5}
+  PR_MAX=${FM_BEARINGS_BOARD_PR_MAX:-24}
+  pr_urls=$(printf '%s\n' "$SNAP_JSON" | jq -r --argjson max "$PR_MAX" '
+    . as $s
+    | ([ ($s.landed // [])[] | .artifact | strings ]) as $landed
+    | [ ($s.decisions_open // [])[] as $d
+        | ( ($s.recorded_prs // [])[] | select(.id == $d.id) | .url ),
+          ( ($d.reason_full // $d.reason // "") | tostring
+            | scan("https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+") ) ]
+      + [ ($s.contributions.captain // [])[] | .url ]
+    | map(strings | select(test("^https://"))) | unique
+    | map(select(. as $u | $landed | index($u) | not)) | .[:$max][]' 2>/dev/null) || pr_urls=""
+  if [ -n "$pr_urls" ]; then
+    . "$SCRIPT_DIR/fm-timeout-lib.sh"
+    . "$SCRIPT_DIR/fm-pr-lib.sh"
+    pr_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-board-pr.XXXXXX")
+    trap 'rm -rf "$pr_tmp"' EXIT
+    i=0
+    while IFS= read -r u; do
+      i=$((i + 1))
+      pr_state_of "$u" >"$pr_tmp/$i" 2>/dev/null &
+    done <<URLS
+$pr_urls
+URLS
+    wait
+    PR_STATES_JSON=$(cat "$pr_tmp"/* 2>/dev/null \
+      | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]}) | from_entries' 2>/dev/null) \
+      || PR_STATES_JSON='{}'
+    [ -n "$PR_STATES_JSON" ] || PR_STATES_JSON='{}'
+  fi
+fi
+
+jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" --argjson pr_states "$PR_STATES_JSON" --arg today "$(date -u +%Y-%m-%d)" "$FM_BEARINGS_QUESTION_JQ_DEFS"'
   def card_fields: ["title","about","decide","detail","options","recommend_value","type","close",
                     "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question"];
   def underway_fields: ["repo"];
@@ -209,6 +290,41 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
            | ($u | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")) and (($u[:10]) <= $today) );
     ( [ $snap.decisions_open[]? | select(released(.) | not) ]
       | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end) ) as $held
+  # A hold deferred to a future date (hold_until after today, or the dated
+  # bucket) is charted with its date, main and secondmate alike, never a call.
+  | def deferred($d):
+      ($d.hold_bucket // "") == "dated"
+      or ( (($d.hold_until // "") | tostring) as $u
+           | ($u | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")) and (($u[:10]) > $today) );
+    ( [ $held[] | select(deferred(.)) ] ) as $deferred
+  | ( [ $held[] | select(deferred(.) | not) ] ) as $held
+  # A row whose every PR/MR is merged or closed (live forge state, or a landed
+  # artifact) is finished work, and a row an explicit later round of the same
+  # task in the same home has superseded is stale; neither reaches the board.
+  | ( [ $landed_rows[] | .artifact | strings ] ) as $landed_urls
+  | def pr_state($u): if ($landed_urls | index($u)) then "merged" else ($pr_states[$u] // null) end;
+    def row_urls($d):
+      [ pr_for($d.id; $contrib; $recorded),
+        ( ($d.reason_full // $d.reason // "") | tostring
+          | scan("https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+") ) ]
+      | map(strings) | unique;
+    def pr_finished($urls):
+      ($urls | length) > 0 and all($urls[]; pr_state(.) as $st | $st == "merged" or $st == "closed");
+    def round_of:
+      ([capture("^(?<b>.+?)-(?:r|round-?|v)(?<n>[0-9]{1,2})$")][0]
+       | if . == null then null else {b, n: (.n | tonumber)} end) as $m
+      | $m // {b: ., n: 1};
+    ( [ ($snap.decisions_open // [])[] | {o: (.owner // "(main)"), id: ((.id // "") | split("/") | last)} ]
+      + [ $in_flight[] | (.id // "") | if test("/") then {o: split("/")[0], id: (split("/") | last)} else {o: "(main)", id: .} end ]
+      + [ $landed_rows[] | {o: (.owner // "(main)"), id: (.id // "")} ]
+      + [ ($snap.gates // [])[] | {o: (.owner // "(main)"), id: (.id // "")} ]
+      | map(select(.id != "") | . + {r: (.id | round_of)}) ) as $known
+  | def superseded($d):
+      (($d.id // "") | split("/") | last) as $id
+      | ($d.owner // "(main)") as $o
+      | ($id | round_of) as $r
+      | $id != "" and any($known[]; .o == $o and .r.b == $r.b and .r.n > $r.n);
+    ( [ $held[] | select((pr_finished(row_urls(.)) or superseded(.)) | not) ] ) as $held
   # A status decision row (source "status") carries the asking task or home as its
   # title; the card title says what the question is instead.
   | def short_text_n($n):
@@ -247,7 +363,13 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
           // (if $k != "default" then $k else $d.key end) ) as $t
       | if $owner != "(main)" and ($t | startswith($owner + ": ") | not) then $owner + ": " + $t else $t end;
     [ $held[] | if (.source // "") == "status" then .title_full = status_title(.) else . end ] as $held
-  | ( [ $held[] | select(is_wait(.) | not) ] ) as $asked
+  # A status line that only announces a live page or ready PR asks nothing: its
+  # link folds into the card for the same task or PR/MR (below), and the line
+  # itself is never a card or a waiting row.
+  | ( [ $held[] | select(is_announcement(.) and (is_wait(.) | not)) ] ) as $announced
+  | ( [ $held[] | select(is_announcement(.) and (is_wait(.) | not) | not) ] ) as $held
+  | def waitlike($d): is_wait($d);
+    ( [ $held[] | select(waitlike(.) | not) ] ) as $asked
   # One question, one card: a status decision whose key names a captain-held
   # task in the same home is the same question, so it folds into that hold card
   # with its text and choices. A hold that is a wait absorbs nothing, so a
@@ -263,14 +385,39 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         | if ($folded | index([$r.key])) then empty
           elif ($r.verb // "") == "captain-hold" then
             . + {twins: [ $held[] | select(same_question(.; $r)) ]}
-          else . end ] ) as $question_rows
-  | ( [ $held[] | select(is_wait(.)) | select(.key as $k | $folded | index([$k]) | not)
+          else . end ]
+      | def task_of($r): [$r.task, $r.decision_key, (($r.id // "") | split("/") | last), $r.key] | map(strings | select(. != "default"));
+        def same_work($a; $c):
+          (($a.owner // "(main)") == ($c.owner // "(main)")
+           and ((task_of($a) - (task_of($a) - task_of($c))) | length) > 0)
+          or ((row_urls($a) - (row_urls($a) - row_urls($c))) | length) > 0;
+        map(. as $c | . + {announced: [ $announced[] | select(same_work(.; $c)) ]}) ) as $question_rows
+  | ( [ $held[] | select(waitlike(.)) | select(.key as $k | $folded | index([$k]) | not)
         | . as $d
         | { key: $d.key,
             title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
             reason: (($d.reason_full // $d.reason) | nz(null) | if . == null then "waiting" else (clean_reason | nz("waiting")) end),
             repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null) } ] ) as $waiting
-  | ( $question_rows
+  # A card link is labelled by what it points at, never by its raw URL: a
+  # PR/MR/issue number from the URL shape, or for a Lavish page the kind the
+  # text just before the URL names (understand, review, report). Question and
+  # about text show that label in place of each URL.
+  | def card_urls:
+      scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") | sub("[.,;:!?]+$"; "");
+    def link_label($u; $t):
+      ((($t | split($u)[0]) // "") | .[-80:] | sub("^.*([.;!?,]|\\([0-9]+\\))[[:space:]]"; "") | ascii_downcase) as $pre
+      | if ($u | test("/-/merge_requests/[0-9]+")) then "MR " + ($u | capture("/-/merge_requests/(?<n>[0-9]+)").n)
+        elif ($u | test("/pulls?/[0-9]+")) then "PR " + ($u | capture("/pulls?/(?<n>[0-9]+)").n)
+        elif ($u | test("/(-/)?issues/[0-9]+")) then "Issue " + ($u | capture("/issues/(?<n>[0-9]+)").n)
+        elif ($u | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387")) then
+          (if ($pre | test("understand")) then "Understand page"
+           elif ($pre | test("review")) then "Review page"
+           elif ($pre | test("report")) then "Report"
+           else "Lavish page" end)
+        else ($u | sub("^https://"; "") | split("/")[0]) end;
+    def labelled_urls:
+      . as $t | reduce ([$t | card_urls] | unique | sort_by(-length))[] as $u ($t; split($u) | join(link_label($u; $t)));
+    ( $question_rows
       | map(
           . as $d
           | pr_for($d.id; $contrib; $recorded) as $pr
@@ -290,10 +437,11 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
               freeform_hint: "answer in your own words (say later to defer)"
             }
             # The heading is one short asking sentence; the full cleaned text
-            # (with the text of any folded twin) is the body, and a heading that only
-            # repeats the title is dropped so the title leads instead.
+            # (with the text of any folded twin) is the body, each URL shown as its
+            # link label, and a heading that only repeats the title is dropped so
+            # the title leads instead.
             + ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
-                | map(nz(null) | select(. != null) | clean_reason | nz(null) | select(. != null))
+                | map(nz(null) | select(. != null) | clean_reason | nz(null) | select(. != null) | labelled_urls)
                 | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end) as $texts
                 | (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key) | tostring) as $title
                 | (($texts | max_by(length)) // null) as $long
@@ -303,9 +451,15 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                   + (if ($texts | length) > 0 and ($texts | join("\n\n")) != $q
                      then {about: ($texts | join("\n\n"))} else {} end) )
             + (if $pr != null then {pr_url: $pr} else {} end)
-            + ( [ (([($d.reason_full // $d.reason // ""), (($d.twins // [])[] | (.reason_full // .reason // ""))] | map(tostring) | join(" ")) | scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") )
-                  | sub("[.,;:!?]+$"; "") ] | unique | .[:5]
-                | if length > 0 then {links: map({url: ., label: (sub("^https?://"; "") | .[:60])})} else {} end ) )
+            + ( [ ( ($d.announced // [])[] | ((.reason_full // .reason // "") | tostring) as $t
+                    | $t | card_urls | {url: ., label: link_label(.; $t)} ),
+                  ( ([($d.reason_full // $d.reason // ""), (($d.twins // [])[] | (.reason_full // .reason // ""))] | map(tostring) | join(" ")) as $t
+                    | $t | card_urls | {url: ., label: link_label(.; $t)} ) ]
+                | reduce .[] as $l ([]; if any(.[]; .url == $l.url) then . else . + [$l] end) | .[:8]
+                | reduce .[] as $l ([];
+                    ([.[] | select(.label == $l.label or (.label | startswith($l.label + " (")))] | length) as $n
+                    | . + [if $n > 0 then $l + {label: ($l.label + " (" + (($n + 1) | tostring) + ")")} else $l end])
+                | if length > 0 then {links: .} else {} end ) )
           + overlay("captains_call"; $d.key; card_fields)
           | . as $card
           | select((($copy.captains_call // {}) | has($d.key) | not)
@@ -314,6 +468,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     ) as $cards
   | ( [ $contrib[]
         | select((.hold // null) == null and (.url | https_url) and (.task | type == "string"))
+        | select(pr_finished([.url]) | not)
         | . as $c
         | select(($cards | any(.key == $c.task or .pr_url? == $c.url)) | not)
         | { key: ("contribution." + (.task | gsub("[^A-Za-z0-9._-]"; "-"))),
@@ -381,7 +536,19 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   | ( [ $omitted[] | capture("^gates showing (?<n>[0-9]+) of (?<m>[0-9]+)$")? ]
       | (.[0] // null) ) as $gates_cut
 
-  | ($gate_rows + $home_rows) as $charted
+  | ( [ $deferred[]
+        | . as $d | ($d.owner // "(main)") as $o
+        | { id: (($d.id // $d.key) | gsub("[^A-Za-z0-9._-]"; "-") | .[:128]),
+            repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null),
+            title: ((if $o == "(main)" then "" else $o + ": " end)
+                    + (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key))),
+            reason: ("until " + ((($d.hold_until // "") | tostring | .[:10]) | nz("a later date")) + ": "
+                     + (($d.reason_full // $d.reason) | nz("deferred"))),
+            dispatchable: false, kind: "queued" }
+        | . as $row | . + overlay("charted"; $row.id; charted_fields)
+        | .dispatchable = false ] ) as $deferred_rows
+
+  | ($gate_rows + $deferred_rows + $home_rows) as $charted
 
   | def ranked($v): ($prio | index($v)) as $i | if $i == null then 1000000 else $i end;
     def by_priority(k): to_entries | sort_by([ranked(.value | k), .key]) | map(.value);
