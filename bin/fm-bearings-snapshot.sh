@@ -168,7 +168,8 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,title,reason,title_full,reason_full,summary,question,owner,
     hold_until,hold_bucket,hold_set,origin (captain holds only),
-    handed_at,handed_via,handed_task,raised_at (handed decisions only)},
+    handed_at,handed_via,handed_task,raised_at (handed decisions only),
+    pr_url (a PR or MR its home recorded, when the reason links none)},
   landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
@@ -818,16 +819,21 @@ MODEL=$(printf '%s' "$SNAP" | jq \
 # origin, or a task a `captain-held` line names) or, for a hold a secondmate
 # owns, from main to that secondmate; or the decision key, sent to the task that
 # raised it (a `default` key is never named, so only a resolved line hands it);
-# a `resolved [key=...]` line for the hold or its parent-log mirror; or a
+# a `resolved [key=...]` line for the hold or its parent-log mirror; a
 # pending reconcile request for it, which the captain's board selection records
-# when a card is out of date. A steer that does not name the decision (a page
+# when a card is out of date; or the captain's own answer to that card on the
+# board (board_answer_records), which hands every kind of row - a captain hold
+# in any home, a status question, and a review page - so a card the captain
+# answered or marked out of date never asks again. A steer that does not name the decision (a page
 # feedback relay, a process rule) or merely mentions it to some other task is
 # not a hand-off, and neither is one that tells the worker to wait for the
 # captain (for example "stay parked until the captain answers" or "keep the
 # question held: the captain decides"). The decision is raised at the latest of its hold set stamp and
 # every needs-decision or blocked line its tracked tasks append, so a worker
-# that raises a fresh question puts the decision back in front of the captain.
-# A handed row gains handed_at, handed_via (steer, resolved, or reconcile),
+# that raises a fresh question puts the decision back in front of the captain;
+# a hold is also raised by every `captain-held` line naming it, and a review
+# page by its task's latest done line.
+# A handed row gains handed_at, handed_via (steer, resolved, reconcile, or board),
 # handed_task, and raised_at; it stays in decisions_open, and the board payload
 # shows it as a wait instead of a Captain's Call.
 handoff_records() {  # <home-label> <state-dir>
@@ -835,7 +841,7 @@ handoff_records() {  # <home-label> <state-dir>
   [ -d "$st" ] || return 0
   # shellcheck disable=SC2016 # the awk program is single-quoted on purpose.
   find "$st" -maxdepth 3 -type f \( -path "$st/*.inbox/*.msg" -o -path "$st/*.inbox/handled/*.msg" \
-      -o -path "$st/*.status" -o -path "$st/reconcile-requests/*.request" \) -print0 2>/dev/null \
+      -o -path "$st/*.status" -o -path "$st/*.meta" -o -path "$st/reconcile-requests/*.request" \) -print0 2>/dev/null \
     | xargs -0 -r awk -v label="$label" -v st="$st/" '
       function flush() {
         if (kind == "S" && at != "") printf "%s\tS\t%s\t%s\t%s\n", label, task, at, body
@@ -847,6 +853,7 @@ handoff_records() {  # <home-label> <state-dir>
         rel = substr(FILENAME, length(st) + 1)
         if (rel ~ /\.inbox\//) { kind = "S"; task = rel; sub(/\.inbox\/.*$/, "", task) }
         else if (rel ~ /^reconcile-requests\//) { kind = "R"; task = rel; sub(/^.*\//, "", task); sub(/\.request$/, "", task) }
+        else if (rel ~ /^[^\/]+\.meta$/) { kind = "P"; task = rel; sub(/\.meta$/, "", task) }
         else if (rel !~ /\//) { kind = "L"; task = rel; sub(/\.status$/, "", task) }
         if (task !~ /^[A-Za-z0-9._-]+$/) kind = ""
       }
@@ -857,8 +864,9 @@ handoff_records() {  # <home-label> <state-dir>
       }
       kind == "S" { if (length(body) < 2000) body = substr(body " " oneline($0), 1, 2000); next }
       kind == "R" { if ($0 ~ /^requested=/) at = substr($0, 11); next }
+      kind == "P" { if ($0 ~ /^pr=https:\/\/[^[:space:]]+$/) printf "%s\tP\t%s\t%s\n", label, task, substr($0, 4); next }
       kind == "L" {
-        if (!match($0, /^(needs-decision|blocked|resolved|captain-held)[ :]/)) next
+        if (!match($0, /^(needs-decision|blocked|resolved|captain-held|done)[ :]/)) next
         verb = $0; sub(/[ :].*$/, "", verb)
         key = "default"
         if (match($0, /\[key=[^]]*\]/)) key = substr($0, RSTART + 5, RLENGTH - 6)
@@ -868,6 +876,45 @@ handoff_records() {  # <home-label> <state-dir>
         printf "%s\tL\t%s\t%s\t%s\t%s\t%s\n", label, task, verb, key, a, substr(oneline(text), 1, 300)
       }
       END { flush() }'
+}
+
+# Every answer the captain gave on this home's board: one record per answer
+# card in a captured board result (state/procevent-inbox/lavish-*.result whose
+# page is a .lavish/bearings-board.html), dated by the result's capture
+# time, keyed by the card it answered, with its selection. "later" on a review
+# card keeps the card, and an answer with neither a selection nor a note says
+# nothing, so neither is recorded. Only the newest FM_BEARINGS_BOARD_RESULTS
+# results (default 2000) are read.
+board_answer_records() {  # <state-dir>
+  local st=$1 limit=${FM_BEARINGS_BOARD_RESULTS:-2000} stamps
+  [ -d "$st/procevent-inbox" ] || return 0
+  case "$limit" in ''|*[!0-9]*) limit=2000 ;; esac
+  stamps=$(find "$st/procevent-inbox" -maxdepth 1 -type f -name 'lavish-*.result' -print0 2>/dev/null \
+    | { xargs -0 -r stat -c '%Y %n' 2>/dev/null || find "$st/procevent-inbox" -maxdepth 1 -type f \
+          -name 'lavish-*.result' -print0 2>/dev/null | xargs -0 -r stat -f '%m %N' 2>/dev/null; } \
+    | sort -rn | head -n "$limit")
+  [ -n "$stamps" ] || return 0
+  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose.
+  printf '%s\n' "$stamps" | awk '
+    function field(s, name,   v) {
+      if (!match(s, "\"" name "\": \"[^\"]*\"")) return ""
+      v = substr(s, RSTART, RLENGTH); sub(/^"[a-z]+": "/, "", v); sub(/"$/, "", v)
+      return v
+    }
+    {
+      at = $1; file = substr($0, length($1) + 2); board = 0; n = 0
+      while ((getline line < file) > 0) {
+        n++
+        if (n <= 3 && line ~ /^  file: /) board = (line ~ /\/\.lavish\/bearings-board\.html$/)
+        if (n == 3 && !board) break
+        if (!board || index(line, "fm-bearings-answer.v1") == 0) continue
+        s = line; gsub(/\\"/, "\"", s)
+        key = field(s, "question"); sel = field(s, "selection"); note = field(s, "note")
+        if (key !~ /^[A-Za-z0-9._\/-]+$/ || sel == "later" || (sel == "" && note == "")) continue
+        printf "(main)\tB\t%s\t%s\t%s\n", key, at, sel
+      }
+      close(file)
+    }'
 }
 
 MAIN_STATE="${FM_STATE_OVERRIDE:-$(printf '%s' "$SNAP" | jq -r '.fm_home')/state}"
@@ -883,6 +930,7 @@ trap 'rm -f "$HANDOFF_EVIDENCE"' EXIT
 {
   {
     handoff_records "(main)" "$MAIN_STATE"
+    board_answer_records "$MAIN_STATE"
     while IFS=$'\t' read -r mate_id mate_home; do
       [ -n "$mate_id" ] && [ -d "$mate_home/state" ] || continue
       handoff_records "$mate_id" "$mate_home/state"
@@ -893,6 +941,8 @@ trap 'rm -f "$HANDOFF_EVIDENCE"' EXIT
     [ split("\n")[] | select(length > 0) | split("\t")
       | if .[1] == "S" then {home:.[0], kind:"steer", task:.[2], at:(.[3] | epoch), body:(.[4] // "")}
         elif .[1] == "R" then {home:.[0], kind:"request", task:.[2], at:(.[3] | epoch)}
+        elif .[1] == "B" then {home:.[0], kind:"board", key:.[2], at:(.[3] | epoch), selection:(.[4] // "")}
+        elif .[1] == "P" then {home:.[0], kind:"pr", task:.[2], url:(.[3] // "")}
         else {home:.[0], kind:"status", task:.[2], verb:.[3], key:.[4],
               at:(if .[5] == "" then null else (.[5] | epoch) end), text:(.[6] // "")} end ]
     | group_by(.home) | map({key:.[0].home, value:.}) | from_entries' >"$HANDOFF_EVIDENCE"
@@ -919,7 +969,11 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
             raised_at:($raised | iso)} end;
   ($evs[0] // {}) as $ev
   | ($ev["(main)"] // []) as $main
-  | .decisions_open |= map(
+  # The captain answered this very card on the board after it was raised.
+  | def board_answers($key; $raised):
+      [ $main[] | select(.kind == "board" and .key == $key and .at != null and .at > $raised)
+        | {at, via:"board", task:"firstmate"} ];
+  .decisions_open |= map(
       . as $row
       | (if .verb == "captain-hold" then
            (if .owner == "(main)" then "(main)" else .owner end) as $home
@@ -933,7 +987,8 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
                          [ $main[] | select(.task == $home)
                            | select(.kind != "status" or .key == $id or (.key | test($mirror))) ] end)) as $scope
            | ([ $scope[] | select(.kind == "status" and .at != null)
-                | select(.verb == "needs-decision" or .verb == "blocked")
+                | select(.verb == "needs-decision" or .verb == "blocked"
+                         or (.verb == "captain-held" and (.text | names($id))))
                 | select((.task as $t | $tracked | index($t)) or (.key | test($mirror))) | .at ]
               + [ ($row.hold_set | set_epoch) // 0 ] | max) as $raised
            | handed(
@@ -945,7 +1000,8 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
                + [ $scope[] | select(.kind == "status" and .verb == "resolved" and .at != null and .at > $raised)
                    | select(.key == $id or (.key | test($mirror))) | . + {via:"resolved"} ]
                + [ $recs[] | select(.kind == "request" and .task == $id and .at != null and .at > $raised)
-                   | . + {via:"reconcile", task:"firstmate"} ];
+                   | . + {via:"reconcile", task:"firstmate"} ]
+               + board_answers($row.key; $raised);
                $raised)
          elif .source == "status" then
            (if .mate == null then "(main)" else .mate end) as $home
@@ -956,10 +1012,41 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
            | if $raised == null then {}
              else handed(
                [ handoff_steers([ $recs[] | select(.task == $task) ]; $raised)[]
-                 | select($k != "default" and (.body | names($k))) | . + {via:"steer"} ];
+                 | select($k != "default" and (.body | names($k))) | . + {via:"steer"} ]
+               + board_answers($row.key; $raised);
                $raised) end
+         elif .source == "review-page" then
+           .task as $task
+           | ([ $main[] | select(.kind == "status" and .task == $task and .verb == "done" and .at != null)
+                | .at ] | max // 0) as $raised
+           | handed(board_answers($row.key; $raised); $raised)
          else {} end) as $h
-      | . + $h)')
+      | . + $h)
+  # A decision whose reason links no PR/MR gains the pr_url its home recorded:
+  # the one a task the row tracks recorded (the hold id or origin, the asking
+  # task), else, when the reason names a number ("PR 91", "MR 874", "!874",
+  # "#91"), the single PR/MR that home recorded with that number.
+  | def pr_re: "https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+";
+    .decisions_open |= map(
+      ((.reason_full // .reason // "") | tostring) as $r
+      | if ($r | test(pr_re)) or ((.pr_url // "") != "") then .
+        else
+          (if .verb == "captain-hold" then (.owner // "(main)")
+           elif .source == "status" then (.mate // "(main)") else "(main)" end) as $home
+          | [ ($ev[$home] // [])[] | select(.kind == "pr" and (.url | test("^" + pr_re + "$"))) ] as $prs
+          | ([.key, .origin, .task] | map(strings)) as $own
+          | [ $r | scan("(?:\\b(?:pr|mr|pull request|merge request)[[:space:]]*#?|\\B[!#])([0-9]+)(?![0-9])"; "i")
+              | .[0] ] as $nums
+          | [ $prs[] | select(.task as $t | $own | index($t)) | .url ] as $mine
+          | ( if ($nums | length) == 0 then ($mine | unique | if length == 1 then .[0] else null end)
+              else first( $nums[] as $n
+                          | ([ $mine[] | select(endswith("/" + $n)) ] | unique) as $m
+                          | ([ $prs[] | .url | select(endswith("/" + $n)) ] | unique) as $any
+                          | if ($m | length) == 1 then $m[0]
+                            elif ($any | length) == 1 then $any[0] else empty end ) // null
+              end ) as $u
+          | if $u == null then . else . + {pr_url: $u} end
+        end)')
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"

@@ -18,8 +18,9 @@
 # build      Validate the payload, drop the Captain's Call cards whose subject
 #            already landed, give every surviving decision card the standard
 #            reconcile choice, and write the result to the board data file
-#            beside the stable board path, installing the shipped template
-#            there only when it differs. Establish the Lavish
+#            beside the stable board path, installing the shipped template's
+#            code file and page beside it only when each differs (see A
+#            REBUILD NEVER RELOADS THE OPEN PAGE below). Establish the Lavish
 #            session on that board and PROVE it is live BEFORE binding and
 #            arming its answer source, so a registered poll can never race a
 #            session that does not exist or attach to one that has ended.
@@ -142,21 +143,33 @@
 # process-event source id.
 #
 # A REBUILD NEVER RELOADS THE OPEN PAGE. Lavish reloads the whole open page
-# whenever the page file changes, which would wipe text the captain is typing.
-# So the payload goes to bearings-board.data.js beside the page, as one
-# `window.FM_BEARINGS_BOARD_DATA = <json>;` assignment, and the page file is
-# rewritten only when the shipped template itself differs from it. The open
-# page re-reads the data file and patches only the cards that changed. The
-# template must load that file through exactly one
-# `<script src="bearings-board.data.js"></script>` line. The data is written
-# as the compact JSON with every `<` escaped as the \u003c string escape, so a
-# payload string containing "</script>" stays inert.
-# The data file is written before the page file and always replaced whole, by
-# a rename of a checked file staged beside it, so a reader never sees it
-# missing or half written. A fetch already under way can still be cut short by
-# the rename, because Lavish streams a file by path, so the page treats a data
-# load that fails or breaks as a reason to wait and re-read, never as a dead
-# board (the template's waitForData).
+# whenever the page file changes, and watches no other file, so a forced reload
+# would wipe text the captain is typing. So build installs three files:
+#   - bearings-board.data.js holds the payload as one
+#     `window.FM_BEARINGS_BOARD_DATA = <json>;` assignment, stamped with
+#     `board_code`, the checksum of the template that built it. The data is
+#     the compact JSON with every `<` escaped as the \u003c string escape, so a
+#     payload string containing "</script>" stays inert.
+#   - bearings-board.app.js holds the template's one inline script, stamped
+#     with the same checksum as window.FM_BEARINGS_BOARD_CODE.
+#   - bearings-board.html, the page, is the template with that inline script
+#     swapped for a load of the code file.
+# The template must load the data file through exactly one
+# `<script src="bearings-board.data.js"></script>` line, followed by exactly
+# one `<script>` line and one `</script>` line around its code. Each file is
+# rewritten only when its bytes change, so the page file changes only with the
+# template's markup or styles, and that is the only rebuild that reloads the
+# page at once. The open page re-reads the data file and patches only the cards
+# that changed; when the data names a newer `board_code` than the code it is
+# running, it reloads itself into the new code only once the reader is not
+# working in it, and keeps the shown card across that reload (the template
+# owns that test). Files are written code, then data, then page, each replaced
+# whole by a rename of a file staged beside it, so a reader never sees one
+# missing or half written and a page that reloads finds code at least as new as
+# the data that asked for it. A fetch already under way can still be cut short
+# by the rename, because Lavish streams a file by path, so the page treats a
+# data load that fails or breaks as a reason to wait and re-read, never as a
+# dead board (the template's waitForData).
 #
 # PAGES SHOWN IN PLACE. build adds `pages` to the board data: one
 # {id, title, href} row per live page registered through bin/fm-board-page.sh
@@ -193,6 +206,35 @@ fail() {
 
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 board_data_path() { printf '%s.data.js\n' "${1%.html}"; }
+board_app_path() { printf '%s.app.js\n' "${1%.html}"; }
+APP_SCRIPT='<script src="bearings-board.app.js"></script>'
+
+# Render the installed page and code file from the template into <page> and
+# <app>; the template must carry exactly one inline <script> line and one
+# </script> line, after its data-file load.
+render_board_files() {  # <code> <page> <app>
+  awk -v code="$1" -v page="$2" -v app="$3" -v data="$DATA_SCRIPT" -v appload="$APP_SCRIPT" '
+    $0 == data { seen_data = 1 }
+    $0 == "<script>" { if (!seen_data || opened) bad = 1; opened++; in_app = 1
+                       print appload > page
+                       printf "window.FM_BEARINGS_BOARD_CODE = \"%s\";\n", code > app
+                       next }
+    $0 == "</script>" { if (!in_app) bad = 1; closed++; in_app = 0; next }
+    in_app { print > app; next }
+    { print > page }
+    END { exit (bad || opened != 1 || closed != 1) ? 1 : 0 }
+  ' "$TEMPLATE"
+}
+
+# Publish <staged> at <dest> unless <dest> already has the same bytes.
+publish_if_changed() {  # <staged> <dest> <what>
+  if cmp -s -- "$1" "$2"; then rm -f -- "$1"; return 0; fi
+  if ! { chmod 0600 "$1" && mv -f -- "$1" "$2"; }; then
+    rm -f -- "$1"
+    printf 'fm-bearings-board: cannot publish the %s\n' "$3" >&2
+    return 1
+  fi
+}
 
 validate_payload() {  # <data.json>
   jq -e --arg schema "$BOARD_SCHEMA" '
@@ -533,7 +575,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data board board_data json tmp extracted effective pages reopen=1
+  local data board board_data board_app json tmp extracted effective pages code stage reopen=1
   if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   data=$1
@@ -544,6 +586,13 @@ command_build() {
   [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "board template is missing: $TEMPLATE"
   [ "$(grep -cxF "$DATA_SCRIPT" "$TEMPLATE")" -eq 1 ] \
     || fail "board template does not load the board data file exactly once: $TEMPLATE"
+  code=$(cksum < "$TEMPLATE" | awk '{print $1 "-" $2}')
+  stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-bearings-board.XXXXXX") \
+    || fail "cannot stage the board page"
+  if ! render_board_files "$code" "$stage/page.html" "$stage/app.js"; then
+    rm -rf -- "$stage"
+    fail "board template must carry exactly one inline <script> line and one </script> line after its data-file load: $TEMPLATE"
+  fi
 
   effective=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-payload.XXXXXX") \
     || fail "cannot stage the board payload"
@@ -562,16 +611,26 @@ command_build() {
   json=$(resolve_page_links "$pages" "$sessions" < "$effective") \
     || { rm -f -- "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
+  json=$(printf '%s\n' "$json" | jq -c --arg code "$code" '. + {board_code: $code}') \
+    || { rm -rf -- "$stage"; fail "cannot stamp the board data"; }
   # `<` never appears in JSON syntax outside strings, so escaping every
   # occurrence keeps the payload valid JSON while making </script> inert.
   json=${json//</\\u003c}
 
   board=$(board_path)
   board_data=$(board_data_path "$board")
-  (umask 077; mkdir -p "${board%/*}") || fail "cannot create ${board%/*}"
-  tmp=$(umask 077; mktemp "${board%/*}/.board-data.XXXXXX") || fail "cannot stage the board data"
+  board_app=$(board_app_path "$board")
+  (umask 077; mkdir -p "${board%/*}") || { rm -rf -- "$stage"; fail "cannot create ${board%/*}"; }
+  # The code file goes first, so the data that names its stamp never reaches
+  # an open page before the code it asks that page to reload into.
+  tmp=$(umask 077; mktemp "${board%/*}/.board-app.XXXXXX") \
+    || { rm -rf -- "$stage"; fail "cannot stage the board code"; }
+  cp -- "$stage/app.js" "$tmp" || { rm -f -- "$tmp"; rm -rf -- "$stage"; fail "cannot write the board code"; }
+  publish_if_changed "$tmp" "$board_app" "board code" || { rm -rf -- "$stage"; exit 1; }
+  tmp=$(umask 077; mktemp "${board%/*}/.board-data.XXXXXX") \
+    || { rm -rf -- "$stage"; fail "cannot stage the board data"; }
   if ! printf '%s%s;\n' "$DATA_PREFIX" "$json" > "$tmp"; then
-    rm -f -- "$tmp"
+    rm -f -- "$tmp"; rm -rf -- "$stage"
     fail "cannot write the board data"
   fi
   # Round-trip the payload back out of the data file, so a board that would
@@ -580,22 +639,20 @@ command_build() {
   extracted=${extracted#"$DATA_PREFIX"}
   extracted=${extracted%;}
   if ! printf '%s\n' "$extracted" | jq -e --arg schema "$BOARD_SCHEMA" '.schema == $schema' >/dev/null 2>&1; then
-    rm -f -- "$tmp"
+    rm -f -- "$tmp"; rm -rf -- "$stage"
     fail "the built board data does not carry a readable $BOARD_SCHEMA payload"
   fi
   if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$board_data"; }; then
-    rm -f -- "$tmp"
+    rm -f -- "$tmp"; rm -rf -- "$stage"
     fail "cannot publish the board data"
   fi
-  # The page file changes only when the template does, because any change to
-  # it makes Lavish reload the captain's open page.
-  if ! cmp -s -- "$TEMPLATE" "$board"; then
-    tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") || fail "cannot stage the board"
-    if ! { cp -- "$TEMPLATE" "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$board"; }; then
-      rm -f -- "$tmp"
-      fail "cannot publish the board"
-    fi
-  fi
+  # The page file changes only when the template's markup or styles do,
+  # because any change to it makes Lavish reload the captain's open page.
+  tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") \
+    || { rm -rf -- "$stage"; fail "cannot stage the board"; }
+  cp -- "$stage/page.html" "$tmp" || { rm -f -- "$tmp"; rm -rf -- "$stage"; fail "cannot write the board"; }
+  rm -rf -- "$stage"
+  publish_if_changed "$tmp" "$board" "board" || exit 1
   printf 'board: %s\n' "$board"
   printf 'data: %s\n' "$board_data"
   serve_board "$board" "$reopen"

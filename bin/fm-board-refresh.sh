@@ -10,9 +10,9 @@
 # built, rebuilds the existing board through `bin/fm-bearings-board.sh build
 # --no-reopen`, so the open Lavish session shows the new fleet state at the same
 # URL and a refresh never opens a browser tab or revives a session the captain
-# ended. A rebuild rewrites only the board's data file, and the open page patches
-# just the cards that changed, so a refresh never reloads the page or touches
-# what the captain is typing (bin/fm-bearings-board.sh owns how).
+# ended. A rebuild never forces a reload of the open page or touches what the
+# captain is typing; new board code reaches it once they stop working in it
+# (bin/fm-bearings-board.sh owns how).
 #
 # --kick records a refresh request and starts this script detached, returning at
 # once. In a secondmate home with no board it forwards the request once to the
@@ -35,9 +35,11 @@
 #     rebuild. --force skips both waits and the fingerprint comparison.
 #   - a stale lock older than FM_BOARD_REFRESH_LOCK_TTL seconds (default 300) is
 #     reclaimed; a running refresher refreshes the lock while it waits.
-#   - the payload fingerprint ignores the `generated` stamp; an attempt, even a
-#     failed one, records it, so an ended session or a refused payload is not
-#     retried until fleet state changes again.
+#   - the fingerprint covers the payload, less its `generated` stamp, and the
+#     board template, so updated board code is installed on the next pass even
+#     when fleet state has not moved; an attempt, even a failed one, records
+#     it, so an ended session or a refused payload is not retried until fleet
+#     state or the template changes again.
 # A failed build is logged to state/.board-refresh.log (last 20 lines kept) and
 # never changes the caller's exit status beyond this script's own.
 set -u
@@ -55,6 +57,7 @@ LOG="$STATE/.board-refresh.log"
 DEBOUNCE="${FM_BOARD_REFRESH_DEBOUNCE:-3}"
 MIN_INTERVAL="${FM_BOARD_REFRESH_MIN_INTERVAL:-15}"
 LOCK_TTL="${FM_BOARD_REFRESH_LOCK_TTL:-300}"
+TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 
 # A secondmate home has no board of its own, but its decisions show on the
 # main board, so its kick goes to the parent home it is bound to over a local
@@ -133,7 +136,8 @@ refresh_once() {
     log "payload generation failed"
     return 1
   fi
-  sum=$(jq -S -c 'del(.generated)' "$tmp" | cksum | awk '{print $1 "-" $2}')
+  sum=$( { jq -S -c 'del(.generated)' "$tmp"; cksum < "$TEMPLATE" 2>/dev/null; } \
+    | cksum | awk '{print $1 "-" $2}')
   if [ "$FORCE" != 1 ] && [ -f "$SUM" ] && [ "$(cat "$SUM")" = "$sum" ]; then
     rm -f "$tmp"
     return 0

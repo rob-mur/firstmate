@@ -975,3 +975,89 @@ test_card_links_wrap_and_the_about_text_is_readable_and_unclipped() {
 }
 
 test_card_links_wrap_and_the_about_text_is_readable_and_unclipped
+
+# A template variant: <code> changes the board's script, <markup> its styles.
+variant_template() {  # <home> <code|markup>
+  local out="$1/template-$2.html" tmpl="$ROOT/.agents/skills/bearings/assets/board-template.html"
+  if [ "$2" = code ]; then
+    awk '{ print } $0 == "<script>" { print "/* a newer board code */" }' "$tmpl" > "$out"
+  else
+    awk '{ print } $0 == "<style>" { print "/* a newer board style */" }' "$tmpl" > "$out"
+  fi
+  cmp -s "$tmpl" "$out" && fail "the $2 template variant did not change the template"
+  printf '%s\n' "$out"
+}
+
+board_code_of() {  # <home>
+  sed -n 's/.*"board_code":"\([^"]*\)".*/\1/p' "$1/.lavish/bearings-board.data.js"
+}
+
+# New board code reaches an open page without the page file changing, so Lavish
+# never forces a reload; the page reloads itself only while the reader is idle,
+# keeps the card on screen, and never loops on code it could not get.
+test_new_board_code_reaches_the_open_page_only_while_the_reader_is_idle() {
+  local home out before run old_code new_code app="" actions
+  for actions in "go,type:k2,run,poll" "open:k2,focus:k2,run,poll"; do
+    home=$(make_home "code-busy-$(printf '%s' "$actions" | cksum | cut -d' ' -f1)")
+    build_call_board "$home" '["k1","k2","k3"]'
+    run="FM_BEARINGS_BOARD_TEMPLATE=$(printf '%q' "$(variant_template "$home" code)") $(rebuild_command "$home" '.captains_call[0].title = "Card k1 reworded"')"
+    out=$(FM_HARNESS_RUN="$run" run_board "$home" "$actions")
+    printf '%s' "$out" | jq -e '.reloads == [] and .cards[0].title == "Card k1 reworded"' >/dev/null \
+      || fail "new code reloaded a page the reader was working in ($actions): $out"
+  done
+
+  home=$(make_home code-idle)
+  build_call_board "$home" '["k1","k2","k3"]'
+  old_code=$(board_code_of "$home")
+  cp "$home/.lavish/bearings-board.app.js" "$home/old-app.js"
+  before=$(page_identity "$home")
+  run="FM_BEARINGS_BOARD_TEMPLATE=$(printf '%q' "$(variant_template "$home" code)") $(rebuild_command "$home" '.')"
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "open:k2,run,poll")
+  printf '%s' "$out" | jq -e '.reloads == []' >/dev/null \
+    || fail "a page with no storage to keep its view reloaded itself: $out"
+  # The open page still runs the code it loaded before that rebuild.
+  cp "$home/old-app.js" "$home/.lavish/bearings-board.app.js"
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "open:k2,run,poll")
+  new_code=$(board_code_of "$home")
+  [ -n "$old_code" ] && [ -n "$new_code" ] && [ "$old_code" != "$new_code" ] \
+    || fail "a code change did not restamp the board data ($old_code -> $new_code)"
+  [ "$(page_identity "$home")" = "$before" ] \
+    || fail "a code-only rebuild rewrote the page file, which makes Lavish force a reload"
+  cmp -s "$home/old-app.js" "$home/.lavish/bearings-board.app.js" \
+    && fail "a code-only rebuild did not install the new code"
+  printf '%s' "$out" | jq -e --arg to "$new_code" '
+    .reloads == ["location.reload"]
+      and (.storage["fm-bearings-board.view.v1"] | fromjson | .card == "k2" and .to == $to)
+  ' >/dev/null || fail "an idle page did not reload into the new code keeping its card: $out"
+
+  # The reload runs the new code, shows the same card, and settles.
+  out=$(run_board "$home" "poll")
+  printf '%s' "$out" | jq -e '
+    .reloads == [] and (.storage | has("fm-bearings-board.view.v1") | not)
+      and ([.cards[] | select(.hidden | not) | .key] == ["k2"])
+  ' >/dev/null || fail "the reloaded page lost its card or reloaded again: $out"
+
+  # A reload that came back on the old code (a stale cache) never retries.
+  app="$home/.lavish/bearings-board.app.js"
+  cp "$home/old-app.js" "$app"
+  out=$(run_board "$home" "poll")
+  printf '%s' "$out" | jq -e '.reloads == ["location.reload"]' >/dev/null \
+    || fail "the old code did not ask for the new code: $out"
+  out=$(run_board "$home" "poll,poll")
+  printf '%s' "$out" | jq -e '.reloads == []' >/dev/null \
+    || fail "a page that came back on the old code reloaded again: $out"
+  pass "new board code reaches the open page without rewriting it, only while the reader is idle"
+}
+
+test_a_markup_change_rewrites_the_page() {
+  local home before
+  home=$(make_home markup)
+  build_call_board "$home" '["k1"]'
+  before=$(page_identity "$home")
+  FM_BEARINGS_BOARD_TEMPLATE="$(variant_template "$home" markup)" build_call_board "$home" '["k1"]'
+  [ "$(page_identity "$home")" != "$before" ] || fail "a style change did not reach the page file"
+  pass "a change to the board's markup or styles rewrites the page"
+}
+
+test_new_board_code_reaches_the_open_page_only_while_the_reader_is_idle
+test_a_markup_change_rewrites_the_page
