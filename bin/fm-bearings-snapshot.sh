@@ -38,7 +38,9 @@
 # Captain-hold placement follows the canonical snapshot's hold_bucket and
 # nothing else, with one exception: a blocked or aged hold whose reason asks a
 # question (contains a question mark) is promoted to decisions_open so a real
-# question is never hidden in a gate bucket. A needs-decision or blocked status
+# question is never hidden in a gate bucket. Every captain-hold row, main or
+# secondmate, carries its hold_until and hold_bucket so a consumer can tell a
+# dated deferral from a live call. A needs-decision or blocked status
 # on a task under way, main or secondmate, also reaches decisions_open as a
 # source:"status" row with task, decision_key and mate for routing the answer. A
 # secondmate question the parent status log shows (the wake drain's open
@@ -163,7 +165,8 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,title,reason,title_full,reason_full,summary,question,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,title,reason,title_full,reason_full,summary,question,owner,
+    hold_until,hold_bucket (captain holds only)}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
@@ -592,7 +595,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             title:(.title | trunc(60)),reason:((.hold_reason // "-") | trunc(80)),
             title_full:(.title // .id),reason_full:(.hold_reason // "-"),
             summary:hold_summary(.title; .hold_reason),
-            question:(.title + ": " + .hold_reason),owner:"(main)"} ]
+            question:(.title + ": " + .hold_reason),owner:"(main)",
+            hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null)} ]
      + [ . as $root | .tasks[]? | . as $t
          # A secondmate home that is valid and reports no active work is
          # authoritative: a parent-log question for it is stale (contradiction
@@ -620,7 +624,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                  title_full:(.title_full // .summary // .id),reason_full:(.reason_full // .reason // "-"),
                  summary:hold_summary((.summary // .id);
                                       (.reason // "captain decision pending")),
-                 question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id} ]
+                 question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id,
+                 hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null)} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -633,7 +638,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                    title_full:(.title_full // .title // .id),reason_full:(.hold_reason_full // .hold_reason // "-"),
                    summary:hold_summary((.title // .id);
                                         (.hold_reason // "captain decision pending")),
-                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id} ]
+                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id,
+                   hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null)} ]
             + [ $m.decisions_open[]?
                 | select(.source == "status")
                 | status_question_row($m.id; $m.id; .id; .id) ])[] ]) as $decisions_all
