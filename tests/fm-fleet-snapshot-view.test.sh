@@ -1055,6 +1055,40 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# A decision raised again under its key keeps only its newest line in the open
+# set, so options only an earlier line spelled out ride along as .earlier,
+# oldest first, and only for lines since the key last opened.
+test_a_reraised_decision_carries_its_earlier_text() {
+  local home fakebin out
+  home=$(make_home reraised-decision)
+  mkdir -p "$home/projects/scout-wt3"
+  fm_write_meta "$home/state/reraised.meta" \
+    "window=firstmate:fm-reraised" \
+    "worktree=$home/projects/scout-wt3" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=scout"
+  record_claude_idle "$home/state" reraised
+  printf '%s\n' \
+    'needs-decision [key=q1]: closed and reopened, so this line is gone' \
+    'resolved [key=q1]: answered' \
+    'needs-decision [key=q1]: Options: A) keep it. B) drop it. Answer A or B.' \
+    'needs-decision [key=q2]: a single line has no earlier text?' \
+    'needs-decision [key=q1]: still open from before: A/B (recommend A)' \
+    > "$home/state/reraised.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "reraised") | .hints.open_decisions
+    | (map(select(.key == "q1"))[0]
+        | .summary == "still open from before: A/B (recommend A)"
+          and .earlier == ["Options: A) keep it. B) drop it. Answer A or B."])
+      and (map(select(.key == "q2"))[0] | has("earlier") | not)
+  ' >/dev/null || fail "a re-raised decision lost its earlier text or kept text from before it closed: $out"
+  pass "a re-raised decision carries its earlier text since it last opened"
+}
+
 # Home-summary validity treats persistent secondmates as registered homes, not
 # in-flight children. They have no backlog rows, so they must not produce
 # unowned_current or terminal_in_flight. Ordinary crew/ship metas still do.
@@ -1167,6 +1201,7 @@ fm_test_run \
   test_open_decision_clears_on_keyed_resolution \
   test_completed_scout_report_is_pointer_not_pending \
   test_parked_scout_decision_stays_pending \
+  test_a_reraised_decision_carries_its_earlier_text \
   test_scout_reports_include_teardown_reports \
   test_backlog_tasks_axi_forms_and_overrides \
   test_view_renders_snapshot \
