@@ -968,6 +968,42 @@ test_a_card_carries_the_pr_link_its_snapshot_row_recorded() {
   pass "a card carries the PR link its snapshot row recorded"
 }
 
+test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them() {
+  local snap="$TMP_ROOT/refs.json" p
+  fresh_homes refs
+  write_snapshot "$TMP_ROOT/refs-base.json"
+  jq '.decisions_open = [
+    {id: "cd/cd", key: "status.cd.gate-merge", verb: "needs-decision", source: "status", task: "cd", decision_key: "gate-merge", owner: "cd",
+     reason_full: "Update: spec PR 836 is rebased on main and green: https://github.com/acme/cd/pull/836. Fix PR 837 is green except spec-reach: https://github.com/acme/cd/pull/837. I need the merge word: merge 836 now, then rebase 837 and merge it once green? Still open from before: A/B/C for stale gate stops (recommend A).",
+     reason_earlier: [
+       "#835 fix is two PRs. 1) Spec PR https://github.com/acme/cd/pull/836 is green. 2) Fix PR https://github.com/acme/cd/pull/837 is red until 836 lands.",
+       "#835 needs two answers. 1) Merge word: merge 836, then 837 once green. 2) A stop the gate already posted never clears by itself. Options: A) keep the design; 837 prevents new false stops, and the one stale stop needs a single dismissal. B) the gate dismisses its own stop when a later run finds nothing; every adopter then needs review-dismiss rights. C) a later run posts an approval to clear it, which makes the gate an approver. I recommend A. Answer with merge 835 and A, B or C."]},
+    {id: "cd/cd", key: "status.cd.gate-lost", verb: "needs-decision", source: "status", task: "cd", decision_key: "gate-lost", owner: "cd",
+     reason_full: "Spec PR 836 is green. Merge it now? Still open from before: A/B/C for stale gate stops (recommend A)."},
+    {id: "cd/cd", key: "status.cd.gate-same", verb: "needs-decision", source: "status", task: "cd", decision_key: "gate-same", owner: "cd",
+     reason_full: "Stale gate stops never clear. 1) Merge word for 836. 2) Stale stops. Options: A) keep the design. B) the gate dismisses its own stop. C) a later run approves. Answer with A, B or C."}]' "$TMP_ROOT/refs-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
+  assert_equals "option-a,option-b,option-c" "$(card status.cd.gate-merge | jq -r '[.options[].value] | join(",")')" \
+    "the options A, B and C named only in an earlier line of the same decision are on the card"
+  assert_equals "A) Keep the design; 837 prevents new false stops, and the one stale stop needs a single dismissal" \
+    "$(card status.cd.gate-merge | jq -r '.options[] | select(.value == "option-a") | .label')" "a taken-over option keeps its mark and its full text"
+  assert_equals "from an earlier message on this question" \
+    "$(card status.cd.gate-merge | jq -r '.options[] | select(.value == "option-c") | .hint')" "a taken-over option says it came from an earlier message"
+  assert_equals "null" "$(card status.cd.gate-merge | jq -c .malformed)" "a card whose options were recovered is not marked"
+  assert_equals "This question refers to options A, B and C, which it does not list; answer in your own words." \
+    "$(card status.cd.gate-lost | jq -r .malformed)" "a card that refers to options no line lists says so"
+  assert_equals "true" "$(card status.cd.gate-lost | jq '.allow_freeform')" "a marked card still takes a free-text answer"
+  assert_equals "0" "$(card status.cd.gate-lost | jq '[.options[].value | select(test("^option-[a-c]$"))] | length')" \
+    "a marked card offers no buttons for the options it cannot show"
+  assert_equals "option-a,option-b,option-c" "$(card status.cd.gate-same | jq -r '[.options[].value | select(test("^option-[a-c]$"))] | join(",")')" \
+    "lettered options in the same line beside a numbered list are on the card"
+  assert_equals "null" "$(card status.cd.gate-same | jq -c '[.options[] | select(.hint)] | first')" "options from the current line need no hint"
+  printf '%s\n' "$p" > "$TMP_ROOT/refs-payload.json"
+  validates "$TMP_ROOT/refs-payload.json" || fail "a payload with a marked card did not satisfy the board validator"
+  pass "a card shows every option its text refers to, or says it does not list them"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -1003,4 +1039,5 @@ fm_test_run \
   test_a_priority_never_brings_back_a_closed_or_handed_decision \
   test_a_review_card_the_captain_approved_leaves_and_any_other_stays \
   test_a_freeze_or_a_hold_that_says_it_is_no_decision_waits_instead_of_asking \
-  test_a_card_carries_the_pr_link_its_snapshot_row_recorded
+  test_a_card_carries_the_pr_link_its_snapshot_row_recorded \
+  test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them

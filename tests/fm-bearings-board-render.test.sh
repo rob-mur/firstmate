@@ -650,8 +650,25 @@ test_a_long_title_and_about_render_in_full() {
   pass "a long decision title and about text render without a cut"
 }
 
+test_a_card_that_refers_to_unlisted_options_says_so() {
+  local home out note
+  home=$(make_home unlisted-options)
+  note="This question refers to options A, B and C, which it does not list; answer in your own words."
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg m "$note" '[
+    {key:"k1",type:"decision",title:"Stale gate stops",question:"Which of A/B/C?",repo:"r",options:[],allow_freeform:true,malformed:$m},
+    {key:"k2",type:"decision",title:"Merge 836",question:"Merge it now?",repo:"r",
+     options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allow_freeform:true}]')")
+  printf '%s' "$out" | jq -e --arg m "$note" '
+    .error == "" and (.captains_call | length) == 2
+      and (.captains_call[0] | contains("options missing") and contains($m))
+      and (.captains_call[1] | contains("options missing") | not)
+  ' >/dev/null || fail "a card referring to options it does not list was not marked, or a whole card was: $out"
+  pass "a card that refers to options it does not list says so, and other cards do not"
+}
+
 test_board_renders_only_the_captains_call
 test_a_long_title_and_about_render_in_full
+test_a_card_that_refers_to_unlisted_options_says_so
 
 test_the_board_lists_every_decision_for_reordering_before_the_cards() {
   local home out
