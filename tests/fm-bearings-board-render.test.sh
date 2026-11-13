@@ -588,12 +588,12 @@ test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh() {
   run_board "$home" "down:k1,down:k1,go,type" >/dev/null
   out=$(run_board "$home" "submit:k1,submit:k3,submit:k2")
   printf '%s' "$out" | jq -e '
-    (.calls | map(.data | {question, order, order_total}) | sort_by(.order)) == [
+    (.calls | map(select(.tag == "choice") | .data | {question, order, order_total}) | sort_by(.order)) == [
       {question:"k2", order:1, order_total:3},
       {question:"k3", order:2, order_total:3},
       {question:"k1", order:3, order_total:3}]
-    and (.calls | all(.prompt | test("priority [123] of 3")))
-    and (.calls | all(.data.schema == "fm-bearings-answer.v1"))
+    and (.calls | map(select(.tag == "choice")) | all(.prompt | test("priority [123] of 3")))
+    and (.calls | map(select(.tag == "choice")) | all(.data.schema == "fm-bearings-answer.v1"))
   ' >/dev/null || fail "answers did not carry the chosen order: $out"
   # A new tab keeps the order, goes straight to the cards, and the reorder
   # control is held while answers are queued.
@@ -637,7 +637,7 @@ test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording() {
     .order.stepShown and .order.list == ["k1","k2","task:t1"]
       and (.cards | map(.key)) == ["k1","k2"]
   ' >/dev/null || fail "the list did not include the task under way: $out"
-  out=$(run_board "$home" "up:task:t1,go")
+  out=$(run_board "$home" "load,up:task:t1,go")
   printf '%s' "$out" | jq -e '
     .order.list == ["k1","task:t1","k2"] and (.cards | map(.key)) == ["k1","k2"]
       and (.calls | map(select(.data.schema == "fm-bearings-priority.v1")) | length) == 1
@@ -671,19 +671,19 @@ test_the_priority_is_sent_only_when_the_order_changes() {
   local home out
   home=$(make_home order-send)
   build_call_board "$home" '["k1","k2","k3"]'
-  out=$(run_board "$home" "open:k2")
+  out=$(run_board "$home" "load,open:k2")
   printf '%s' "$out" | jq -e "($priority_calls | length) == 0 and (.cards | map(.key)) == [\"k1\",\"k2\",\"k3\"]" >/dev/null \
     || fail "opening a card with the order unchanged sent a priority: $out"
   rm -f "$home/storage.json" "$home/storage.json.session.json"
-  out=$(run_board "$home" "down:k1,open:k1")
+  out=$(run_board "$home" "load,down:k1,open:k1")
   printf '%s' "$out" | jq -e "$priority_calls == [[\"k2\",\"k1\",\"k3\"]]" >/dev/null \
     || fail "opening a card after a reorder did not send the new order exactly once: $out"
   rm -f "$home/storage.json" "$home/storage.json.session.json"
-  out=$(run_board "$home" "down:k1,down:k1")
+  out=$(run_board "$home" "load,down:k1,down:k1")
   printf '%s' "$out" | jq -e "$priority_calls == [[\"k2\",\"k3\",\"k1\"]]" >/dev/null \
     || fail "a reorder left on the list was not sent once after the pause: $out"
   rm -f "$home/storage.json" "$home/storage.json.session.json"
-  out=$(run_board "$home" "down:k1,up:k1,go")
+  out=$(run_board "$home" "load,down:k1,up:k1,go")
   printf '%s' "$out" | jq -e "($priority_calls | length) == 0" >/dev/null \
     || fail "a reorder that ended on the recorded order still sent a priority: $out"
   pass "the priority is sent once per change, after a pause on the list, and never for an unchanged order"
@@ -719,6 +719,100 @@ test_a_refresh_merges_the_restored_order_with_new_and_departed_decisions
 test_the_priority_is_sent_only_when_the_order_changes
 test_a_queued_priority_is_queued_again_with_the_order_after_a_rebuild
 test_each_card_has_a_stable_id_so_its_queued_badge_stays_on_it
+
+# A data file that did not load (missing, or cut short by a fetch that raced a
+# rebuild) leaves a page that says it is waiting and boots in place, with no
+# reload, once the file reads whole again.
+test_a_missing_or_broken_data_file_shows_a_wait_and_boots_in_place() {
+  local home out data run
+  home=$(make_home data-missing)
+  build_call_board "$home" '["k1","k2"]'
+  data="$home/.lavish/bearings-board.data.js"
+  mv "$data" "$home/kept.data.js"
+  run="mv $(printf %q "$home/kept.data.js") $(printf %q "$data")"
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "poll")
+  printf '%s' "$out" | jq -e '
+    .boot.shown and (.boot.text | test("could not load") and test("missing") and test("keeps trying"))
+      and .cards == [] and .reloads == []
+  ' >/dev/null || fail "a missing data file did not show a visible wait: $out"
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "poll,run,poll,type:k1,submit:k1")
+  printf '%s' "$out" | jq -e '
+    (.boot.shown | not) and (.cards | map(.key)) == ["k1","k2"] and .reloads == [] and .polls == 1
+      and ([.calls[] | select(.tag == "choice")] | length) == 1 and .cards[0].queued
+  ' >/dev/null || fail "the board did not boot in place once its data file arrived: $out"
+  head -c 200 "$data" > "$home/cut.data.js"
+  cp "$data" "$home/kept.data.js"
+  mv "$home/cut.data.js" "$data"
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "poll")
+  printf '%s' "$out" | jq -e '.boot.shown and .cards == [] and .reloads == []' >/dev/null \
+    || fail "a data file cut short did not show a visible wait: $out"
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "poll,run,poll")
+  printf '%s' "$out" | jq -e '(.boot.shown | not) and (.cards | map(.key)) == ["k1","k2"] and .reloads == [] and .polls == 1' \
+    >/dev/null || fail "the board did not boot in place once a cut-short data file read whole: $out"
+  pass "a missing or cut-short data file shows a visible wait and the board boots in place when it reads whole"
+}
+
+# An answer counts as queued only once Lavish lists it. Every other outcome
+# shows an error beside the control, keeps the answer, and can be queued again.
+test_a_failed_answer_shows_an_error_keeps_the_answer_and_can_be_queued_again() {
+  local home out mode
+  home=$(make_home submit-fail)
+  build_call_board "$home" '["k1","k2"]'
+  out=$(run_board "$home" "load,go,type:k1,submit:k1")
+  printf '%s' "$out" | jq -e '
+    .cards[0].queued and (.cards[0].error.shown | not) and .cards[0].hidden and (.cards[1].hidden | not)
+  ' >/dev/null || fail "a confirmed answer was not queued with no error and the next card dealt: $out"
+  for mode in gone throws drops; do
+    rm -f "$home/storage.json" "$home/storage.json.session.json"
+    out=$(CHROME_MODE=$mode run_board "$home" "load,go,type:k1,submit:k1,wait")
+    printf '%s' "$out" | jq -e '
+      (.cards[0] | (.queued | not) and .state == "" and .error.shown and (.error.text | test("Queue again"))
+        and .note == "typed k1" and .selection == "a" and (.hidden | not))
+      and .calls == []
+    ' >/dev/null || fail "an answer Lavish did not queue ($mode) did not show an error and keep the answer: $out"
+    case $mode in
+      gone) printf '%s' "$out" | jq -e '.cards[0].error.text | test("not connected")' >/dev/null ;;
+      throws) printf '%s' "$out" | jq -e '.cards[0].error.text | test("refused")' >/dev/null ;;
+      drops) printf '%s' "$out" | jq -e '(.cards[0].error.text | test("did not confirm")) and .dropped == 1' >/dev/null ;;
+    esac || fail "the error for an answer Lavish did not queue ($mode) did not say why: $out"
+    rm -f "$home/storage.json" "$home/storage.json.session.json"
+    out=$(CHROME_MODE=$mode run_board "$home" "load,go,type:k1,submit:k1,wait,chrome:ok,retry:k1")
+    printf '%s' "$out" | jq -e '
+      .cards[0].queued and (.cards[0].error.shown | not)
+        and ([.calls[] | select(.tag == "choice") | .data.note] == ["typed k1"])
+    ' >/dev/null || fail "Queue again did not queue the kept answer after a failure ($mode): $out"
+  done
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(CHROME_MODE=gone run_board "$home" "load,down:k1,go")
+  printf '%s' "$out" | jq -e '.errors.priority.shown and (.errors.priority.text | test("not queued"))' >/dev/null \
+    || fail "a priority Lavish did not queue showed no error: $out"
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(CHROME_MODE=gone run_board "$home" "load,down:k1,go,chrome:ok,retry:priority")
+  printf '%s' "$out" | jq -e '(.errors.priority.shown | not) and ([.calls[] | select(.tag == "priority")] | length) == 1' \
+    >/dev/null || fail "Queue again did not queue the priority after a failure: $out"
+  pass "an answer Lavish does not queue shows an error by its card, keeps the answer, and Queue again resends it"
+}
+
+test_a_failed_page_answer_shows_an_error_and_can_be_queued_again() {
+  local home page out
+  home=$(make_home page-submit-fail)
+  page=$(register_page "$home" understand-mr-872 "Understand MR 872")
+  printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$page" > "$home/lavish-sessions"
+  render_card_links "$home" '[{url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"}]' >/dev/null
+  out=$(CHROME_MODE=gone run_board "$home" "frameload:understand-mr-872,go,page:mr-872,annotation:understand-mr-872")
+  printf '%s' "$out" | jq -e '
+    .errors.page.shown and (.errors.page.text | test("Understand MR 872") and test("not queued")) and .calls == []
+  ' >/dev/null || fail "a page answer Lavish did not queue showed no error: $out"
+  out=$(CHROME_MODE=gone run_board "$home" "frameload:understand-mr-872,go,page:mr-872,annotation:understand-mr-872,chrome:ok,retry:page")
+  printf '%s' "$out" | jq -e '
+    (.errors.page.shown | not) and ([.calls[] | select(.tag == "page") | .prompt] == ["unclear"])
+  ' >/dev/null || fail "Queue again did not resend the page answer: $out"
+  pass "a page answer Lavish does not queue shows an error under the page and Queue again resends it"
+}
+
+test_a_missing_or_broken_data_file_shows_a_wait_and_boots_in_place
+test_a_failed_answer_shows_an_error_keeps_the_answer_and_can_be_queued_again
+test_a_failed_page_answer_shows_an_error_and_can_be_queued_again
 
 test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question() {
   local home out data
