@@ -75,6 +75,7 @@ Rebuild by hand with the payload generator and `build` when you need the board c
 
 The board is the captain's one Lavish tab.
 Any other page - an understand page, an MR review page, or a page a skill from another repository builds - registers through `bin/fm-board-page.sh`, the one entry point whose header owns the page contract and paths, and shows inside the board instead of opening a tab.
+A skill from another repository finds it as the `fm-board-page` command that `bin/fm-board-page.sh install` writes, and runs its page standalone until that command exists.
 Each live page gets a tab in the board header; the captain opens it in place and returns with "Back to board" or the bearings header link.
 "End this page" ends only that page; ending the board's Lavish session ends every page.
 One refresh policy covers the whole app: no frame ever reloads, and the board and each page poll their own data file and patch in place.
