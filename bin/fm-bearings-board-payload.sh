@@ -22,20 +22,24 @@
 #                      its full `reason_full` (else `reason`),
 #                      `pr_url` and `repo` from the PR the task recorded, and a
 #                      derived default choices (bin/fm-bearings-question-lib.sh: yes/no,
-#                      numbered parts, two-way or, else approve/decline; an authored
+#                      numbered or lettered parts, two-way or, else approve/decline; an authored
 #                      overlay `options` still wins) with reconcile secondary, and any
 #                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`. Every
 #                      open captain hold is a row here (see --all-decisions above).
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
-#                      its hold reason as `question`.
+#                      one short `question` (at most 120 characters): the reason's
+#                      sentence led by "Question:", else its first sentence ending in
+#                      "?", else its first sentence, dropped when it only repeats the
+#                      title. Every reason shown has its `corr=<hex>` tokens removed
+#                      (clean_reason in bin/fm-bearings-question-lib.sh).
 #                      A `source:"status"` row is titled from its decision, never the
 #                      asking home: the task its decision key names, else a given title
-#                      that is not just the task or home, else the question's first
+#                      that is not just the task or home, else that same asking
 #                      sentence, prefixed `<home>: ` for a secondmate. A status row whose
 #                      decision key names a captain-held task in the same home is the
 #                      same question: it adds no card or waiting row of its own, and an
-#                      asked hold card merges its text into `question`/`about` and its
+#                      asked hold card merges its text into `about` and its
 #                      choices into `options`, so no answer choice is lost.
 #   contributions.captain
 #                   -> captains_call: one link-only `decision` card (key
@@ -207,12 +211,22 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end) ) as $held
   # A status decision row (source "status") carries the asking task or home as its
   # title; the card title says what the question is instead.
-  | def short_text:
+  | def short_text_n($n):
       tostring | gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | ([match("^.*?[.?!](?=[[:space:]]|$)").string][0] // .)
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?]"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
-      | if length > 80 then (.[:79] | sub(" [^ ]*$"; "")) + "…" else . end;
+      | if length > $n then (.[:($n - 1)] | sub(" [^ ]*$"; "")) + "…" else . end;
+    def short_text: short_text_n(80);
+    # The sentence that asks: one led by "Question:" (prefix dropped), else the
+    # first ending in "?", else the first sentence.
+    def ask_sentence:
+      clean_reason | gsub("[[:space:]]+"; " ") | sub("^ "; "")
+      | [ scan("[^[:space:]].*?(?:[.?!](?=[[:space:]]|$)|$)") ] as $s
+      | ( ([ $s[] | select(test("^Question:[[:space:]]*"; "i")) | sub("^Question:[[:space:]]*"; ""; "i") ][0])
+          // ([ $s[] | select(test("[?]$")) ][0])
+          // $s[0] // "" )
+      | sub("^\\([0-9a-z]\\)[[:space:]]*"; "");
     def task_title($owner; $k):
       ( [ $snap.decisions_open[]?
           | select((.verb // "") == "captain-hold" and (.owner // "(main)") == $owner
@@ -229,8 +243,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | ( (if $k != "default" then task_title($owner; $k) else null end)
           // (if $given != "" and ([$d.task, $d.id, $d.mate, $owner, $d.key] | index($given) | not)
               then $given else null end)
-          // ((($d.reason_full // $d.reason // "") | sub("^corr=[0-9a-f]+ "; "")
-               | sub("^captain hold [^:]+: "; "") | short_text) | nz(null))
+          // ((($d.reason_full // $d.reason // "") | ask_sentence | short_text) | nz(null))
           // (if $k != "default" then $k else $d.key end) ) as $t
       | if $owner != "(main)" and ($t | startswith($owner + ": ") | not) then $owner + ": " + $t else $t end;
     [ $held[] | if (.source // "") == "status" then .title_full = status_title(.) else . end ] as $held
@@ -255,7 +268,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         | . as $d
         | { key: $d.key,
             title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
-            reason: (($d.reason_full // $d.reason) | nz("waiting")),
+            reason: (($d.reason_full // $d.reason) | nz(null) | if . == null then "waiting" else (clean_reason | nz("waiting")) end),
             repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null) } ] ) as $waiting
   | ( $question_rows
       | map(
@@ -276,11 +289,19 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
               allow_freeform: true,
               freeform_hint: "answer in your own words (say later to defer)"
             }
-            + ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason) | tostring | sub("^corr=[0-9a-f]+ "; "")) ]
-                | map(nz(null) | select(. != null)) | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end) as $texts
-                | ($texts | max_by(length)) as $q
-                | (if $q != null then {question: $q} else {} end)
-                  + ([ $texts[] | select(. != $q) ] | if length > 0 then {about: join("\n\n")} else {} end) )
+            # The heading is one short asking sentence; the full cleaned text
+            # (with the text of any folded twin) is the body, and a heading that only
+            # repeats the title is dropped so the title leads instead.
+            + ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
+                | map(nz(null) | select(. != null) | clean_reason | nz(null) | select(. != null))
+                | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end) as $texts
+                | (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key) | tostring) as $title
+                | (($texts | max_by(length)) // null) as $long
+                | (if $long == null then null else ($long | ask_sentence | short_text_n(120) | nz(null)) end) as $q
+                | (if $q != null and $title != $q and ($title | endswith(": " + $q) | not)
+                   then {question: $q} else {} end)
+                  + (if ($texts | length) > 0 and ($texts | join("\n\n")) != $q
+                     then {about: ($texts | join("\n\n"))} else {} end) )
             + (if $pr != null then {pr_url: $pr} else {} end)
             + ( [ (([($d.reason_full // $d.reason // ""), (($d.twins // [])[] | (.reason_full // .reason // ""))] | map(tostring) | join(" ")) | scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") )
                   | sub("[.,;:!?]+$"; "") ] | unique | .[:5]

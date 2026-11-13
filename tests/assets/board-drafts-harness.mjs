@@ -16,8 +16,11 @@
 //   up:<key>        press the move-up button on that key's row in the order list
 //   down:<key>      press the move-down button on that key's row
 //   go              press "Start answering" on the order step
+//   open:<key>      press that key's title in the order list to open its card
+//   tick            let pending timers (the debounced priority send) fire
 //   reorder         press "Reorder" on the deck
-// Prints { cards, storage, calls, queue, order }.
+// Pending timers fire after each chrome message and at the end of the run.
+// Prints { cards, storage, calls, queue, anchors, ids, order }.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const [, , boardPath, storagePath, actionList = ""] = process.argv;
@@ -71,22 +74,30 @@ const dataNode = new Node("script");
 dataNode.textContent = html.split('<script id="bearings-data" type="application/json">')[1].split("</script>")[0];
 byId.set("bearings-data", dataNode);
 
-// Stand-in selectors the simulated chrome reports: "card:<key>" or "bar".
+// The selectors the simulated chrome reports follow Lavish's rule: "#<id>"
+// for an element with an id, else a position ("pos:<n>" among the deck's
+// forms), so an anchor without an id follows whatever sits at its position.
+const findId = (id) => {
+  if (byId.has(id)) return byId.get(id);
+  const walk = (n) => { for (const c of n.children) { if (c.id === id) return c; const hit = walk(c); if (hit) return hit; } return null; };
+  for (const root of byId.values()) { const hit = walk(root); if (hit) return hit; }
+  return null;
+};
 const anchorFor = (el) => {
-  const form = el && el.attributes && el.attributes["data-lavish-question"];
-  return form && el.tagName === "form" ? "card:" + form : el === byId.get("bb-dispatch") ? "bar" : "";
+  if (!el) return "";
+  if (el.id) return "#" + el.id;
+  const i = (byId.get("bb-call")?.querySelectorAll("form") || []).indexOf(el);
+  return i >= 0 ? "pos:" + i : "";
 };
 globalThis.document = {
   createElement: (tag) => new Node(tag),
   getElementById: (id) => {
-    if (!byId.has(id)) { const n = new Node("div"); new Node("div").appendChild(n); byId.set(id, n); }
+    if (!byId.has(id)) { const n = new Node("div"); n.id = id; new Node("div").appendChild(n); byId.set(id, n); }
     return byId.get(id);
   },
   querySelector: (sel) => {
-    if (sel === "bar") return byId.get("bb-dispatch") || null;
-    if (sel.startsWith("card:")) {
-      return (byId.get("bb-call")?.querySelectorAll("form") || []).find((f) => anchorFor(f) === sel) || null;
-    }
+    if (sel.startsWith("#")) return findId(sel.slice(1));
+    if (sel.startsWith("pos:")) return (byId.get("bb-call")?.querySelectorAll("form") || [])[Number(sel.slice(4))] || null;
     return new Node("div");
   },
 };
@@ -97,8 +108,10 @@ const listeners = [];
 const calls = [];
 const timers = [];
 const parent = {};
-globalThis.setTimeout = (fn) => { timers.push(fn); return timers.length; };
-const flush = () => { while (timers.length) timers.shift()(); };
+let timerSeq = 0;
+globalThis.setTimeout = (fn) => { const id = ++timerSeq; timers.push({ id, fn }); return id; };
+globalThis.clearTimeout = (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); };
+const flush = () => { while (timers.length) timers.shift().fn(); };
 
 globalThis.window = {
   parent,
@@ -170,6 +183,11 @@ for (const act of actionList.split(",").filter(Boolean)) {
   } else if (name === "up" || name === "down") {
     const row = byId.get("bb-order-list").children.find((r) => r.attributes["data-order-key"] === arg);
     row.querySelector(name === "up" ? ".bb-order__up" : ".bb-order__down").fire("click");
+  } else if (name === "open") {
+    const row = byId.get("bb-order-list").children.find((r) => r.attributes["data-order-key"] === arg);
+    row.querySelector(".bb-order__open").fire("click");
+  } else if (name === "tick") {
+    flush();
   } else if (name === "go") {
     byId.get("bb-order-go").fire("click");
   } else if (name === "reorder") {
@@ -179,6 +197,7 @@ for (const act of actionList.split(",").filter(Boolean)) {
     anchors();
   }
 }
+flush();
 // The chrome saves review state as the page changes; mirror its final shape.
 session.review = controls().map((c) => ({
   key: c.key, index: c.index, question: c.question, value: c.el.value,
@@ -195,6 +214,8 @@ const cards = forms().map((f) => ({
 }));
 process.stdout.write(JSON.stringify({
   cards, storage: store, calls, queue: Object.keys(session.queue),
+  anchors: Object.fromEntries(Object.entries(session.queue).map(([k, q]) => [k, q.anchor])),
+  ids: forms().map((f) => f.id || ""),
   order: {
     stepShown: !byId.get("bb-order").hidden,
     deckShown: !byId.get("bb-callwrap").hidden,
