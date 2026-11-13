@@ -70,6 +70,16 @@ The session digest and wake drain print the ranking as CAPTAIN PRIORITY; read it
 The board refreshes itself on every fleet state change - each queued wake, captain hold, answer or reconcile, task cleanup, and main wake drain kicks `bin/fm-board-refresh.sh` in the background whenever a board exists - and a burst becomes one rebuild of the same Lavish session, only when the generated payload changed and never reopening a session the captain ended (the script header owns its triggers, debounce, lock and failure handling), so the stored priority and the board's own order store carry the captain's ranking across each rebuild.
 A rebuild never reloads the captain's open page: the page patches only the cards that changed and leaves alone a card the captain is answering.
 Rebuild by hand with the payload generator and `build` when you need the board current at once.
+
+### Pages shown in place
+
+The board is the captain's one Lavish tab.
+Any other page - an understand page, an MR review page, or a page a skill from another repository builds - registers through `bin/fm-board-page.sh`, the one entry point whose header owns the page contract and paths, and shows inside the board instead of opening a tab.
+Each live page gets a tab in the board header; the captain opens it in place and returns with "Back to board" or the bearings header link.
+"End this page" ends only that page; ending the board's Lavish session ends every page.
+One refresh policy covers the whole app: no frame ever reloads, and the board and each page poll their own data file and patch in place.
+A page's actions ride the board's Lavish session as rows tagged `page`, and the process-event runner routes them to that page's agent before publishing the result, so a board result holding only routed page actions raises no wake.
+A board wake that still lists `page` rows means their page was not registered or the route failed: check `bin/fm-board-page.sh list`, and never answer a page's action as a board decision.
 Each answer carries the captain's priority, as `[priority N of M]` in its label and as `order` and `order_total` in its context data.
 When a result holds several answers, handle them lowest `order` first, and echo that sequence in chat.
 Route the non-decision keys yourself:
