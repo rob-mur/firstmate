@@ -52,6 +52,7 @@ Decision cards otherwise arrive with those choices and a freeform box; the optio
 Run `build` once per board.
 Its serve-first sequence publishes the board, establishes and verifies its Lavish session with `lavish-axi`, reopens an ended session when necessary, and only then binds the answer source and proves a live polling listener; use the session URL it prints in the chat digest.
 Never bind or arm the board before its session is listed open.
+When the captain asks for the board link, run `bin/fm-bearings-board.sh url` and send the one link it prints; that link is stable, and the command reopens and re-arms a board the captain closed without rebuilding it or opening a browser.
 Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and both the build and the watcher's ordinary reconcile repair a missing listener, so no conversational turn ever blocks on the board.
 
 ### Handling a board wake
