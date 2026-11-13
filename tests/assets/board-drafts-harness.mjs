@@ -25,10 +25,12 @@
 //   open:<key>      press that key's title in the order list to open its card
 //   tick            let pending timers (the debounced priority send) fire
 //   reorder         press "Reorder" on the deck
+//   page:<key>      press the first in-place page button on that key's card
 // Pending timers fire after each chrome message and at the end of the run.
 // The page's data file is read from beside <built-board.html> each time the
 // page loads it, so a rebuild between polls is seen by the next poll.
-// Prints { cards, storage, calls, queue, anchors, ids, order, reloads }.
+// Prints { cards, storage, calls, queue, anchors, ids, order, reloads,
+//   opens, pageView }; opens lists every url the page asked to open elsewhere.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 
@@ -94,6 +96,7 @@ const dataPath = boardPath.replace(/\.html$/, ".data.js");
 const loadData = () => { if (existsSync(dataPath)) new Function(readFileSync(dataPath, "utf8"))(); };
 // Anything that would replace the whole page is recorded, never performed.
 const reloads = [];
+const opens = [];
 // A script element added to the body loads its src from beside the board.
 const body = new Node("body");
 const bodyAppend = body.appendChild.bind(body);
@@ -153,6 +156,7 @@ globalThis.setInterval = (fn) => { intervals.push(fn); return intervals.length; 
 
 globalThis.window = {
   parent,
+  open: (url) => { opens.push(String(url)); return null; },
   location: { reload: () => reloads.push("location.reload"), assign: () => reloads.push("location.assign"), replace: () => reloads.push("location.replace") },
   addEventListener: (t, fn) => { if (t === "message") listeners.push(fn); },
   localStorage: process.env.NO_STORAGE
@@ -240,6 +244,9 @@ for (const act of actionList.split(",").filter(Boolean)) {
     flush();
   } else if (name === "go") {
     byId.get("bb-order-go").fire("click");
+  } else if (name === "page") {
+    const card = forms().find((f) => f.attributes["data-lavish-question"] === arg).parentNode.parentNode;
+    card.querySelectorAll("button").find((b) => b.attributes["data-board-page"] != null).fire("click");
   } else if (name === "reorder") {
     byId.get("bb-reorder").fire("click");
   } else if (name === "send") {
@@ -269,6 +276,8 @@ process.stdout.write(JSON.stringify({
   anchors: Object.fromEntries(Object.entries(session.queue).map(([k, q]) => [k, q.anchor])),
   ids: forms().map((f) => f.id || ""),
   reloads,
+  opens,
+  pageView: { shown: !byId.get("bb-pageview").hidden, title: byId.get("bb-page-title").textContent },
   polls: intervals.length,
   sub: byId.get("bb-call-sub").textContent,
   order: {
