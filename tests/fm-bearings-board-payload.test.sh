@@ -13,6 +13,51 @@ GEN="$ROOT/bin/fm-bearings-board-payload.sh"
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board-payload)
 
+# Forge stubs: every PR/MR lookup the payload makes reads a fixture under
+# $FORGE_DIR keyed by provider, project and number, and fails when none exists,
+# so no test reaches a real forge. A fixture whose content is "hang" sleeps
+# past the lookup bound.
+FORGE_DIR="$TMP_ROOT/forge-none"
+FORGE_BIN="$TMP_ROOT/forgebin"
+mkdir -p "$FORGE_DIR" "$FORGE_BIN"
+cat > "$FORGE_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+owner='' repo='' number=''
+for a in "$@"; do
+  case "$a" in owner=*) owner=${a#owner=} ;; repo=*) repo=${a#repo=} ;; number=*) number=${a#number=} ;; esac
+done
+f="$FORGE_DIR/github-$owner-$repo-$number"
+[ -f "$f" ] || exit 1
+[ "$(cat "$f")" != hang ] || { sleep 30; exit 1; }
+cat "$f"
+STUB
+cat > "$FORGE_BIN/glab" <<'STUB'
+#!/usr/bin/env bash
+number=$3 project=''
+while [ "$#" -gt 0 ]; do [ "$1" = -R ] && project=$2; shift; done
+f="$FORGE_DIR/gitlab-$(printf '%s' "${project#https://}" | tr '/' '_')-$number"
+[ -f "$f" ] || exit 1
+[ "$(cat "$f")" != hang ] || { sleep 30; exit 1; }
+cat "$f"
+STUB
+cat > "$FORGE_BIN/tea" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  login) printf '[{"name":"fj","url":"https://forge.example"}]\n'; exit 0 ;;
+  api) repo='' path=''
+       while [ "$#" -gt 0 ]; do [ "$1" = --repo ] && repo=$2; path=$1; shift; done
+       f="$FORGE_DIR/forgejo-$(printf '%s' "$repo" | tr '/' '_')-${path##*/}"
+       [ -f "$f" ] || exit 1
+       cat "$f" ;;
+  *) exit 1 ;;
+esac
+STUB
+printf '#!/usr/bin/env bash\nexit 1\n' > "$FORGE_BIN/gh-axi"
+chmod +x "$FORGE_BIN/gh" "$FORGE_BIN/glab" "$FORGE_BIN/tea" "$FORGE_BIN/gh-axi"
+export FORGE_DIR
+PATH="$FORGE_BIN:$PATH"
+export PATH
+
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 # A snapshot exercising every mapping: a decision with clean title/reason, a
@@ -336,7 +381,8 @@ test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards() {
         {id: "q2", key: "q2", verb: "captain-hold", title: "Pick a name", reason: "Choose the public name", owner: "(main)"}]' \
     "$TMP_ROOT/snap.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
-  assert_equals "w1,w2,w3" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "waits and parks go to the waiting group, in snapshot order"
+  assert_equals "w1,w2" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "waits and parks go to the waiting group, in snapshot order"
+  assert_equals "until 2026-12-01: needs a call" "$(jq -r '.charted[] | select(.id == "w3") | .reason' <<<"$p")" "a hold dated in the future is charted with its date"
   assert_equals "alpha-fix,old-row,q1,q2" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "a reason with a question mark, or no wait wording, stays a decision card"
   assert_equals "Parked for the weekend; resume Monday" "$(jq -r '.waiting[0].reason' <<<"$p")" "a waiting row carries its hold reason"
   assert_equals "Forge ops" "$(jq -r '.waiting[0].title' <<<"$p")" "a waiting row carries its task title"
@@ -360,7 +406,8 @@ test_a_released_hold_is_not_a_decision_card() {
     "$TMP_ROOT/snap.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   assert_equals "r5" "$(jq -r '[.captains_call[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "only an active hold stays a decision card"
-  assert_equals "r4" "$(jq -r '[.waiting[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "a hold dated in the future is waiting, never a card"
+  assert_equals "" "$(jq -r '[.waiting[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "a hold dated in the future is not waiting"
+  assert_equals "r4|false|until 2999-01-01: Pick the plan" "$(jq -r '.charted[] | select(.id == "r4") | "\(.id)|\(.dispatchable)|\(.reason)"' <<<"$p")" "a hold dated in the future is charted next with its date, never a card"
   assert_equals "0" "$(jq -r '[.. | objects | select(.key? == "r1" or .key? == "r2" or .key? == "r3")] | length' <<<"$p")" "a released hold appears nowhere on the board"
   pass "a released hold does not render as a decision card"
 }
@@ -555,6 +602,169 @@ test_default_choices_match_the_question_asked() {
   pass "default choices match the question the card asks"
 }
 
+test_a_card_whose_pr_merged_or_closed_leaves_the_board() {
+  local snap="$TMP_ROOT/live-pr.json" fd="$TMP_ROOT/forge-live" p
+  fresh_homes live-pr
+  mkdir -p "$fd"
+  printf 'state=MERGED\nmerged=true\n' > "$fd/github-acme-alpha-3"
+  printf '{"state":"closed"}\n' > "$fd/gitlab-gitlab.example.com_grp_sub_proj-801"
+  printf '{"state":"closed","merged":true,"head":{"sha":"0a1b2c"}}\n' > "$fd/forgejo-own_rep-5"
+  printf 'state=OPEN\nmerged=false\n' > "$fd/github-acme-open-9"
+  printf 'hang\n' > "$fd/github-acme-slow-4"
+  printf 'state=CLOSED\nmerged=false\n' > "$fd/github-acme-ext-11"
+  write_snapshot "$TMP_ROOT/live-pr-base.json"
+  jq '.decisions_open += [
+        {id: "gl", key: "gl", verb: "captain-hold", title: "GitLab MR", reason: "Merge https://gitlab.example.com/grp/sub/proj/-/merge_requests/801 once the reviewers sign off?", owner: "(main)"},
+        {id: "fj", key: "fj", verb: "captain-hold", title: "Forgejo PR", reason: "Approve https://forge.example/own/rep/pulls/5 for release?", owner: "(main)"},
+        {id: "op", key: "op", verb: "captain-hold", title: "Open PR", reason: "Merge https://github.com/acme/open/pull/9 now?", owner: "(main)"},
+        {id: "slow", key: "slow", verb: "captain-hold", title: "Slow forge", reason: "Merge https://github.com/acme/slow/pull/4 now?", owner: "(main)"},
+        {id: "lk", key: "lk", verb: "captain-hold", title: "Lookup fails", reason: "Merge https://github.com/acme/none/pull/2 now?", owner: "(main)"}]
+      | .contributions.captain = [
+        {task: "ext", url: "https://github.com/acme/ext/pull/11", kind: "pr", reason: "checks green; merge approval needed"}]' \
+    "$TMP_ROOT/live-pr-base.json" > "$snap"
+  p=$(FORGE_DIR="$fd" FM_BEARINGS_BOARD_PR_TIMEOUT=1 "$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "old-row,op,slow,lk" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "a card whose PR or MR merged or closed leaves, and an open, slow or unreadable one stays"
+  p=$(FORGE_DIR="$fd" FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$snap") || fail "the generator failed with the check off"
+  assert_equals "alpha-fix,old-row,gl,fj,op,slow,lk,contribution.ext" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "with the live check off every card stays"
+  pass "the board drops cards whose PR or MR merged or closed and keeps a card when the lookup fails"
+}
+
+test_announcements_and_time_gates_are_not_calls_and_a_real_question_stays() {
+  local snap="$TMP_ROOT/announce.json" p
+  fresh_homes announce
+  write_snapshot "$TMP_ROOT/announce-base.json"
+  jq '.decisions_open = [
+        {id: "rp", key: "status.rp.default", verb: "needs-decision", source: "status", task: "rp", decision_key: "default", owner: "(main)",
+         title_full: "rp", reason_full: "review page live: http://dev-1.tailf848b0.ts.net:4387/session/5e96b7b8f3b4f9db", summary: "review page live"},
+        {id: "up", key: "status.up.default", verb: "needs-decision", source: "status", task: "up", decision_key: "default", owner: "(main)",
+         title_full: "up", reason_full: "understand page live: http://dev-1.tailf848b0.ts.net:4387/session/988b504d3271c0ea", summary: "understand page live"},
+        {id: "pr", key: "status.pr.default", verb: "needs-decision", source: "status", task: "pr", decision_key: "default", owner: "(main)",
+         title_full: "pr", reason_full: "PR ready: https://github.com/acme/app/pull/77", summary: "PR ready"},
+        {id: "tg", key: "tg", verb: "captain-hold", title: "Trial rerun", reason: "not before 2026-12-01; rerun the trial with the new data", owner: "(main)"},
+        {id: "bk", key: "bk", verb: "captain-hold", title: "Blocked", reason: "needs the registry switch first", hold_bucket: "blocked", owner: "(main)"},
+        {id: "pdm", key: "status.pdm-systemd.default", verb: "needs-decision", source: "status", task: "pdm-systemd", decision_key: "default", owner: "(main)",
+         title_full: "pdm-systemd", reason_full: "Two ways to order the units: (1) the dotfiles wait for the mount (2) the mount unit pulls in the dotfiles", summary: "Two ways"},
+        {id: "rt", key: "status.rt.default", verb: "needs-decision", source: "status", task: "rt", decision_key: "default", owner: "(main)",
+         title_full: "rt", reason_full: "Which retry policy should ship: fixed or exponential?", summary: "Which retry policy"}]' \
+    "$TMP_ROOT/announce-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "status.pdm-systemd.default,status.rt.default" "$(jq -r '[.captains_call[].key] | sort | join(",")' <<<"$p")" \
+    "only a real question is a card, including one whose options mention waiting"
+  assert_equals "bk,tg" "$(jq -r '[.waiting[].key] | sort | join(",")' <<<"$p")" "a time gate and a blocked hold wait"
+  assert_equals "0" "$(jq '[.. | objects | select(.key? == "status.rp.default" or .key? == "status.up.default" or .key? == "status.pr.default")] | length' <<<"$p")" \
+    "an announcement with no card for its work appears nowhere"
+  printf '%s\n' "$p" > "$TMP_ROOT/announce-payload.json"
+  validates "$TMP_ROOT/announce-payload.json" || fail "a payload with announcements dropped did not satisfy the board validator"
+  pass "announcements and time gates are not calls and a real question stays a card"
+}
+
+test_page_live_lines_fold_their_links_into_the_mr_card() {
+  local snap="$TMP_ROOT/fold.json" p
+  fresh_homes fold
+  write_snapshot "$TMP_ROOT/fold-base.json"
+  jq '.decisions_open += [
+        {id: "mr-fix", key: "mr-fix", verb: "captain-hold", title: "Review the retry MR", reason: "Approve https://gitlab.example.com/grp/proj/-/merge_requests/801 once the bot comments are read", owner: "(main)"},
+        {id: "mr-fix", key: "status.mr-fix.understand", verb: "needs-decision", source: "status", task: "mr-fix", decision_key: "understand", owner: "(main)",
+         title_full: "mr-fix", reason_full: "understand page live: http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", summary: "understand page live"},
+        {id: "mr-fix", key: "status.mr-fix.review", verb: "needs-decision", source: "status", task: "mr-fix", decision_key: "review", owner: "(main)",
+         title_full: "mr-fix", reason_full: "review page live: http://dev-1.tailf848b0.ts.net:4387/session/bbbb2222", summary: "review page live"},
+        {id: "ship-x", key: "status.ship-x.ready", verb: "needs-decision", source: "status", task: "ship-x", decision_key: "ready", owner: "(main)",
+         title_full: "ship-x", reason_full: "PR ready: https://github.com/acme/alpha/pull/3", summary: "PR ready"}]' \
+    "$TMP_ROOT/fold-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "alpha-fix,mr-fix,old-row" "$(jq -r '[.captains_call[].key] | sort | join(",")' <<<"$p")" "each MR keeps one card and a page-live line adds none"
+  assert_equals "0" "$(jq '.waiting | length' <<<"$p")" "a folded page-live line is not a waiting row"
+  assert_equals "http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111,http://dev-1.tailf848b0.ts.net:4387/session/bbbb2222,https://gitlab.example.com/grp/proj/-/merge_requests/801" \
+    "$(jq -r '.captains_call[] | select(.key == "mr-fix") | .links | map(.url) | join(",")' <<<"$p")" "the MR card carries the understand page, the review page and the MR"
+  assert_equals "Understand page,Review page" \
+    "$(jq -r '.captains_call[] | select(.key == "mr-fix") | .links[:2] | map(.label) | join(",")' <<<"$p")" "each page link is labelled by its line"
+  assert_equals "https://github.com/acme/alpha/pull/3" "$(jq -r '.captains_call[] | select(.key == "alpha-fix") | .links | map(.url) | join(",")' <<<"$p")" \
+    "a PR-ready line folds into the card for the same PR"
+  printf '%s\n' "$p" > "$TMP_ROOT/fold-payload.json"
+  validates "$TMP_ROOT/fold-payload.json" || fail "a payload with folded page links did not satisfy the board validator"
+  pass "page-live lines fold their links into the matching MR card"
+}
+
+test_a_secondmate_dated_hold_is_charted_with_its_date() {
+  local snap="$TMP_ROOT/sm-dated.json" p
+  fresh_homes sm-dated
+  write_snapshot "$TMP_ROOT/sm-dated-base.json"
+  jq '.decisions_open = [
+        {id: "home7/explore-trial-measure", key: "explore-trial-measure", verb: "captain-hold", title: "Explore trial measure", reason: "Pick the trial metric", hold_until: "2999-11-14", hold_bucket: "dated", owner: "home7"},
+        {id: "bucket-only", key: "bucket-only", verb: "captain-hold", title: "Bucket only", reason: "Pick the window", hold_bucket: "dated", owner: "(main)"},
+        {id: "home7/live", key: "live", verb: "captain-hold", title: "Live call", reason: "Pick the dataset", hold_bucket: "live", owner: "home7"}]' \
+    "$TMP_ROOT/sm-dated-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "live" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "only the live hold is a card"
+  assert_equals "home7: Explore trial measure|until 2999-11-14: Pick the trial metric|false" \
+    "$(jq -r '.charted[] | select(.id == "home7-explore-trial-measure") | "\(.title)|\(.reason)|\(.dispatchable)"' <<<"$p")" \
+    "a secondmate hold deferred to a later date is charted next with its date"
+  assert_equals "1" "$(jq '[.charted[] | select(.id == "bucket-only")] | length' <<<"$p")" "a hold the fleet dated is charted next"
+  assert_equals "0" "$(jq '.waiting | length' <<<"$p")" "a dated hold is not a waiting row"
+  printf '%s\n' "$p" > "$TMP_ROOT/sm-dated-payload.json"
+  validates "$TMP_ROOT/sm-dated-payload.json" || fail "a payload with charted dated holds did not satisfy the board validator"
+  pass "a dated hold from any home is charted next with its date"
+}
+
+test_a_round_a_newer_round_superseded_leaves_the_board() {
+  local snap="$TMP_ROOT/rounds.json" p
+  fresh_homes rounds
+  write_snapshot "$TMP_ROOT/rounds-base.json"
+  jq '.decisions_open = [
+        {id: "sweep-r2", key: "sweep-r2", verb: "captain-hold", title: "Sweep round 2", reason: "Pick the sweep grid", owner: "(main)"},
+        {id: "sweep", key: "sweep", verb: "captain-hold", title: "Sweep", reason: "Pick the first sweep grid", owner: "(main)"},
+        {id: "home7/tune-v1", key: "tune-v1", verb: "captain-hold", title: "Tune v1", reason: "Pick the learning rate", owner: "home7"},
+        {id: "fix-issue-41", key: "fix-issue-41", verb: "captain-hold", title: "Issue 41", reason: "Pick the fix", owner: "(main)"},
+        {id: "probe-v1", key: "probe-v1", verb: "captain-hold", title: "Main probe", reason: "Pick the probe set", owner: "(main)"}]
+      | .in_flight += [
+        {id: "sweep-r3", name: "Sweep round 3", repo: "alpha", state: "working", doing: "-", kind: "ship"},
+        {id: "home7/tune-v2", name: "Tune v2", repo: "alpha", state: "working", doing: "-", kind: "ship"},
+        {id: "fix-issue-42", name: "Issue 42", repo: "alpha", state: "working", doing: "-", kind: "ship"},
+        {id: "home7/probe-v2", name: "Probe v2", repo: "alpha", state: "working", doing: "-", kind: "ship"}]' \
+    "$TMP_ROOT/rounds-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "fix-issue-41,probe-v1" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "a round a newer round of the same work superseded leaves, in its own home only"
+  pass "a superseded round leaves the board"
+}
+
+test_a_numbered_option_question_stays_a_card_when_an_option_says_until() {
+  local snap="$TMP_ROOT/opt-until.json" p
+  fresh_homes opt-until
+  write_snapshot "$TMP_ROOT/opt-until-base.json"
+  jq '.decisions_open = [
+        {id: "mr-872", key: "mr-872", verb: "captain-hold", title: "MR 872 review", reason: "Bot comments on https://gitlab.example.com/grp/proj/-/merge_requests/872 are in: (1) Post nothing until I finish both pages (2) post the blocking finding now", owner: "(main)"},
+        {id: "mr-874", key: "mr-874", verb: "captain-hold", title: "MR 874 review", reason: "Until the pages are done: (1) wait for the understand page (2) post the bot findings now", owner: "(main)"},
+        {id: "hold", key: "hold", verb: "captain-hold", title: "Plain wait", reason: "until the upstream release lands", owner: "(main)"}]' \
+    "$TMP_ROOT/opt-until-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "mr-872,mr-874" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "a reason with numbered options is a question card"
+  assert_equals "hold" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "a plain until reason still waits"
+  pass "an until or wait inside an option never turns a numbered-option question into a wait"
+}
+
+test_card_links_are_labelled_by_what_they_point_at() {
+  local snap="$TMP_ROOT/labels.json" p
+  fresh_homes labels
+  write_snapshot "$TMP_ROOT/labels-base.json"
+  jq '.decisions_open = [
+        {id: "mr-872", key: "mr-872", verb: "captain-hold", title: "MR 872 review", reason: "Bot comments on https://gitlab.example.com/grp/proj/-/merge_requests/872 are in; understand page at http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111, review page at http://dev-1.tailf848b0.ts.net:4387/session/bbbb2222. Post the blocking finding now?", owner: "(main)"},
+        {id: "pr-837", key: "pr-837", verb: "captain-hold", title: "PR 837", reason: "Merge https://github.com/acme/app/pull/837 after https://github.com/acme/app/issues/12 closes?", owner: "(main)"}]' \
+    "$TMP_ROOT/labels-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "MR 872,Understand page,Review page" "$(jq -r '.captains_call[] | select(.key == "mr-872") | .links | map(.label) | join(",")' <<<"$p")" \
+    "MR and Lavish page links are labelled by what they are"
+  assert_equals "PR 837,Issue 12" "$(jq -r '.captains_call[] | select(.key == "pr-837") | .links | map(.label) | join(",")' <<<"$p")" "PR and issue links are labelled by number"
+  assert_equals "Bot comments on MR 872 are in; understand page at Understand page, review page at Review page. Post the blocking finding now?" \
+    "$(jq -r '.captains_call[] | select(.key == "mr-872") | .about' <<<"$p")" "the card text names each link instead of repeating its URL"
+  assert_equals "0" "$(jq '[.captains_call[] | (.question // ""), (.about // "") | select(test("https?://"))] | length' <<<"$p")" "no question or about text repeats a raw URL"
+  printf '%s\n' "$p" > "$TMP_ROOT/labels-payload.json"
+  validates "$TMP_ROOT/labels-payload.json" || fail "a payload with labelled links did not satisfy the board validator"
+  pass "card links are labelled by what they point at and question text shows the labels"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -577,4 +787,11 @@ fm_test_run \
   test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
   test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids \
-  test_default_choices_match_the_question_asked
+  test_default_choices_match_the_question_asked \
+  test_a_card_whose_pr_merged_or_closed_leaves_the_board \
+  test_announcements_and_time_gates_are_not_calls_and_a_real_question_stays \
+  test_page_live_lines_fold_their_links_into_the_mr_card \
+  test_a_secondmate_dated_hold_is_charted_with_its_date \
+  test_a_round_a_newer_round_superseded_leaves_the_board \
+  test_a_numbered_option_question_stays_a_card_when_an_option_says_until \
+  test_card_links_are_labelled_by_what_they_point_at
