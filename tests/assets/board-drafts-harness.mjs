@@ -23,8 +23,8 @@
 //   down:<key>      press the move-down button on that key's row
 //   go              press "Start answering" on the order step
 //   open:<key>      press that key's title in the order list to open its card
-//   expand:<key>    press an underway row (its order key) or a waiting row
-//                   ("waiting:<key>") to expand or collapse it in place
+//   expand:<key>    press a waiting row ("waiting:<key>") to expand or
+//                   collapse it in place
 //   tick            let pending timers (the debounced priority send) fire
 //   reorder         press "Reorder" on the deck
 //   page:<key>      press the first in-place page button on that key's card
@@ -61,7 +61,7 @@
 //   counts the page's live intervals; opens lists every url the
 //   page asked to open elsewhere, framePosts every message the board sent
 //   each page frame, keyed by page id, and keys every key press the board
-//   dispatched to itself, and rows every underway and waiting row that can
+//   dispatched to itself, and rows every waiting row that can
 //   expand ({key, expanded, details}, details the shown detail text or null).
 //   Lavish's own elements (ids starting "lavish-")
 //   are absent unless the simulated chrome adds them.
