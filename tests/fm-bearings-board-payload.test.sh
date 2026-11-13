@@ -22,6 +22,14 @@ FORGE_BIN="$TMP_ROOT/forgebin"
 mkdir -p "$FORGE_DIR" "$FORGE_BIN"
 cat > "$FORGE_BIN/gh" <<'STUB'
 #!/usr/bin/env bash
+# The viewer's login and a PR's reviews, for the captain's own approval.
+f=''
+case "${1-} ${2-}" in
+  "api user") f="$FORGE_DIR/github-user" ;;
+  "api --paginate")
+    f=${4#repos/}; f=${f%/reviews}; f="$FORGE_DIR/github-$(printf '%s' "$f" | sed 's#/pulls/#-#; s#/#-#').reviews" ;;
+esac
+if [ -n "$f" ]; then [ -f "$f" ] && cat "$f"; exit; fi
 owner='' repo='' number=''
 for a in "$@"; do
   case "$a" in owner=*) owner=${a#owner=} ;; repo=*) repo=${a#repo=} ;; number=*) number=${a#number=} ;; esac
@@ -33,6 +41,17 @@ cat "$f"
 STUB
 cat > "$FORGE_BIN/glab" <<'STUB'
 #!/usr/bin/env bash
+if [ "${1-}" = api ]; then
+  case "${2-}" in
+    user) f="$FORGE_DIR/gitlab-user" ;;
+    projects/*/merge_requests/*/approvals)
+      f=${2#projects/}; f=${f%/approvals}
+      f="$FORGE_DIR/gitlab-${GITLAB_HOST}_$(printf '%s' "$f" | sed 's#%2F#_#g; s#/merge_requests/#-#').approvals" ;;
+    *) exit 1 ;;
+  esac
+  [ -f "$f" ] && cat "$f"
+  exit
+fi
 number=$3 project=''
 while [ "$#" -gt 0 ]; do [ "$1" = -R ] && project=$2; shift; done
 f="$FORGE_DIR/gitlab-$(printf '%s' "${project#https://}" | tr '/' '_')-$number"
@@ -46,7 +65,11 @@ case "$1" in
   login) printf '[{"name":"fj","url":"https://forge.example"}]\n'; exit 0 ;;
   api) repo='' path=''
        while [ "$#" -gt 0 ]; do [ "$1" = --repo ] && repo=$2; path=$1; shift; done
-       f="$FORGE_DIR/forgejo-$(printf '%s' "$repo" | tr '/' '_')-${path##*/}"
+       case "$path" in
+         /user) f="$FORGE_DIR/forgejo-user" ;;
+         */reviews) n=${path%/reviews}; f="$FORGE_DIR/forgejo-$(printf '%s' "$repo" | tr '/' '_')-${n##*/}.reviews" ;;
+         *) f="$FORGE_DIR/forgejo-$(printf '%s' "$repo" | tr '/' '_')-${path##*/}" ;;
+       esac
        [ -f "$f" ] || exit 1
        cat "$f" ;;
   *) exit 1 ;;
@@ -864,6 +887,87 @@ test_a_priority_never_brings_back_a_closed_or_handed_decision() {
   pass "the stored priority never brings back a closed or handed decision"
 }
 
+
+test_a_review_card_the_captain_approved_leaves_and_any_other_stays() {
+  local snap="$TMP_ROOT/approved.json" fd="$TMP_ROOT/forge-approved" p
+  fresh_homes approved
+  mkdir -p "$fd"
+  printf 'captain\n' > "$fd/github-user"
+  printf '{"username":"captain"}\n' > "$fd/gitlab-user"
+  printf '{"login":"captain"}\n' > "$fd/forgejo-user"
+  # An MR the captain approved, behind a review-page card and a review-ready card.
+  printf '{"state":"opened"}\n' > "$fd/gitlab-gitlab.example.com_grp_proj-874"
+  printf '{"approved_by":[{"user":{"username":"captain"}}]}\n' > "$fd/gitlab-gitlab.example.com_grp_proj-874.approvals"
+  printf 'state=OPEN\nmerged=false\n' > "$fd/github-acme-app-21"
+  printf '[[{"user":{"login":"captain"},"state":"APPROVED"}]]\n' > "$fd/github-acme-app-21.reviews"
+  # The captain approved, then asked for changes: the review is still owed.
+  printf 'state=OPEN\nmerged=false\n' > "$fd/github-acme-app-22"
+  printf '[[{"user":{"login":"captain"},"state":"APPROVED"},{"user":{"login":"captain"},"state":"CHANGES_REQUESTED"}]]\n' \
+    > "$fd/github-acme-app-22.reviews"
+  # Someone else approved; the captain's dismissed approval does not count.
+  printf '{"state":"open","merged":false,"head":{"sha":"0a1b2c"}}\n' > "$fd/forgejo-own_rep-6"
+  printf '[{"user":{"login":"bot"},"state":"APPROVED"},{"user":{"login":"captain"},"state":"APPROVED","dismissed":true}]\n' \
+    > "$fd/forgejo-own_rep-6.reviews"
+  # The captain approved, but the card asks whether to merge, not for a review.
+  printf 'state=OPEN\nmerged=false\n' > "$fd/github-acme-app-23"
+  printf '[[{"user":{"login":"captain"},"state":"APPROVED"}]]\n' > "$fd/github-acme-app-23.reviews"
+  write_snapshot "$TMP_ROOT/approved-base.json"
+  jq '.decisions_open = [
+        {id: "mr874", key: "review.mr874", verb: "review-ready", source: "review-page", task: "mr874", title: "MR 874 review page",
+         reason: "review page for https://gitlab.example.com/grp/proj/-/merge_requests/874", owner: "(main)"},
+        {id: "rr21", key: "rr21", verb: "captain-hold", title: "Review PR 21",
+         reason: "Please review the PR https://github.com/acme/app/pull/21 and re-review the PR once the bot answers", owner: "(main)"},
+        {id: "rr22", key: "rr22", verb: "captain-hold", title: "Review PR 22",
+         reason: "Please review the PR https://github.com/acme/app/pull/22 and re-review the PR after fixes", owner: "(main)"},
+        {id: "rr6", key: "review.rr6", verb: "review-ready", source: "review-page", task: "rr6", title: "PR 6 review page",
+         reason: "review page for https://forge.example/own/rep/pulls/6", owner: "(main)"},
+        {id: "mg23", key: "mg23", verb: "captain-hold", title: "Merge PR 23",
+         reason: "Merge https://github.com/acme/app/pull/23 now?", owner: "(main)"}]' \
+    "$TMP_ROOT/approved-base.json" > "$snap"
+  p=$(FORGE_DIR="$fd" "$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "mg23,review.rr6,rr22" "$(jq -r '[.captains_call[].key] | sort | join(",")' <<<"$p")" \
+    "a review the captain approved leaves; a withdrawn, dismissed or merge-question approval keeps its card"
+  printf '%s\n' "$p" > "$TMP_ROOT/approved-payload.json"
+  validates "$TMP_ROOT/approved-payload.json" || fail "a payload without approved reviews did not satisfy the board validator"
+  pass "a review card the captain already approved never asks again, and every other card stays"
+}
+
+test_a_freeze_or_a_hold_that_says_it_is_no_decision_waits_instead_of_asking() {
+  local snap="$TMP_ROOT/freeze.json" p
+  fresh_homes freeze
+  write_snapshot "$TMP_ROOT/freeze-base.json"
+  jq '.decisions_open = [
+        {id: "cd/fz1", key: "fz1", verb: "captain-hold", title: "Freeze arm runs", reason: "Freeze: no new arm runs while the forge migrates", owner: "cd"},
+        {id: "cd/fz2", key: "fz2", verb: "captain-hold", title: "Frozen pipeline", reason: "Frozen until the release ships.", owner: "cd"},
+        {id: "cd/fz3", key: "fz3", verb: "captain-hold", title: "Keep the cache", reason: "Held so the sweep skips it; not a captain decision. Should it ever be rerun?", owner: "cd"},
+        {id: "cd/real", key: "real", verb: "captain-hold", title: "Unfreeze now", reason: "Should the arm runs unfreeze now that the forge is back?", owner: "cd"}]' \
+    "$TMP_ROOT/freeze-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "real" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "only the real question is a card"
+  assert_equals "fz1,fz2,fz3" "$(jq -r '[.waiting[].key] | sort | join(",")' <<<"$p")" \
+    "a freeze and a hold that says it is no decision show as waits"
+  pass "a freeze or a hold that says it is not a decision waits instead of asking"
+}
+
+test_a_card_carries_the_pr_link_its_snapshot_row_recorded() {
+  local snap="$TMP_ROOT/prurl.json" p
+  fresh_homes prurl
+  write_snapshot "$TMP_ROOT/prurl-base.json"
+  jq '.decisions_open = [
+        {id: "pdm/pdm-91", key: "pdm-91", verb: "captain-hold", title: "Merge PR 91", reason: "Merge PR 91 now?",
+         pr_url: "https://github.com/acme/pdm/pull/91", owner: "pdm"},
+        {id: "pdm/bad", key: "bad", verb: "captain-hold", title: "Bad link", reason: "Ship it now?",
+         pr_url: "http://evil.example/pull/1", owner: "pdm"}]' \
+    "$TMP_ROOT/prurl-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "https://github.com/acme/pdm/pull/91" "$(jq -r '.captains_call[] | select(.key == "pdm-91") | .pr_url' <<<"$p")" \
+    "a card takes the PR link its row recorded"
+  assert_equals "null" "$(jq -r '.captains_call[] | select(.key == "bad") | .pr_url' <<<"$p")" "a non-https link is not a PR link"
+  printf '%s\n' "$p" > "$TMP_ROOT/prurl-payload.json"
+  validates "$TMP_ROOT/prurl-payload.json" || fail "a payload with a recorded PR link did not satisfy the board validator"
+  pass "a card carries the PR link its snapshot row recorded"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -896,4 +1000,7 @@ fm_test_run \
   test_card_links_are_labelled_by_what_they_point_at \
   test_annotated_decisions_offer_their_own_full_options_in_captain_terms \
   test_a_handed_decision_waits_with_who_has_it_instead_of_a_card \
-  test_a_priority_never_brings_back_a_closed_or_handed_decision
+  test_a_priority_never_brings_back_a_closed_or_handed_decision \
+  test_a_review_card_the_captain_approved_leaves_and_any_other_stays \
+  test_a_freeze_or_a_hold_that_says_it_is_no_decision_waits_instead_of_asking \
+  test_a_card_carries_the_pr_link_its_snapshot_row_recorded
