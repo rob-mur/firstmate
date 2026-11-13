@@ -7,7 +7,13 @@
 // prompts and restored review state) is <storage.json>.session.json. Delete
 // the session file to simulate a new tab. NO_STORAGE=1 makes localStorage throw
 // like Lavish's sandboxed frame. Comma-separated actions run in order:
-//   type            select the first option and type a note into every card
+//   type[:<key>]    select the first option and type a note into every card,
+//                   or only into that card
+//   focus:<key>     put focus in that card's note box
+//   blur            move focus off the page's controls
+//   run             run the shell command in FM_HARNESS_RUN (a rebuild while
+//                   the page stays open)
+//   poll            let the page's live-update poll run once
 //   submit:<key>    submit that card's form
 //   pick:<id>       tick a charted row's dispatch pick
 //   dispatch        press the dispatch button
@@ -20,8 +26,11 @@
 //   tick            let pending timers (the debounced priority send) fire
 //   reorder         press "Reorder" on the deck
 // Pending timers fire after each chrome message and at the end of the run.
-// Prints { cards, storage, calls, queue, anchors, ids, order }.
+// The page's data file is read from beside <built-board.html> each time the
+// page loads it, so a rebuild between polls is seen by the next poll.
+// Prints { cards, storage, calls, queue, anchors, ids, order, reloads }.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 
 const [, , boardPath, storagePath, actionList = ""] = process.argv;
 const html = readFileSync(boardPath, "utf8");
@@ -46,6 +55,17 @@ class Node {
     n.parentNode = this; this.children.push(n); return n;
   }
   removeChild(n) { const i = this.children.indexOf(n); if (i >= 0) this.children.splice(i, 1); n.parentNode = null; return n; }
+  insertBefore(n, ref) {
+    if (!ref) return this.appendChild(n);
+    if (n.parentNode) n.parentNode.removeChild(n);
+    this.children.splice(this.children.indexOf(ref), 0, n); n.parentNode = this; return n;
+  }
+  replaceChild(n, old) {
+    if (n.parentNode) n.parentNode.removeChild(n);
+    this.children[this.children.indexOf(old)] = n; n.parentNode = this; old.parentNode = null; return old;
+  }
+  contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+  getAttribute(k) { return k in this.attributes ? this.attributes[k] : null; }
   setAttribute(k, v) { this.attributes[k] = v; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   fire(t) { for (const fn of this.listeners[t] || []) fn({ preventDefault() {} }); }
@@ -70,9 +90,21 @@ class Node {
 globalThis.Event = class { constructor(type, init = {}) { this.type = type; this.bubbles = !!init.bubbles; } };
 
 const byId = new Map();
-const dataNode = new Node("script");
-dataNode.textContent = html.split('<script id="bearings-data" type="application/json">')[1].split("</script>")[0];
-byId.set("bearings-data", dataNode);
+const dataPath = boardPath.replace(/\.html$/, ".data.js");
+const loadData = () => { if (existsSync(dataPath)) new Function(readFileSync(dataPath, "utf8"))(); };
+// Anything that would replace the whole page is recorded, never performed.
+const reloads = [];
+// A script element added to the body loads its src from beside the board.
+const body = new Node("body");
+const bodyAppend = body.appendChild.bind(body);
+body.appendChild = (n) => {
+  bodyAppend(n);
+  if (n.tagName === "script" && n.src) {
+    if (n.src.split("?")[0] === "bearings-board.data.js" && existsSync(dataPath)) { loadData(); n.onload?.(); }
+    else n.onerror?.();
+  }
+  return n;
+};
 
 // The selectors the simulated chrome reports follow Lavish's rule: "#<id>"
 // for an element with an id, else a position ("pos:<n>" among the deck's
@@ -90,6 +122,10 @@ const anchorFor = (el) => {
   return i >= 0 ? "pos:" + i : "";
 };
 globalThis.document = {
+  body,
+  activeElement: body,
+  write: () => reloads.push("document.write"),
+  open: () => reloads.push("document.open"),
   createElement: (tag) => new Node(tag),
   getElementById: (id) => {
     if (!byId.has(id)) { const n = new Node("div"); n.id = id; new Node("div").appendChild(n); byId.set(id, n); }
@@ -112,9 +148,12 @@ let timerSeq = 0;
 globalThis.setTimeout = (fn) => { const id = ++timerSeq; timers.push({ id, fn }); return id; };
 globalThis.clearTimeout = (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); };
 const flush = () => { while (timers.length) timers.shift().fn(); };
+const intervals = [];
+globalThis.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 
 globalThis.window = {
   parent,
+  location: { reload: () => reloads.push("location.reload"), assign: () => reloads.push("location.assign"), replace: () => reloads.push("location.replace") },
   addEventListener: (t, fn) => { if (t === "message") listeners.push(fn); },
   localStorage: process.env.NO_STORAGE
     ? { getItem() { throw new Error("SecurityError"); }, setItem() { throw new Error("SecurityError"); } }
@@ -143,6 +182,7 @@ globalThis.FormData = class {
 };
 globalThis.TextEncoder = TextEncoder;
 
+loadData();
 new Function(html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>")))();
 
 const post = (data) => { for (const fn of listeners) fn({ data, source: parent }); flush(); };
@@ -166,6 +206,7 @@ for (const act of actionList.split(",").filter(Boolean)) {
   const [name, arg] = cut < 0 ? [act, undefined] : [act.slice(0, cut), act.slice(cut + 1)];
   if (name === "type") {
     for (const f of forms()) {
+      if (arg !== undefined && f.attributes["data-lavish-question"] !== arg) continue;
       f.querySelector("input[type=radio]").checked = true;
       f.querySelector("input[name=note]").value = "typed " + f.attributes["data-lavish-question"];
       f.fire("input");
@@ -186,6 +227,15 @@ for (const act of actionList.split(",").filter(Boolean)) {
   } else if (name === "open") {
     const row = byId.get("bb-order-list").children.find((r) => r.attributes["data-order-key"] === arg);
     row.querySelector(".bb-order__open").fire("click");
+  } else if (name === "focus") {
+    document.activeElement = forms().find((f) => f.attributes["data-lavish-question"] === arg).querySelector("input[name=note]");
+  } else if (name === "blur") {
+    document.activeElement = document.body;
+  } else if (name === "run") {
+    execSync(process.env.FM_HARNESS_RUN, { stdio: ["ignore", "ignore", "inherit"] });
+  } else if (name === "poll") {
+    for (const fn of intervals) fn();
+    flush();
   } else if (name === "tick") {
     flush();
   } else if (name === "go") {
@@ -211,11 +261,16 @@ const cards = forms().map((f) => ({
   note: f.querySelector("input[name=note]").value,
   queued: f.parentNode.parentNode.classList.contains("is-queued"),
   state: f.querySelectorAll("input").find((i) => i.name === "lavish-state")?.value ?? "",
+  title: f.parentNode.parentNode.querySelector(".bb-decision__title")?.textContent ?? "",
+  hidden: f.parentNode.parentNode.hidden,
 }));
 process.stdout.write(JSON.stringify({
   cards, storage: store, calls, queue: Object.keys(session.queue),
   anchors: Object.fromEntries(Object.entries(session.queue).map(([k, q]) => [k, q.anchor])),
   ids: forms().map((f) => f.id || ""),
+  reloads,
+  polls: intervals.length,
+  sub: byId.get("bb-call-sub").textContent,
   order: {
     stepShown: !byId.get("bb-order").hidden,
     deckShown: !byId.get("bb-callwrap").hidden,

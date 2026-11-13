@@ -3313,6 +3313,7 @@ A long-polling external process is registered as a *source* through its adapter,
 **Open the Lavish artifact first**
 
 Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; reply and poll attempts derive their host and port from that session and refuse missing or invalid session evidence before posting or consuming a staged worker reply.
+Open it once: every `lavish-axi <artifact>` run opens a new browser tab and takes the captain's focus, so show a revision by rewriting the artifact, which the open page reloads, or by a sibling data file the page polls when the captain may be typing on it ([`lavish-board.md`](../.agents/skills/bearings/references/lavish-board.md) owns that pattern for the board).
 
 **Retry interrupted Lavish polls**
 

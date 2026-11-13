@@ -183,10 +183,13 @@ write_valid_payload() {  # <path>
 EOF
 }
 
-# Extract the injected payload back out of a built board page.
+# Extract the payload back out of the data file the build writes beside a
+# board page.
 extract_payload() {  # <board-path>
-  sed -n '/<script id="bearings-data" type="application\/json">/,/<\/script>/p' "$1" \
-    | sed '1d;$d'
+  local js
+  js=$(cat "${1%.html}.data.js") || return 1
+  js=${js#'window.FM_BEARINGS_BOARD_DATA = '}
+  printf '%s\n' "${js%;}"
 }
 
 test_path_is_stable_and_home_scoped() {
@@ -338,10 +341,8 @@ test_build_injects_binds_then_arms() {
     "$data" > "$home/expected.json"
   diff -u "$home/expected.json" "$home/stripped.json" >/dev/null \
     || fail "the injected payload does not round-trip to the input document"
-  grep -qF '</script><b>' "$board" \
+  grep -qF '</script><b>' "$board" "${board%.html}.data.js" \
     && fail "a payload string embedded a live closing script tag in the page"
-  grep -qxF '__FM_BEARINGS_BOARD_DATA__' "$board" \
-    && fail "the data slot survived injection"
 
   sid=$(run_lavish_source_id "$home" "$board")
   assert_contains "$out" "bound: $sid" "the binding does not name the board source: $out"
@@ -468,29 +469,35 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
   run_board "$home" build "$data" >/dev/null || fail "the first build failed"
 
   jq '.generated = "2026-08-19T01:00Z"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  # Lavish reloads the open page whenever the page file changes, so a rebuild
+  # must leave that file exactly as it was: same file, same bytes.
+  page_before="$(ls -i "$board" | awk '{print $1}') $(cksum < "$board")"
   out=$(run_board "$home" build "$data") || fail "the rebuild failed"
   assert_contains "$out" "already-armed: " "the rebuild re-armed an already registered source: $out"
   extract_payload "$board" | jq -e '.generated == "2026-08-19T01:00Z"' >/dev/null \
     || fail "the rebuild did not refresh the board payload in place"
+  [ "$(ls -i "$board" | awk '{print $1}') $(cksum < "$board")" = "$page_before" ] \
+    || fail "the rebuild rewrote the page file, which reloads the captain's open page"
   records=$(find "$home/state/procevent" -name '*.source' | wc -l | tr -d ' ')
   [ "$records" = 1 ] || fail "rebuilding left $records source registrations instead of 1"
   pass "rebuild refreshes the board in place without double-arming"
 }
 
-test_build_refuses_a_template_without_exactly_one_slot() {
+test_build_refuses_a_template_that_does_not_load_the_data() {
   local home data rc out
   home=$(make_home badslot)
   data="$home/payload.json"
   write_valid_payload "$data"
-  printf '<html><body>no slot</body></html>\n' > "$home/broken-template.html"
+  printf '<html><body>no data file</body></html>\n' > "$home/broken-template.html"
   set +e
   out=$(FM_BEARINGS_BOARD_TEMPLATE="$home/broken-template.html" run_board "$home" build "$data" 2>&1)
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "a template with no data slot was accepted"
-  assert_contains "$out" "data slot" "the slot refusal did not say why: $out"
+  [ "$rc" -ne 0 ] || fail "a template that never loads the board data was accepted"
+  assert_contains "$out" "board data file" "the template refusal did not say why: $out"
   assert_absent "$home/.lavish/bearings-board.html" "a refused template still produced a board"
-  pass "build refuses a template without exactly one data slot"
+  assert_absent "$home/.lavish/bearings-board.data.js" "a refused template still produced board data"
+  pass "build refuses a template that does not load the board data file exactly once"
 }
 
 test_charted_kind_is_optional_and_accepts_both_values() {
@@ -794,7 +801,7 @@ test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
-test_build_refuses_a_template_without_exactly_one_slot
+test_build_refuses_a_template_that_does_not_load_the_data
 test_build_reopens_a_session_the_captain_ended
 test_rebuild_of_a_live_session_never_opens_another_tab
 test_build_reopens_when_an_opened_session_ends_before_listing

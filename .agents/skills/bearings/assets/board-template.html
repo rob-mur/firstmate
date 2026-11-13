@@ -360,12 +360,12 @@ a { color: inherit; text-decoration: none; }
 
 </main>
 
-<!-- ONE SLOT. bin/fm-bearings-board.sh build injects the fresh
-     fm-bearings-board.v1 payload in place of the placeholder below; everything
-     above and below is the shipped template and is never regenerated per run. -->
-<script id="bearings-data" type="application/json">
-__FM_BEARINGS_BOARD_DATA__
-</script>
+<!-- THE DATA FILE. bin/fm-bearings-board.sh build writes the fresh
+     fm-bearings-board.v1 payload to bearings-board.data.js beside this page and
+     leaves this page file alone: Lavish reloads the whole open page whenever the
+     page file changes, so a rebuild changes only the data file, which the open
+     page re-reads and patches into place (LIVE UPDATE below). -->
+<script src="bearings-board.data.js"></script>
 
 <script>
 (function () {
@@ -392,27 +392,25 @@ __FM_BEARINGS_BOARD_DATA__
     main.appendChild(card);
   }
 
-  var data;
-  try {
-    data = JSON.parse(document.getElementById("bearings-data").textContent);
-  } catch (e) {
-    renderBoardError("The board data is not valid JSON");
-    return;
+  /* What the renderer needs from a payload, or "" when it has it. */
+  function dataProblem(d) {
+    if (!d || typeof d !== "object") return "The board data is missing or not valid JSON";
+    if (d.schema !== "fm-bearings-board.v1") {
+      return "Unsupported board data schema: " + (d.schema ? d.schema : "(none)");
+    }
+    var callItemsValid = Array.isArray(d.captains_call) && d.captains_call.every(function (item) {
+      return item && typeof item === "object" &&
+        typeof item.key === "string" && item.key.length > 0 &&
+        typeof item.type === "string" && item.type.length > 0 &&
+        typeof item.title === "string" && item.title.length > 0 &&
+        Array.isArray(item.options);
+    });
+    return callItemsValid ? "" : "The board data does not have the required structure";
   }
-  if (!data || data.schema !== "fm-bearings-board.v1") {
-    renderBoardError("Unsupported board data schema: " + (data && data.schema ? data.schema : "(none)"));
-    return;
-  }
-  var fleetLists = [data.captains_call];
-  var callItemsValid = Array.isArray(data.captains_call) && data.captains_call.every(function (item) {
-    return item && typeof item === "object" &&
-      typeof item.key === "string" && item.key.length > 0 &&
-      typeof item.type === "string" && item.type.length > 0 &&
-      typeof item.title === "string" && item.title.length > 0 &&
-      Array.isArray(item.options);
-  });
-  if (!fleetLists.every(Array.isArray) || !callItemsValid) {
-    renderBoardError("The board data does not have the required structure");
+  var data = window.FM_BEARINGS_BOARD_DATA;
+  var problem = dataProblem(data);
+  if (problem) {
+    renderBoardError(problem);
     return;
   }
 
@@ -427,11 +425,13 @@ __FM_BEARINGS_BOARD_DATA__
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
-  document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
-
-  var callTotal = data.captains_call.length;
-  document.getElementById("bb-call-sub").textContent =
-    callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
+  function renderHeader() {
+    document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
+    var callTotal = data.captains_call.length;
+    document.getElementById("bb-call-sub").textContent =
+      callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
+  }
+  renderHeader();
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
@@ -461,7 +461,7 @@ __FM_BEARINGS_BOARD_DATA__
     draftsStore(d);
   }
   /* drop saved input only for cards no longer on the board */
-  (function () {
+  function pruneDrafts() {
     var live = {};
     data.captains_call.forEach(function (c) { live[c.key] = true; });
     var d = draftsLoad(), changed = false;
@@ -469,7 +469,8 @@ __FM_BEARINGS_BOARD_DATA__
       if (!live[k]) { delete d[k]; changed = true; }
     });
     if (changed) draftsStore(d);
-  })();
+  }
+  pruneDrafts();
 
   /* Every answer the captain can queue (each card and the dispatch bar) is a
      target. Its state lives in a hidden control inside a data-lavish-question
@@ -539,19 +540,23 @@ __FM_BEARINGS_BOARD_DATA__
      rebuild the same way; a copy also rides in a hidden control Lavish restores
      with the form, for the sandboxed frame that has no storage. */
   var ORDER_KEY = "fm-bearings-board.order.v1";
-  var itemByKey = {};
-  var callKeySet = {};
-  var rankItems = data.captains_call.slice();
-  data.captains_call.forEach(function (c) { callKeySet[c.key] = true; });
-  /* tasks under way join the list as priority-only rows (no card) */
-  (Array.isArray(data.underway) ? data.underway : []).forEach(function (u) {
-    if (!u || typeof u.id !== "string" || !u.id) return;
-    rankItems.push({ key: "task:" + u.id, title: u.name || u.id, repo: u.repo || null, underway: true, doing: u.doing || "" });
-  });
-  rankItems.forEach(function (c) { itemByKey[c.key] = c; });
-  /* The payload order is the recorded priority (board-priority.txt order),
-     so the order only needs sending when the captain's differs from it. */
-  var baselineKeys = rankItems.map(function (c) { return c.key; });
+  var itemByKey, callKeySet, rankItems, baselineKeys;
+  function indexItems(calls, underway) {
+    itemByKey = {};
+    callKeySet = {};
+    rankItems = calls.slice();
+    calls.forEach(function (c) { callKeySet[c.key] = true; });
+    /* tasks under way join the list as priority-only rows (no card) */
+    (Array.isArray(underway) ? underway : []).forEach(function (u) {
+      if (!u || typeof u.id !== "string" || !u.id) return;
+      rankItems.push({ key: "task:" + u.id, title: u.name || u.id, repo: u.repo || null, underway: true, doing: u.doing || "" });
+    });
+    rankItems.forEach(function (c) { itemByKey[c.key] = c; });
+    /* The payload order is the recorded priority (board-priority.txt order),
+       so the order only needs sending when the captain's differs from it. */
+    baselineKeys = rankItems.map(function (c) { return c.key; });
+  }
+  indexItems(data.captains_call, data.underway);
   /* A stable element id per item key. Lavish anchors a queued answer by a
      selector that stops at the first id, so an id keeps the anchor on its
      own card after a rebuild reorders the deck. */
@@ -560,15 +565,22 @@ __FM_BEARINGS_BOARD_DATA__
       return "_" + ch.charCodeAt(0).toString(16) + "_";
     });
   }
-  var storedOrder = jsonLoad(ORDER_KEY, false);
   var orderKeys = [];
-  (Array.isArray(storedOrder.keys) ? storedOrder.keys : []).forEach(function (k) {
-    if (itemByKey[k] && orderKeys.indexOf(k) < 0) orderKeys.push(k);
-  });
-  var newKeys = 0;
-  rankItems.forEach(function (c) {
-    if (orderKeys.indexOf(c.key) < 0) { orderKeys.push(c.key); newKeys++; }
-  });
+  /* Keep the surviving keys of <prior> in order and add every new item after
+     them in payload order; returns how many keys were new. */
+  function mergeOrder(prior) {
+    var keys = [], added = 0;
+    prior.forEach(function (k) {
+      if (itemByKey[k] && keys.indexOf(k) < 0) keys.push(k);
+    });
+    rankItems.forEach(function (c) {
+      if (keys.indexOf(c.key) < 0) { keys.push(c.key); added++; }
+    });
+    orderKeys = keys;
+    return added;
+  }
+  var storedOrder = jsonLoad(ORDER_KEY, false);
+  var newKeys = mergeOrder(Array.isArray(storedOrder.keys) ? storedOrder.keys : []);
   /* confirmed once the captain has started answering; a card that arrived
      since then, or a board with nothing to reorder, is handled below */
   var orderConfirmed = (storedOrder.confirmed === true && newKeys === 0) || orderKeys.length < 2;
@@ -583,20 +595,30 @@ __FM_BEARINGS_BOARD_DATA__
   orderScope.appendChild(orderHidden);
   document.getElementById("bb-order").appendChild(orderScope);
 
-  var waitingRows = Array.isArray(data.waiting) ? data.waiting : [];
-  if (waitingRows.length) {
-    var waitingList = document.getElementById("bb-waiting-list");
+  var waitingList = document.getElementById("bb-waiting-list");
+  var waitingShown = "";
+  function renderWaiting() {
+    var waitingRows = Array.isArray(data.waiting) ? data.waiting : [];
+    var sig = JSON.stringify(waitingRows);
+    if (sig === waitingShown) return;
+    waitingShown = sig;
+    while (waitingList.children.length) waitingList.removeChild(waitingList.children[0]);
     waitingRows.forEach(function (w) {
       var li = el("li", "bb-waiting__row");
       li.appendChild(el("div", "bb-waiting__title", w.title));
       li.appendChild(el("div", "bb-waiting__why", w.reason));
       waitingList.appendChild(li);
     });
-    document.getElementById("bb-waiting").hidden = false;
+    document.getElementById("bb-waiting").hidden = !waitingRows.length;
   }
+  renderWaiting();
 
-  var cardKeys = orderKeys.filter(function (k) { return callKeySet[k]; });
-  cardKeys.map(function (k) { return itemByKey[k]; }).forEach(function (item) {
+  /* One record per rendered card, keyed by item key: the card element, the
+     item it shows, and that item's signature, so a live update can tell an
+     unchanged card from a changed one. */
+  var cardByKey = {};
+  function itemSig(item) { return JSON.stringify(item); }
+  function buildCard(item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     var pad = el("div", "bb-decision__pad");
 
@@ -734,11 +756,14 @@ __FM_BEARINGS_BOARD_DATA__
 
     pad.appendChild(form);
     card.appendChild(pad);
-    deck.appendChild(card);
-  });
+    cardByKey[item.key] = { card: card, item: item, sig: itemSig(item), target: target };
+    return card;
+  }
+  var cardKeys = orderKeys.filter(function (k) { return callKeySet[k]; });
+  cardKeys.forEach(function (k) { deck.appendChild(buildCard(itemByKey[k])); });
 
   /* stack navigation: one card at a time, dealt off the pile */
-  var cards = Array.prototype.slice.call(deck.children);
+  var cards = cardKeys.map(function (k) { return cardByKey[k].card; });
   var active = 0;
   var stackCount = document.getElementById("bb-stack-count");
   var stackPrev = document.getElementById("bb-stack-prev");
@@ -772,13 +797,18 @@ __FM_BEARINGS_BOARD_DATA__
       try { orderHidden.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) { /* no events */ }
     }
   }
-  function applyOrder() {
-    var byKey = {};
-    cards.forEach(function (c, i) { byKey[cardKeys[i]] = c; });
+  /* Put the deck in order, moving only cards that are out of place, so a
+     card the captain is working in stays where it is. */
+  function arrangeCards() {
     cardKeys = orderKeys.filter(function (k) { return callKeySet[k]; });
-    cards = cardKeys.map(function (k) { return byKey[k]; });
-    cards.forEach(function (c) { deck.appendChild(c); });
-    showCard(0);
+    cards = cardKeys.map(function (k) { return cardByKey[k].card; });
+    cards.forEach(function (c, i) {
+      if (deck.children[i] !== c) deck.insertBefore(c, deck.children[i] || null);
+    });
+  }
+  function applyOrder() {
+    arrangeCards();
+    if (cards.length) showCard(0);
   }
   function moveKey(key, to) {
     var from = orderKeys.indexOf(key);
@@ -790,7 +820,15 @@ __FM_BEARINGS_BOARD_DATA__
     renderOrder();
     scheduleReorderSend();
   }
+  var orderShown = "";
+  function orderSig() {
+    return JSON.stringify(orderKeys.map(function (k) {
+      var item = itemByKey[k];
+      return [k, item.title, item.repo || null, !!item.underway, item.doing || ""];
+    }));
+  }
   function renderOrder() {
+    orderShown = orderSig();
     while (orderList.children.length) orderList.removeChild(orderList.children[0]);
     orderKeys.forEach(function (k, i) {
       var item = itemByKey[k];
@@ -897,13 +935,10 @@ __FM_BEARINGS_BOARD_DATA__
     var v;
     try { v = JSON.parse(orderHidden.value); } catch (e) { return; }
     if (!v || !Array.isArray(v.keys)) return;
-    var keys = [];
-    v.keys.forEach(function (k) { if (itemByKey[k] && keys.indexOf(k) < 0) keys.push(k); });
-    var added = 0;
-    rankItems.forEach(function (c) { if (keys.indexOf(c.key) < 0) { keys.push(c.key); added++; } });
+    var prior = orderKeys;
+    var added = mergeOrder(v.keys);
     var confirm = v.confirmed === true && added === 0 && !orderConfirmed;
-    if (sameKeys(keys, orderKeys) && !confirm) return;
-    orderKeys = keys;
+    if (sameKeys(prior, orderKeys) && !confirm) return;
     if (confirm) orderConfirmed = true;
     orderPersist();
     renderOrder();
@@ -911,21 +946,29 @@ __FM_BEARINGS_BOARD_DATA__
   }
   renderOrder();
 
-  if (cards.length) {
-    stackPrev.addEventListener("click", function () { showCard(active - 1); });
-    stackNext.addEventListener("click", function () { showCard(active + 1); });
-    showCard(0);
-    showStep();
-  } else {
-    deck.classList.add("bb-call--empty");
-    reorderBtn.hidden = true;
-    if (orderKeys.length > 1) {
-      document.getElementById("bb-order-go").textContent = "Save priority";
-      showStep();
+  /* An empty deck shows a note instead of the pile, and step 1 then only
+     saves the priority. */
+  var emptyNote = null;
+  var orderGo = document.getElementById("bb-order-go");
+  var orderGoLabel = orderGo.textContent;
+  function syncEmpty() {
+    var empty = !cards.length;
+    deck.classList.toggle("bb-call--empty", empty);
+    if (empty && !emptyNote) {
+      emptyNote = el("div", "bb-empty", "Nothing needs your action right now.");
+      deck.appendChild(emptyNote);
+    } else if (!empty && emptyNote) {
+      deck.removeChild(emptyNote);
+      emptyNote = null;
     }
-    deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
-    stackNav.hidden = true;
+    stackNav.hidden = empty;
+    orderGo.textContent = empty ? "Save priority" : orderGoLabel;
   }
+  stackPrev.addEventListener("click", function () { if (cards.length) showCard(active - 1); });
+  stackNext.addEventListener("click", function () { if (cards.length) showCard(active + 1); });
+  syncEmpty();
+  if (cards.length) showCard(0);
+  showStep();
 
   /* Lavish restores the form controls itself but fires no events, so the
      board re-reads them; it then reports which anchors still hold an unsent
@@ -981,6 +1024,146 @@ __FM_BEARINGS_BOARD_DATA__
     if (d.type === "lavish:restoreReviewState") setTimeout(resync, 0);
     else if (d.type === "lavish:queuedAnchors" && Array.isArray(d.selectors)) onAnchors(d.selectors);
   });
+
+  /* LIVE UPDATE. The open page re-reads bearings-board.data.js and patches
+     only what changed: a new card is added, a departed card removed, and a
+     changed card rebuilt in place. The page itself never reloads, so typed
+     text, focus, scroll and the step on screen all stay. A card the captain
+     is working in (focus inside it, an unsent selection or typed text, or an
+     answer waiting in the queue) keeps its old content until they are done. */
+  var deferred = false;
+  function cardBusy(rec) {
+    var state = rec.target.hidden.value;
+    if (state === "queued") return true;
+    var act = document.activeElement;
+    if (act && act !== document.body && rec.card.contains && rec.card.contains(act)) return true;
+    if (state) return false;
+    var busy = false;
+    ["input", "textarea"].forEach(function (tag) {
+      Array.prototype.forEach.call(rec.card.querySelectorAll(tag), function (n) {
+        if (n.type === "hidden") return;
+        if (n.type === "radio" || n.type === "checkbox") { if (n.checked) busy = true; }
+        else if (n.value) busy = true;
+      });
+    });
+    return busy;
+  }
+  /* what Lavish would restore on a reload: the answer state and the input */
+  function carryCard(old, rec) {
+    rec.target.local = old.target.local;
+    rec.target.seen = old.target.seen;
+    if (old.target.hidden.value) setState(rec.target, old.target.hidden.value);
+    var oldForm = old.target.el, form = rec.target.el;
+    var picked = oldForm.querySelector("input[type=radio]:checked");
+    if (picked) {
+      Array.prototype.forEach.call(form.querySelectorAll("input[type=radio]"), function (r) {
+        if (r.value === picked.value) r.checked = true;
+      });
+    }
+    var oldNote = oldForm.querySelector("input[name=note]");
+    var note = form.querySelector("input[name=note]");
+    if (oldNote && note && oldNote.value) note.value = oldNote.value;
+  }
+  /* move focus back to the same control of a rebuilt priority row */
+  function renderOrderKeepFocus() {
+    var act = document.activeElement, focusKey = null, focusCls = null;
+    Array.prototype.forEach.call(orderList.children, function (row) {
+      if (!act || !row.contains || !row.contains(act)) return;
+      focusKey = row.getAttribute("data-order-key");
+      ["bb-order__up", "bb-order__down", "bb-order__open"].forEach(function (c) {
+        if (act.classList && act.classList.contains(c)) focusCls = c;
+      });
+    });
+    renderOrder();
+    if (!focusKey || !focusCls) return;
+    Array.prototype.forEach.call(orderList.children, function (row) {
+      if (row.getAttribute("data-order-key") !== focusKey) return;
+      var n = row.querySelector("." + focusCls);
+      if (n && !n.disabled && n.focus) n.focus();
+    });
+  }
+  function applyData(next) {
+    var nextKeys = {};
+    next.captains_call.forEach(function (c) { nextKeys[c.key] = true; });
+    var pinned = false;
+    var calls = next.captains_call.map(function (c) {
+      var rec = cardByKey[c.key];
+      if (rec && rec.sig !== itemSig(c) && cardBusy(rec)) { pinned = true; return rec.item; }
+      return c;
+    });
+    Object.keys(cardByKey).forEach(function (k) {
+      if (!nextKeys[k] && cardBusy(cardByKey[k])) { pinned = true; calls.push(cardByKey[k].item); }
+    });
+    var merged = {};
+    Object.keys(next).forEach(function (k) { merged[k] = next[k]; });
+    merged.captains_call = calls;
+    data = merged;
+    var activeKey = cards.length ? cardKeys[active] : null;
+    indexItems(data.captains_call, data.underway);
+    renderHeader();
+    pruneDrafts();
+    renderWaiting();
+    Object.keys(cardByKey).forEach(function (k) {
+      if (callKeySet[k]) return;
+      var rec = cardByKey[k];
+      if (rec.card.parentNode) rec.card.parentNode.removeChild(rec.card);
+      delete targets["card:" + k];
+      delete cardByKey[k];
+    });
+    data.captains_call.forEach(function (c) {
+      var old = cardByKey[c.key];
+      if (!old) { var fresh = buildCard(c); fresh.hidden = true; deck.appendChild(fresh); return; }
+      if (old.sig === itemSig(c)) return;
+      var card = buildCard(c);
+      card.hidden = old.card.hidden;
+      carryCard(old, cardByKey[c.key]);
+      deck.replaceChild(card, old.card);
+    });
+    mergeOrder(orderKeys);
+    arrangeCards();
+    syncEmpty();
+    if (cards.length) {
+      var at = activeKey === null ? -1 : cardKeys.indexOf(activeKey);
+      showCard(at >= 0 ? at : Math.min(active, cards.length - 1));
+    }
+    orderPersist();
+    if (orderSig() !== orderShown) {
+      if (dragKey) pinned = true; else renderOrderKeepFocus();
+    }
+    showStep();
+    deferred = pinned;
+  }
+  var DATA_FILE = "bearings-board.data.js";
+  var liveJson = JSON.stringify(data);
+  var polling = null, pollWaits = 0, pollSeq = 0;
+  function pollData() {
+    if (!document.body) return;
+    /* a load that never answered is dropped after a few rounds */
+    if (polling) {
+      if (++pollWaits < 5) return;
+      if (polling.parentNode) polling.parentNode.removeChild(polling);
+    }
+    pollWaits = 0;
+    var s = document.createElement("script");
+    polling = s;
+    function done() {
+      if (s.parentNode) s.parentNode.removeChild(s);
+      if (polling === s) polling = null;
+    }
+    s.onload = function () {
+      done();
+      var next = window.FM_BEARINGS_BOARD_DATA;
+      if (dataProblem(next)) return;
+      var json = JSON.stringify(next);
+      if (json === liveJson && !deferred) return;
+      liveJson = json;
+      try { applyData(next); } catch (e) { /* keep the last good board on screen */ }
+    };
+    s.onerror = done;
+    s.src = DATA_FILE + "?r=" + (++pollSeq);
+    document.body.appendChild(s);
+  }
+  setInterval(pollData, 3000);
   } catch (e) {
     renderBoardError("The board data could not be rendered");
   }
