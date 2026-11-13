@@ -19,8 +19,11 @@
 # Stale rows never reach Captain's Call:
 #   - a hold deferred to a later date (hold_until after today, or fleet bucket
 #     `dated`), from any home, is charted with `until <date>: <reason>` instead;
-#   - a card whose every PR/MR (recorded, or named in its reason) merged or closed
-#     is dropped, as is a contribution card whose PR did. Landed artifacts count as
+#   - a card whose every PR/MR (recorded, named in its reason, or its snapshot
+#     pr_url) merged or closed is dropped, as is a contribution card whose PR did;
+#     a review card (is_review in bin/fm-bearings-question-lib.sh) is also
+#     dropped once the captain approved every open one (fm_pr_viewer_approved in
+#     bin/fm-pr-lib.sh), because the review it asked for is given. Landed artifacts count as
 #     merged; open PRs are read live from GitHub, GitLab, and Forgejo through
 #     bin/fm-pr-lib.sh, in parallel, each bounded by FM_BEARINGS_BOARD_PR_TIMEOUT
 #     seconds (default 5), at most FM_BEARINGS_BOARD_PR_MAX URLs (default 24). A
@@ -42,7 +45,8 @@
 #   decisions_open  -> captains_call: one `decision` card per captain-held task id,
 #                      titled from the row's full `title_full` (else `title`), `about` from
 #                      its full `reason_full` (else `reason`),
-#                      `pr_url` and `repo` from the PR the task recorded, and a
+#                      `pr_url` and `repo` from the PR the task recorded (else the
+#                      snapshot row's `pr_url`), and a
 #                      derived default choices (bin/fm-bearings-question-lib.sh: the
 #                      reason's own numbered, lettered or listed options in full, a two-way
 #                      or, yes/no, else approve/decline; an authored overlay `options` still
@@ -208,11 +212,13 @@ PRIO_JSON=$("$SCRIPT_DIR/fm-board-priority.sh" show 2>/dev/null | jq -R . | jq -
 [ -n "$PRIO_JSON" ] || PRIO_JSON='[]'
 
 # Live state of every PR/MR a decision or contribution names, so a card whose
-# PR/MR already merged or closed leaves the board. Each lookup is one bounded
-# forge read; a failed, slow, or unparseable lookup records nothing, and an
-# unknown state keeps its card.
-pr_state_of() {  # <url> -> prints "<url>\t<merged|closed|open>" or nothing
-  local url=$1 record state merged
+# PR/MR already merged or closed leaves the board. A PR/MR a review card names
+# (is_review) that is still open is also checked for the captain's own approval
+# (fm_pr_viewer_approved) and reads "approved" when they gave it. Each lookup is
+# one bounded forge read; a failed, slow, or unparseable lookup records nothing,
+# and an unknown state keeps its card.
+pr_state_of() {  # <url> <review 0|1> -> prints "<url>\t<merged|closed|approved|open>" or nothing
+  local url=$1 review=${2:-0} record state merged approved
   fm_pr_url_parse "$url" || return 0
   case "$FM_PR_PROVIDER" in
     github) set -- github "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" ;;
@@ -221,15 +227,18 @@ pr_state_of() {  # <url> -> prints "<url>\t<merged|closed|open>" or nothing
   esac
   # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
   record=$(fm_run_timed "$PR_TIMEOUT" bash -c '
-    . "$1"; p=$2; shift 2
+    . "$1"; review=$2; p=$3; shift 3
     "fm_pr_${p}_read_record" "$@" || exit 1
     printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
-  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$@" 2>/dev/null) || return 0
+    if [ "$review" = 1 ] && fm_pr_viewer_approved "$p" "$@"; then echo approved=true; fi
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$review" "$@" 2>/dev/null) || return 0
   state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1 | tr '[:upper:]' '[:lower:]')
   merged=$(printf '%s\n' "$record" | sed -n 's/^merged=//p' | head -1)
+  approved=$(printf '%s\n' "$record" | sed -n 's/^approved=//p' | head -1)
   if [ "$merged" = true ] || [ "$state" = merged ]; then state=merged
   elif [ "$state" = closed ]; then state=closed
-  elif [ "$state" = open ] || [ "$state" = opened ]; then state=open
+  elif [ "$state" = open ] || [ "$state" = opened ]; then
+    if [ "$approved" = true ]; then state=approved; else state=open; fi
   else return 0; fi
   printf '%s\t%s\n' "$url" "$state"
 }
@@ -238,25 +247,30 @@ PR_STATES_JSON='{}'
 if [ "${FM_BEARINGS_BOARD_PR_CHECK:-1}" != 0 ]; then
   PR_TIMEOUT=${FM_BEARINGS_BOARD_PR_TIMEOUT:-5}
   PR_MAX=${FM_BEARINGS_BOARD_PR_MAX:-24}
-  pr_urls=$(printf '%s\n' "$SNAP_JSON" | jq -r --argjson max "$PR_MAX" '
+  pr_urls=$(printf '%s\n' "$SNAP_JSON" | jq -r --argjson max "$PR_MAX" "$FM_BEARINGS_QUESTION_JQ_DEFS"'
     . as $s
     | ([ ($s.landed // [])[] | .artifact | strings ]) as $landed
     | [ ($s.decisions_open // [])[] as $d
+        | (if is_review($d) then 1 else 0 end) as $rv
         | ( ($s.recorded_prs // [])[] | select(.id == $d.id) | .url ),
+          ($d.pr_url // empty),
           ( ($d.reason_full // $d.reason // "") | tostring
-            | scan("https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+") ) ]
-      + [ ($s.contributions.captain // [])[] | .url ]
-    | map(strings | select(test("^https://"))) | unique
-    | map(select(. as $u | $landed | index($u) | not)) | .[:$max][]' 2>/dev/null) || pr_urls=""
+            | scan("https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+") )
+        | {u: ., rv: $rv} ]
+      + [ ($s.contributions.captain // [])[] | {u: .url, rv: 0} ]
+    | map(select(.u | strings | test("^https://")))
+    | group_by(.u) | map({u: .[0].u, rv: (map(.rv) | max)})
+    | map(select(.u as $u | $landed | index($u) | not)) | .[:$max][]
+    | "\(.u)\t\(.rv)"' 2>/dev/null) || pr_urls=""
   if [ -n "$pr_urls" ]; then
     . "$SCRIPT_DIR/fm-timeout-lib.sh"
     . "$SCRIPT_DIR/fm-pr-lib.sh"
     pr_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-board-pr.XXXXXX")
     trap 'rm -rf "$pr_tmp"' EXIT
     i=0
-    while IFS= read -r u; do
+    while IFS="$(printf '\t')" read -r u rv; do
       i=$((i + 1))
-      pr_state_of "$u" >"$pr_tmp/$i" 2>/dev/null &
+      pr_state_of "$u" "$rv" >"$pr_tmp/$i" 2>/dev/null &
     done <<URLS
 $pr_urls
 URLS
@@ -318,12 +332,17 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   | ( [ $landed_rows[] | .artifact | strings ] ) as $landed_urls
   | def pr_state($u): if ($landed_urls | index($u)) then "merged" else ($pr_states[$u] // null) end;
     def row_urls($d):
-      [ pr_for($d.id; $contrib; $recorded),
+      [ pr_for($d.id; $contrib; $recorded), $d.pr_url,
         ( ($d.reason_full // $d.reason // "") | tostring
           | scan("https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+") ) ]
       | map(strings) | unique;
-    def pr_finished($urls):
-      ($urls | length) > 0 and all($urls[]; pr_state(.) as $st | $st == "merged" or $st == "closed");
+    # "approved" (the captain approved it) is open work, except that it settles
+    # a review card (is_review): the review it asked for is given.
+    def pr_finished($urls; $review):
+      ($urls | length) > 0
+      and all($urls[]; pr_state(.) as $st
+                       | $st == "merged" or $st == "closed" or ($review and $st == "approved"));
+    def pr_finished($urls): pr_finished($urls; false);
     def round_of:
       ([capture("^(?<b>.+?)-(?:r|round-?|v)(?<n>[0-9]{1,2})$")][0]
        | if . == null then null else {b, n: (.n | tonumber)} end) as $m
@@ -338,7 +357,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | ($d.owner // "(main)") as $o
       | ($id | round_of) as $r
       | $id != "" and any($known[]; .o == $o and .r.b == $r.b and .r.n > $r.n);
-    ( [ $held[] | select((pr_finished(row_urls(.)) or superseded(.)) | not) ] ) as $held
+    ( [ $held[] | select((pr_finished(row_urls(.); is_review(.)) or superseded(.)) | not) ] ) as $held
   # A status decision row (source "status") carries the asking task or home as its
   # title; the card title says what the question is instead.
   | def short_text_n($n):
@@ -391,6 +410,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       (($d.handed_at | tostring | .[:16] | sub("T"; " ")) + " UTC") as $when
       | if $d.handed_via == "reconcile" then
           "Marked out of date on the board at " + $when + "; firstmate is checking it"
+        elif $d.handed_via == "board" then
+          "Answered on the board at " + $when
+          + "; it comes back only if the question is raised again"
         else
           "With " + ($d.handed_task // "the worker") + " since " + $when
           + "; it raises a fresh question when it needs the captain"
@@ -474,7 +496,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     ( $question_rows
       | map(
           . as $d
-          | pr_for($d.id; $contrib; $recorded) as $pr
+          | (pr_for($d.id; $contrib; $recorded)
+             // (if ($d.pr_url | https_url) then $d.pr_url else null end)) as $pr
           | ( {
               key: $d.key,
               type: "decision",

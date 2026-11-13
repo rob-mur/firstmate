@@ -3556,6 +3556,101 @@ test_a_ready_review_page_is_a_board_row() {
   pass "a done task naming a live review page is a board row, one without a page is not"
 }
 
+# A captured board result (sanitized from a real Lavish feedback result): one
+# answer line per card, the Context data JSON escaped inside a CSV cell.
+write_board_result() {  # <home> <name> <epoch> <key:selection:note>...
+  local home=$1 name=$2 epoch=$3 file entry key sel note n=0
+  shift 3
+  mkdir -p "$home/state/procevent-inbox"
+  file="$home/state/procevent-inbox/lavish-$name.result"
+  {
+    printf 'session:\n  file: %s/.lavish/bearings-board.html\n  status: feedback\n' "$home"
+    printf 'prompts[%s]{uid,prompt,selector,tag,text}:\n' "$#"
+    for entry in "$@"; do
+      n=$((n + 1))
+      key=${entry%%:*}; sel=${entry#*:}; note=${sel#*:}; sel=${sel%%:*}
+      printf '  "%s","Captain'"'"'s Call answer - %s: %s\\n\\nContext data:\\n{\\n  \\"schema\\": \\"fm-bearings-answer.v1\\",\\n  \\"question\\": \\"%s\\",\\n  \\"selection\\": \\"%s\\",\\n  \\"note\\": \\"%s\\",\\n  \\"order\\": %s\\n}",form#bb-card-x,choice,"%s -> %s"\n' \
+        "$n" "$key" "$sel" "$key" "$sel" "$note" "$n" "$key" "$sel"
+    done
+  } > "$file"
+  touch -d "@$epoch" "$file"
+}
+
+# Fixture rows for the board-answer tests: a main captain hold, a main status
+# question, and a ready review page, each raised at 1794236000.
+write_board_answer_fixture() {  # <home>
+  local home=$1
+  write_fixture "$home"
+  sed -i '/^## Queued/a\
+- [ ] board-call - Choose the board option (repo: firstmate) (kind: captain) (since 2026-11-01) (hold: ship the board option?) (hold-kind: captain)\
+  Captain hold set: 2026-11-09T14:53:20Z' "$home/data/backlog.md"
+  printf 'needs-decision [key=pick] [at=1794236000]: pick layout A or B?\n' > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
+  printf 'done [at=1794236000]: report at data/scout-x/report.md; review page live at http://example.invalid:4000/session/5e96b7b8f3b4f9db\n' \
+    > "$home/state/scout-x.status"
+}
+
+handed_by_board() {  # <json> -> sorted keys of rows handed off on the board
+  printf '%s' "$1" | jq -r '[.decisions_open[] | select(.handed_via == "board") | .key] | sort | join(",")'
+}
+
+test_a_board_answer_hands_off_every_kind_of_card_until_it_is_raised_again() {
+  local home fakebin json
+  home=$(make_home board-answer); write_board_answer_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '[.decisions_open[] | select(.key == "board-call" or .key == "status.ship-task.pick"
+      or .key == "review.scout-x") | select(.handed_via == null)] | length == 3' >/dev/null \
+    || fail "the fixture does not raise the three cards unanswered: $json"
+  # An answer older than the question, "later" on a review, and an empty answer say nothing.
+  write_board_result "$home" old 1794235000 "board-call:go:"
+  write_board_result "$home" new 1794237000 "review.scout-x:later:" "status.ship-task.pick::"
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "" "$(handed_by_board "$json")" "an old, deferred, or empty board answer handed a card off"
+  write_board_result "$home" answered 1794238000 "board-call:go:" "status.ship-task.pick:B:" "review.scout-x:reconcile:already read"
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "board-call,review.scout-x,status.ship-task.pick" "$(handed_by_board "$json")" \
+    "a card the captain answered on the board still asks"
+  printf '%s' "$json" | jq -e '.decisions_open[] | select(.key == "board-call")
+      | .handed_task == "firstmate" and (.handed_at | test("^2026-"))' >/dev/null \
+    || fail "a board hand-off does not say when or to whom: $json"
+  # The worker asks again, the hold is re-raised, and the review task finishes again.
+  printf 'needs-decision [key=pick] [at=1794239000]: pick layout A or B after the rework?\n' >> "$home/state/ship-task.status"
+  printf 'captain-held [at=1794239000]: board-call raised again with a new option\n' >> "$home/state/scout-x.status"
+  printf 'done [at=1794239000]: review page live at http://example.invalid:4000/session/5e96b7b8f3b4f9db\n' >> "$home/state/scout-x.status"
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "" "$(handed_by_board "$json")" "a re-raised card stayed handed off by an older board answer"
+  pass "a board answer hands off a hold, a status question, and a review page until each is raised again"
+}
+
+test_a_board_answer_from_another_page_is_ignored() {
+  local home fakebin json
+  home=$(make_home board-answer-other); write_board_answer_fixture "$home"
+  write_board_result "$home" other 1794238000 "board-call:go:"
+  sed -i 's#/\.lavish/bearings-board\.html#/.lavish/some-review.html#' "$home/state/procevent-inbox/lavish-other.result"
+  touch -d @1794238000 "$home/state/procevent-inbox/lavish-other.result"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "" "$(handed_by_board "$json")" "an answer captured from another page handed a board card off"
+  pass "only answers captured from the bearings board hand a card off"
+}
+
+test_a_hold_gains_the_pr_link_its_home_recorded() {
+  local home fakebin json
+  home=$(make_home hold-pr-link); write_fixture "$home"
+  sed -i '/^## Queued/a\
+- [ ] merge-call - Merge the ship (repo: firstmate) (kind: captain) (hold: should PR 9 merge now?) (hold-kind: captain)\
+- [ ] other-call - Merge another (repo: firstmate) (kind: captain) (hold: should PR 12 merge now?) (hold-kind: captain)' "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "https://github.com/kunchenguid/firstmate/pull/9" \
+    "$(printf '%s' "$json" | jq -r '.decisions_open[] | select(.key == "merge-call") | .pr_url')" \
+    "a hold naming a PR its home recorded did not gain its link"
+  assert_equals "null" "$(printf '%s' "$json" | jq -r '.decisions_open[] | select(.key == "other-call") | .pr_url')" \
+    "a hold naming a PR no record has gained a link"
+  pass "a hold that names a PR its home recorded gains that PR's link, and no other"
+}
+
 fm_test_run \
   test_full_captain_questions_survive_local_and_secondmate_projection \
   test_supplied_secondmate_questions_and_legacy_optional_fields \
@@ -3623,4 +3718,7 @@ fm_test_run \
   test_secondmate_questions_from_the_parent_log_survive_an_invalid_home \
   test_a_ready_review_page_is_a_board_row \
   test_a_resolved_status_question_is_not_a_board_row \
-  test_a_question_hold_in_a_hidden_bucket_still_reaches_the_board
+  test_a_question_hold_in_a_hidden_bucket_still_reaches_the_board \
+  test_a_board_answer_hands_off_every_kind_of_card_until_it_is_raised_again \
+  test_a_board_answer_from_another_page_is_ignored \
+  test_a_hold_gains_the_pr_link_its_home_recorded

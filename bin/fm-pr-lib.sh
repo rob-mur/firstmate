@@ -1417,6 +1417,55 @@ FIELDS
 # URL, because Gerrit composes it from gerrit.canonicalWebUrl and omits it when
 # that setting is unset, which would turn every read on such a server into a
 # permanent unknown.
+# Whether the authenticated forge user's own latest verdict on one PR/MR is an
+# approval: on GitHub and Forgejo their last review that approves or requests
+# changes (a dismissed Forgejo review does not count) approves, and on GitLab
+# they are among the merge request's approvers. Returns 0 only for a readable
+# approval; no approval, a missing tool, or any read failure returns 1, so a
+# caller treats an unknown as not approved. The arguments are those of the
+# provider's fm_pr_<provider>_read_record.
+fm_pr_viewer_approved() {  # github <host> <owner> <repo> <number> | gitlab|forgejo <host> <path> <number>
+  local provider=${1-} me json login
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$provider" in
+    github)
+      [ $# -eq 5 ] || return 1
+      command -v gh >/dev/null 2>&1 || return 1
+      case "$5" in ''|*[!0-9]*) return 1 ;; esac
+      me=$( (fm_pr_github_host_export "$2"; gh api user --jq .login) 2>/dev/null) || return 1
+      json=$( (fm_pr_github_host_export "$2"; gh api --paginate --slurp "repos/$3/$4/pulls/$5/reviews") 2>/dev/null) || return 1
+      printf '%s' "$json" | jq -e --arg me "$me" '
+        [ (if type == "array" and (.[0] | type) == "array" then add else . end)[]
+          | select(.user.login == $me and (.state == "APPROVED" or .state == "CHANGES_REQUESTED")) ]
+        | (last // {}) | .state == "APPROVED"' >/dev/null 2>&1
+      ;;
+    gitlab)
+      [ $# -eq 4 ] || return 1
+      command -v glab >/dev/null 2>&1 || return 1
+      case "$4" in ''|*[!0-9]*) return 1 ;; esac
+      me=$(GITLAB_HOST="$2" glab api user 2>/dev/null | jq -er '.username | strings') || return 1
+      json=$(GITLAB_HOST="$2" glab api "projects/$(printf '%s' "$3" | jq -sRr @uri)/merge_requests/$4/approvals" 2>/dev/null) || return 1
+      printf '%s' "$json" | jq -e --arg me "$me" '
+        any((.approved_by // [])[]; .user.username == $me)' >/dev/null 2>&1
+      ;;
+    forgejo)
+      [ $# -eq 4 ] || return 1
+      case "$4" in ''|*[!0-9]*) return 1 ;; esac
+      login=$(fm_pr_forgejo_login "$2") || return 1
+      me=$(tea login list --output json 2>/dev/null \
+        | jq -er --arg n "$login" '[.[] | select(.name == $n) | .user | strings | select(length > 0)][0]') \
+        || me=$(tea api --login "$login" /user 2>/dev/null | jq -er '.login | strings') || return 1
+      json=$(tea api --login "$login" --repo "$3" "/repos/{owner}/{repo}/pulls/$4/reviews" 2>/dev/null) || return 1
+      printf '%s' "$json" | jq -e --arg me "$me" '
+        type == "array"
+        and ([ .[] | select(.user.login == $me and .dismissed != true
+                            and (.state == "APPROVED" or .state == "REQUEST_CHANGES")) ]
+             | (last // {}) | .state == "APPROVED")' >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_pr_gerrit_read_change() {  # <host> <number>
   local host=$1 number=$2 json
   command -v gerrit-axi >/dev/null 2>&1 || return 1

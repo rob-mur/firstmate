@@ -452,6 +452,24 @@ test_a_secondmate_change_refreshes_the_parent_board() {
   pass "a secondmate kick or wake refreshes the parent board once, and a remote route does not"
 }
 
+test_new_board_code_is_installed_with_an_unchanged_fleet() {
+  local home tmpl
+  home=$(make_home new-code)
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  cp "$home/.lavish/bearings-board.app.js" "$home/old-app.js"
+  tmpl="$home/template.html"
+  awk '{ print } $0 == "<script>" { print "/* a newer board code */" }' \
+    "$ROOT/.agents/skills/bearings/assets/board-template.html" > "$tmpl"
+  FM_BEARINGS_BOARD_TEMPLATE="$tmpl" in_home "$home" "$REFRESH" || fail "refresh with new board code failed"
+  [ "$(rebuilt_count "$home")" = 2 ] || fail "new board code did not rebuild an unchanged fleet's board"
+  cmp -s "$home/old-app.js" "$home/.lavish/bearings-board.app.js" \
+    && fail "the rebuild did not install the new board code"
+  FM_BEARINGS_BOARD_TEMPLATE="$tmpl" in_home "$home" "$REFRESH" || fail "repeat refresh failed"
+  [ "$(rebuilt_count "$home")" = 2 ] || fail "unchanged code and fleet rebuilt the board again"
+  pass "new board code is installed on the next refresh even when the fleet has not moved"
+}
+
 fm_test_run \
   test_a_home_without_a_board_is_left_alone \
   test_the_board_is_rebuilt_only_when_fleet_state_changes \
@@ -469,4 +487,5 @@ fm_test_run \
   test_a_board_reconcile_request_moves_the_card_to_waiting_at_once \
   test_an_answered_hold_ranked_first_never_returns_as_a_card \
   test_a_done_task_ranked_first_never_renders_as_a_card \
-  test_a_secondmate_change_refreshes_the_parent_board
+  test_a_secondmate_change_refreshes_the_parent_board \
+  test_new_board_code_is_installed_with_an_unchanged_fleet
