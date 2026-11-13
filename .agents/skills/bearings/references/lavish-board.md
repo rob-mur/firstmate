@@ -9,8 +9,9 @@
 It maps the fleet snapshot to the fm-bearings-board.v1 payload deterministically: one decision card per captain-held task id (keyed by the task id, titled and described from the held task's own record), every non-done in-flight row as Underway with its projected `name`, landed rows, and the gates and warnings as Charted Next with `kind`, `dispatchable`, `filed`, `repo` and the omitted-row counts derived from structured fields.
 Run `bin/fm-bearings-board-payload.sh > <payload.json>` (add `--include-prs` when the digest used live PRs), then `bin/fm-bearings-board.sh build <payload.json>`.
 Add nothing for a plain board.
-The board opens on step 1, one priority list of every Captain's Call item and every task under way, which the captain reorders (drag or arrows), most important first.
-Clicking a decision row opens its card; "Start answering" deals the cards in the list's order; a task under way is a priority-only row with no card unless it is blocked or needs a decision, in which case it opens as a question card.
+The board opens on step 1, one priority list of every Captain's Call decision, which the captain reorders (drag or arrows), most important first.
+Clicking a decision row opens its card; "Start answering" deals the cards in the list's order.
+A task under way is not a decision, so the board never lists it unless it is blocked or needs a decision, in which case it is a question card; a sent priority carries the tasks under way after the decisions in their recorded order, so their stored rank survives.
 The "bearings" header on the page links back to the board.
 The list's order survives a refresh and rebuild like a queued answer, and a row added since asks to be placed again.
 `bin/fm-bearings-board-payload.sh` already sorts cards and tasks by the stored priority, so a rebuilt board starts in the captain's order.
