@@ -180,13 +180,16 @@
 # the boundary), FM_SUPERVISION_HOST_TURN_TIMEOUT (1200), FM_SUPERVISION_HOST_ROTATE_TURNS (20:
 # a new engine conversation after this many turns; every main session start
 # also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
-# successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
+# successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (3: seconds
+# between the arm identity refresh, park boundary, and warm-compaction checks).
 # Park duration uses Bash's process-relative SECONDS counter (including Bash
 # 3.2), while durable timestamps still use epoch time. This is not a portable
-# monotonic-clock guarantee. Arm exit probes use ordinary 0.5-second child
-# sleeps within the unchanged POLL-cadence maintenance and boundary checks;
-# close observation and a shell-only caught signal may wait that interval plus
-# work/scheduling time. No stop-signal disposition or cleanup bound changes.
+# monotonic-clock guarantee. Arm exit probes use ordinary 1-second child sleeps
+# within the POLL-cadence maintenance and boundary checks, and the first
+# status line is still checked after every probe until it streams; close
+# observation and a shell-only caught signal may wait that interval plus
+# work/scheduling time, and the park boundary may be noticed up to one POLL
+# late. No stop-signal disposition or cleanup bound changes.
 # FM_TEST_SUPERVISION_HOST_CLOCK names a file holding the park's elapsed
 # seconds, which the park and turn boundary checks read in place of SECONDS
 # only when FM_TEST_SEAM=1; tests/lib.sh arms the marker for isolated suites.
@@ -241,7 +244,7 @@ PARK_LIMIT=$(numeric_or "${FM_SUPERVISION_HOST_PARK_LIMIT:-}" "$PARK_SECONDS")
 TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
 READY_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" 25)
-POLL=$(numeric_or "${FM_SUPERVISION_HOST_POLL:-}" 1)
+POLL=$(numeric_or "${FM_SUPERVISION_HOST_POLL:-}" 3)
 WARM_COMPACT_TICK=$(numeric_or "${FM_WARM_COMPACT_TICK:-}" 60)
 COOLDOWN=$FM_SUPERVISION_HOST_COOLDOWN
 COOLDOWN_MAX=3600
@@ -665,11 +668,13 @@ await_close() {
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
     warm_compact_tick
-    # Probe the arm's exit twice a second between POLL-cadence checks, without
-    # changing the outer identity refresh, readiness, or boundary cadence.
-    i=$((POLL * 2))
+    # Probe the arm's exit once a second between POLL-cadence checks. Until the
+    # first status line has streamed, return to the outer checks after each
+    # probe so readiness still reaches the caller within about a second.
+    i=$POLL
+    [ "$READY_PENDING" -eq 0 ] || i=1
     while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
-      sleep 0.5
+      sleep 1
       i=$((i - 1))
     done
   done
