@@ -286,6 +286,27 @@ a { color: inherit; text-decoration: none; }
 }
 .bb-empty { padding: 18px; font-size: var(--fs-sm); color: var(--text-muted); }
 
+/* Pages shown in place: a tab per page in the header, and the page view that
+   replaces the board while a page is open. */
+.bb-tabs { display: flex; align-items: center; gap: 6px; overflow-x: auto; min-width: 0; }
+.bb-tabs[hidden] { display: none; }
+.bb-tab {
+  font: inherit; font-size: var(--fs-xs); font-weight: 700; white-space: nowrap; cursor: pointer;
+  color: var(--text-body); background: var(--surface-card); border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-pill); padding: 5px 12px; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+}
+.bb-tab:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.bb-tab.is-active { color: var(--white); background: var(--navy-600); border-color: var(--ink-900); }
+.bb-tab.is-new::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px;
+  border-radius: 999px; background: var(--rust-500); vertical-align: 1px; }
+.bb-main[hidden], .bb-pageview[hidden], .bb-pageframe[hidden] { display: none; }
+.bb-pageview { max-width: none; margin: 0; padding: 10px 16px 0; }
+.bb-pagebar { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; }
+.bb-pagebar__title { flex: 1; min-width: 0; font-weight: 800; color: var(--text-strong);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bb-pageframe { display: block; width: 100%; height: calc(100vh - 130px); min-height: 320px;
+  border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); background: var(--white); }
+
 .bb-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--border-default); padding-top: 14px; }
 
 @media (max-width: 900px) {
@@ -305,6 +326,7 @@ a { color: inherit; text-decoration: none; }
       </span>
       <span class="bb-brand__wm">bearings</span>
     </a>
+    <nav class="bb-tabs" id="bb-tabs" aria-label="Board and open pages" hidden></nav>
   </div>
 </header>
 
@@ -351,6 +373,16 @@ a { color: inherit; text-decoration: none; }
   </footer>
 
 </main>
+
+<!-- A page shown in place. bin/fm-board-page.sh's header owns the contract. -->
+<section class="bb-pageview" id="bb-pageview" hidden>
+  <div class="bb-pagebar">
+    <button type="button" class="fm-btn fm-btn--sm" id="bb-page-back">Back to board</button>
+    <span class="bb-pagebar__title" id="bb-page-title"></span>
+    <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-page-end">End this page</button>
+  </div>
+  <div id="bb-pageframes"></div>
+</section>
 
 <!-- THE DATA FILE. bin/fm-bearings-board.sh build writes the fresh
      fm-bearings-board.v1 payload to bearings-board.data.js beside this page and
@@ -646,9 +678,8 @@ a { color: inherit; text-decoration: none; }
       a.href = l.url; a.target = "_blank"; a.rel = "noopener";
       /* Lavish annotate mode lets native controls act but turns a plain link
          click into an annotation note; data-lavish-action makes it navigate.
-         Only these new-tab links carry it: the header link reloads the board
-         inside Lavish's frame without Lavish's page script, where a queued
-         answer never reaches Lavish, so annotate mode keeps blocking it. */
+         Only these new-tab links carry it: the header link only switches
+         back to the board view (PAGES SHOWN IN PLACE below). */
       a.setAttribute("data-lavish-action", "");
       pad.appendChild(a);
     });
@@ -1074,6 +1105,138 @@ a { color: inherit; text-decoration: none; }
       if (n && !n.disabled && n.focus) n.focus();
     });
   }
+  /* PAGES SHOWN IN PLACE. The board is the one tab of the whole app: every
+     live page registered through bin/fm-board-page.sh arrives in the data's
+     `pages` list and gets a header tab and a frame here, so a page opens
+     inside this tab and the Board tab brings the captain back. A frame is
+     loaded once and never reloaded: the page updates itself from its own data
+     file, and switching tabs only hides it, so text typed in a page survives
+     both. A page's lavish-relay.js passes its three Lavish calls up to this
+     board, which queues them on the board's own Lavish session, labelled with
+     the page, so the router hands each answer to that page's agent. Ending a
+     page ends that page alone. A new page never takes the screen by itself;
+     its tab shows a dot until opened. */
+  var tabsEl = document.getElementById("bb-tabs");
+  var mainView = document.querySelector(".bb-main");
+  var pageView = document.getElementById("bb-pageview");
+  var frameHost = document.getElementById("bb-pageframes");
+  var pageTitleEl = document.getElementById("bb-page-title");
+  var pageById = {};
+  var endedHere = {};
+  var shownPage = null;
+  var boardTab = el("button", "bb-tab is-active", "Board");
+  boardTab.type = "button";
+  boardTab.addEventListener("click", function () { showPage(null); });
+  tabsEl.appendChild(boardTab);
+  function validPage(p) {
+    return !!p && typeof p.id === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(p.id) &&
+      typeof p.title === "string" && p.title.length > 0 && p.href === "pages/" + p.id + "/page.html";
+  }
+  function showPage(id) {
+    if (id && !pageById[id]) id = null;
+    shownPage = id;
+    mainView.hidden = !!id;
+    pageView.hidden = !id;
+    boardTab.classList.toggle("is-active", !id);
+    Object.keys(pageById).forEach(function (k) {
+      var p = pageById[k];
+      p.frame.hidden = k !== id;
+      p.tab.classList.toggle("is-active", k === id);
+      if (k === id) p.tab.classList.remove("is-new");
+    });
+    pageTitleEl.textContent = id ? pageById[id].title : "";
+  }
+  function dropPage(id) {
+    var p = pageById[id];
+    if (!p) return;
+    if (p.frame.parentNode) p.frame.parentNode.removeChild(p.frame);
+    if (p.tab.parentNode) p.tab.parentNode.removeChild(p.tab);
+    delete pageById[id];
+    if (shownPage === id) showPage(null);
+    tabsEl.hidden = !Object.keys(pageById).length;
+  }
+  function syncPages(list) {
+    var live = {};
+    (Array.isArray(list) ? list : []).filter(validPage).forEach(function (p) {
+      live[p.id] = true;
+      if (endedHere[p.id]) return;
+      var rec = pageById[p.id];
+      if (rec) {
+        if (rec.title !== p.title) {
+          rec.title = p.title;
+          rec.tab.textContent = p.title;
+          rec.frame.title = p.title;
+          if (shownPage === p.id) pageTitleEl.textContent = p.title;
+        }
+        return;
+      }
+      var frame = document.createElement("iframe");
+      frame.id = stableId("bb-page-frame-", p.id);
+      frame.className = "bb-pageframe";
+      frame.title = p.title;
+      frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads");
+      frame.hidden = true;
+      frame.src = p.href;
+      frameHost.appendChild(frame);
+      var tab = el("button", "bb-tab is-new", p.title);
+      tab.type = "button";
+      tab.title = p.title;
+      tab.addEventListener("click", function () { showPage(p.id); });
+      tabsEl.appendChild(tab);
+      pageById[p.id] = { id: p.id, title: p.title, frame: frame, tab: tab };
+    });
+    Object.keys(pageById).forEach(function (k) { if (!live[k]) dropPage(k); });
+    Object.keys(endedHere).forEach(function (k) { if (!live[k]) delete endedHere[k]; });
+    tabsEl.hidden = !Object.keys(pageById).length;
+  }
+  function queueForPage(p, tag, prompt, opts) {
+    if (!window.lavish || !window.lavish.queuePrompt) return;
+    var o = opts && typeof opts === "object" ? opts : {};
+    var said = typeof o.text === "string" ? o.text : "";
+    window.lavish.queuePrompt(String(prompt == null ? "" : prompt), {
+      tag: "page",
+      text: p.title + ": " + (said || tag),
+      queueKey: typeof o.queueKey === "string" && o.queueKey ? "page:" + p.id + ":" + o.queueKey : "",
+      element: p.frame,
+      data: { schema: "fm-board-page.v1", page: p.id, tag: tag, text: said, data: o.data === undefined ? null : o.data }
+    });
+  }
+  function sendAll() {
+    if (window.lavish && window.lavish.sendQueuedPrompts) window.lavish.sendQueuedPrompts();
+  }
+  function endPage(p) {
+    queueForPage(p, "page-end", "The captain ended the page " + p.title + ".", { text: "ended" });
+    sendAll();
+    endedHere[p.id] = true;
+    dropPage(p.id);
+  }
+  document.getElementById("bb-page-back").addEventListener("click", function () { showPage(null); });
+  document.getElementById("bb-page-end").addEventListener("click", function () {
+    if (shownPage && pageById[shownPage]) endPage(pageById[shownPage]);
+  });
+  /* inside the app the brand goes back to the board instead of loading the
+     page file into this frame */
+  document.querySelector(".bb-brand").addEventListener("click", function (ev) {
+    ev.preventDefault();
+    showPage(null);
+  });
+  window.addEventListener("message", function (ev) {
+    var d = ev && ev.data;
+    if (!d || typeof d !== "object" || typeof d.type !== "string" || d.type.indexOf("fm-board-page:") !== 0) return;
+    var p = null;
+    Object.keys(pageById).forEach(function (k) { if (pageById[k].frame.contentWindow === ev.source) p = pageById[k]; });
+    if (!p) return;
+    if (d.type === "fm-board-page:queuePrompt") {
+      var o = d.opts && typeof d.opts === "object" ? d.opts : {};
+      queueForPage(p, typeof o.tag === "string" && o.tag ? o.tag : "prompt", d.prompt, o);
+    } else if (d.type === "fm-board-page:sendQueuedPrompts") {
+      sendAll();
+    } else if (d.type === "fm-board-page:endPage") {
+      endPage(p);
+    }
+  });
+  syncPages(data.pages);
+
   function applyData(next) {
     var nextKeys = {};
     next.captains_call.forEach(function (c) { nextKeys[c.key] = true; });
@@ -1095,6 +1258,7 @@ a { color: inherit; text-decoration: none; }
     renderHeader();
     pruneDrafts();
     renderWaiting();
+    syncPages(data.pages);
     Object.keys(cardByKey).forEach(function (k) {
       if (callKeySet[k]) return;
       var rec = cardByKey[k];
