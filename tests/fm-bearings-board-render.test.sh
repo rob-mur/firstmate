@@ -189,6 +189,66 @@ run_board() {  # <home> <actions>
     || fail "the board could not be exercised with: $2"
 }
 
+# Write the next payload (the current one through a jq filter) and print a
+# command that rebuilds the board from it, for the harness's run action.
+rebuild_command() {  # <home> <jq-filter>
+  local home=$1
+  jq "$2" "$home/payload.json" > "$home/next.json" || fail "the next payload could not be written"
+  printf 'PATH=%q FM_HOME=%q FM_STATE_OVERRIDE=%q FM_DATA_OVERRIDE=%q FM_PROCEVENT_CLAIM_ROOT=%q LAVISH_AXI_STATE_DIR=%q %q build %q >/dev/null' \
+    "$home/fakebin:$PATH" "$home" "$home/state" "$home/data" "$home/procevent-claims" \
+    "$home/lavish-state" "$BOARD" "$home/next.json"
+}
+
+page_identity() {  # <home>
+  local page="$1/.lavish/bearings-board.html"
+  printf '%s %s' "$(ls -i "$page" | awk '{print $1}')" "$(cksum < "$page")"
+}
+
+test_a_refresh_patches_changed_cards_without_reloading_or_touching_typed_text() {
+  local home out before run
+  home=$(make_home live-patch)
+  build_call_board "$home" '["k1","k2","k3"]'
+  before=$(page_identity "$home")
+  run=$(rebuild_command "$home" '.captains_call |= (map(select(.key != "k3"))
+    | map(if .key == "k2" then .title = "Card k2 reworded" else . end)
+    + [.[0] | .key = "k4" | .title = "Card k4"] + [.[0] | .key = "k5" | .title = "Card k5"])')
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "go,type:k1,focus:k1,run,poll")
+  printf '%s' "$out" | jq -e '
+    (.cards | map(.key)) == ["k1","k2","k4","k5"]
+      and .cards[0].selection == "a" and .cards[0].note == "typed k1"
+      and .cards[0].hidden == false
+      and .cards[1].title == "Card k2 reworded" and .cards[2].title == "Card k4"
+      and .cards[1].hidden and .cards[2].hidden
+      and .order.list == ["k1","k2","k4","k5"] and .order.deckShown
+      and .sub == "4 items wait on you, captain"
+      and .reloads == [] and .polls == 1
+  ' >/dev/null || fail "a refresh disturbed the open card or reloaded the page: $out"
+  [ "$(page_identity "$home")" = "$before" ] \
+    || fail "the rebuild rewrote the page file, which makes Lavish reload the open page"
+  pass "a refresh patches only the changed cards and keeps typed text, the open card and the page"
+}
+
+test_a_refresh_leaves_a_card_alone_while_it_is_being_edited() {
+  local home out run
+  home=$(make_home live-busy)
+  build_call_board "$home" '["k1","k2"]'
+  run=$(rebuild_command "$home" '.captains_call |= map(.title += " reworded")')
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "go,type:k1,focus:k2,run,poll")
+  printf '%s' "$out" | jq -e '
+    .cards[0].title == "Card k1" and .cards[0].note == "typed k1"
+      and .cards[1].title == "Card k2" and .reloads == []
+  ' >/dev/null || fail "a refresh replaced a card that was being edited: $out"
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "go,focus:k2,run,poll,blur,poll")
+  printf '%s' "$out" | jq -e '
+    .cards[0].title == "Card k1 reworded" and .cards[1].title == "Card k2 reworded"
+      and .reloads == []
+  ' >/dev/null || fail "a card left alone while focused never caught up once focus left: $out"
+  pass "a refresh leaves a card alone while it is being edited and updates it once it is not"
+}
+
+test_a_refresh_patches_changed_cards_without_reloading_or_touching_typed_text
+test_a_refresh_leaves_a_card_alone_while_it_is_being_edited
+
 test_every_card_type_renders_its_links() {
   local home data out
   home=$(make_home card-links)
