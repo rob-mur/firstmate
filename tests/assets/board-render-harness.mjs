@@ -7,7 +7,8 @@
 // beside the page, the way the page's own <script src> loads it.
 // Prints one JSON document:
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text,action}]}],
+//     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text,action}],
+//     pages:[{page,text}],notes:[text]}],
 //     empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -150,6 +151,12 @@ const call = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
   links: card.findAll((n) => n.tagName === "a")
     .map((a) => ({ href: a.href ?? "", text: a.textContent,
       action: a.attributes["data-lavish-action"] != null })),
+  // In-place page buttons, by the board page each opens, and the plain notes a
+  // card shows for a page the board does not have.
+  pages: card.findAll((n) => n.tagName === "button" && n.attributes["data-board-page"] != null)
+    .map((b) => ({ page: b.attributes["data-board-page"], text: b.textContent })),
+  notes: card.findAll((n) => n.className.includes("bb-decision__link--note"))
+    .map((n) => n.textContent),
 }));
 const waitingNode = byId.get("bb-waiting");
 const waiting = {

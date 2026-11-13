@@ -200,6 +200,8 @@ a { color: inherit; text-decoration: none; }
 .bb-ctx__v { font-size: var(--fs-base); color: var(--text-muted); line-height: 1.4; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; display: block; overflow-wrap: anywhere; word-break: break-word; line-height: 1.35; }
 .bb-decision__link:hover { text-decoration: underline; }
+button.bb-decision__link { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
+.bb-decision__link--note { color: var(--text-faint); font-weight: 400; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
    the card pad, and the foot rides margin-top:auto so every Queue answer button
    sits on the same baseline with identical breathing room. */
@@ -553,18 +555,29 @@ a { color: inherit; text-decoration: none; }
     return row;
   }
 
-  /* Every card type shows its PR and each extra link the same way; the
-     validator already limits schemes, and this keeps a bad href unrenderable. */
+  /* Every card type shows its PR and each extra link the same way. A link to
+     a board page opens that page in place (PAGES SHOWN IN PLACE below); the
+     build already turned every Lavish page link into one, or into a note that
+     the page is not in the board yet, so only an https link leaves the board
+     and a Lavish url never renders. */
   function cardLinks(item) {
     var out = [], seen = {};
-    function add(url, label) {
-      if (typeof url !== "string" || seen[url]) return;
-      if (!/^(https:\/\/|http:\/\/dev-1\.tailf848b0\.ts\.net:4387(\/|\?|#|$))/.test(url)) return;
-      seen[url] = true;
-      out.push({ url: url, label: label });
+    function add(l) {
+      if (!l || typeof l !== "object") return;
+      var label = typeof l.label === "string" ? l.label : "";
+      if (typeof l.page === "string") {
+        if (seen["page:" + l.page]) return;
+        seen["page:" + l.page] = true;
+        out.push({ page: l.page, label: label || "Page" });
+      } else if (l.not_in_board === true) {
+        out.push({ note: (label || "Lavish page") + " - not in the board yet" });
+      } else if (typeof l.url === "string" && !seen[l.url] && /^https:\/\//.test(l.url)) {
+        seen[l.url] = true;
+        out.push({ url: l.url, label: label });
+      }
     }
-    add(item.pr_url);
-    (item.links || []).forEach(function (l) { add(l && l.url, l && l.label); });
+    add({ url: item.pr_url });
+    (item.links || []).forEach(add);
     return out;
   }
 
@@ -682,6 +695,18 @@ a { color: inherit; text-decoration: none; }
       pad.appendChild(ctx);
     }
     cardLinks(item).forEach(function (l) {
+      if (l.note) {
+        pad.appendChild(el("span", "bb-decision__link bb-decision__link--note", l.note));
+        return;
+      }
+      if (l.page) {
+        var b = el("button", "bb-decision__link bb-decision__link--page", l.label);
+        b.type = "button";
+        b.setAttribute("data-board-page", l.page);
+        b.addEventListener("click", function () { showPage(l.page); });
+        pad.appendChild(b);
+        return;
+      }
       var a = el("a", "bb-decision__link", l.label ? l.label + " - " + l.url : l.url);
       a.href = l.url; a.target = "_blank"; a.rel = "noopener";
       /* Lavish annotate mode lets native controls act but turns a plain link
