@@ -534,6 +534,48 @@ test_event_hints_follow_reconciled_current_state() {
   pass "snapshot event hints follow reconciled current state"
 }
 
+# The per-task current-state read is cached while the task's status log and
+# metadata are unchanged, for a bounded time. A change the stamps cannot see (here
+# the worker going idle) stays hidden until the status log moves or the TTL ends.
+test_current_state_cache_follows_status_and_ttl() {
+  local home fakebin gen state
+  home=$(make_home crew-state-cache)
+  mkdir -p "$home/projects/cached"
+  fm_write_meta "$home/state/cached.meta" \
+    "window=firstmate:fm-cached" \
+    "worktree=$home/projects/cached" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" cached)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" cached busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf 'needs-decision: choose an API shape\n' > "$home/state/cached.status"
+  fakebin=$(make_fakebin "$home")
+  state() {  # [VAR=value...]: current state of the cached task in one snapshot
+    env PATH="$fakebin:$PATH" FM_HOME="$home" "$@" "$SNAPSHOT" --json \
+      | jq -r '.tasks[] | select(.id == "cached") | .current_state.state'
+  }
+  [ "$(state)" = working ] || fail "a busy worker must read working before any cache exists"
+  [ -s "$home/state/crew-state-cache/cached" ] || fail "a known current-state read must be cached"
+  record_claude_idle "$home/state" cached
+  [ "$(state)" = working ] || fail "an unchanged status log and metadata within the TTL must reuse the cached read"
+  [ "$(state FM_SNAPSHOT_CREW_STATE_CACHE_TTL=0)" = parked ] \
+    || fail "a TTL of 0 must read the current state afresh"
+  [ "$(state)" = working ] || fail "a TTL of 0 must leave the cache untouched"
+  printf 'needs-decision: choose a storage shape\n' >> "$home/state/cached.status"
+  [ "$(state)" = parked ] || fail "a status log append must invalidate the cached read"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" cached)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" cached busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  sleep 2
+  [ "$(state FM_SNAPSHOT_CREW_STATE_CACHE_TTL=1)" = working ] \
+    || fail "a cached read older than the TTL must be read again"
+  unset -f state
+  pass "snapshot current-state cache follows the status log, metadata and TTL"
+}
+
 test_scout_reports_include_teardown_reports() {
   local home out
   home=$(make_home teardown-reports)
@@ -1202,6 +1244,7 @@ fm_test_run \
   test_completed_scout_report_is_pointer_not_pending \
   test_parked_scout_decision_stays_pending \
   test_a_reraised_decision_carries_its_earlier_text \
+  test_current_state_cache_follows_status_and_ttl \
   test_scout_reports_include_teardown_reports \
   test_backlog_tasks_axi_forms_and_overrides \
   test_view_renders_snapshot \
