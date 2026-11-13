@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-board-refresh.sh and its triggers: an open bearings
 # board is rebuilt when fleet state changes, and only then; a burst of changes
-# coalesces into one rebuild; a rebuild never reopens an ended session; and every
-# open captain hold shows on the board exactly once.
+# coalesces into one rebuild; no pass runs while the session is ended or no input
+# moved, and a reopened board catches up; and every open captain hold shows on
+# the board exactly once.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -44,10 +45,11 @@ case "${1-}" in
       printf 'session:\n  status: ended\n'
       exit 0
     fi
+    [ "${2-}" != --reopen ] || rm -f "$FM_HOME/lavish-ended"
     real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
     printf '%s\n' "$real" > "$FM_HOME/lavish-open"
     jq -n --arg file "$real" \
-      '{sessions:{"0123456789abcdef":{file:$file,url:"http://127.0.0.1:4387/session/0123456789abcdef"}}}' \
+      '{sessions:{"0123456789abcdef":{file:$file,status:"open",url:"http://127.0.0.1:4387/session/0123456789abcdef"}}}' \
       > "$LAVISH_AXI_STATE_DIR/state.json"
     printf 'session:\n  status: opened\n'
     ;;
@@ -95,6 +97,42 @@ await_rebuilds() {  # <home> <n>
 
 add_task() {  # <home> <id>
   printf 'task=%s\nrepo=alpha\nkind=ship\nwindow=x\n' "$2" > "$1/state/$2.meta"
+}
+
+# The captain closes the board: Lavish records the session as ended and a plain
+# open no longer revives it.
+end_session() {  # <home>
+  : > "$1/lavish-open"
+  : > "$1/lavish-ended"
+  jq '.sessions[].status = "ended"' "$1/lavish-state/state.json" > "$1/lavish-state/state.tmp" \
+    && mv "$1/lavish-state/state.tmp" "$1/lavish-state/state.json"
+}
+
+# Run the refresher with a payload command that counts each fleet snapshot.
+counted_refresh() {  # <home> <refresh args...>
+  local home=$1
+  shift
+  if [ ! -x "$home/counted-payload" ]; then
+    printf '#!/usr/bin/env bash\necho run >> "%s/payload-runs"\nexec "%s" "$@"\n' \
+      "$home" "$ROOT/bin/fm-bearings-board-payload.sh" > "$home/counted-payload"
+    chmod +x "$home/counted-payload"
+  fi
+  FM_BOARD_REFRESH_PAYLOAD="$home/counted-payload" in_home "$home" "$REFRESH" "$@"
+}
+
+payload_runs() {  # <home>
+  if [ -f "$1/payload-runs" ]; then wc -l < "$1/payload-runs" | tr -d ' '; else echo 0; fi
+}
+
+# The current PATH less every directory holding a lavish-axi, so neither the
+# fake nor a real one can be reached through it.
+path_without_lavish() {
+  local dir out=
+  local IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] && [ ! -e "$dir/lavish-axi" ] && out="$out${out:+:}$dir"
+  done
+  printf '%s\n' "$out"
 }
 
 test_a_home_without_a_board_is_left_alone() {
@@ -194,20 +232,107 @@ test_a_wake_append_rebuilds_the_board() {
   pass "a queued wake refreshes the open board"
 }
 
-test_a_rebuild_never_reopens_an_ended_session() {
+test_an_ended_session_takes_no_pass_and_a_reopen_brings_it_current() {
   local home
   home=$(make_home ended)
   build_initial_board "$home"
   in_home "$home" "$REFRESH" || fail "baseline refresh failed"
-  : > "$home/lavish-open"
-  : > "$home/lavish-ended"
+  end_session "$home"
   : > "$home/lavish-calls"
   add_task "$home" t1
-  in_home "$home" "$REFRESH" && fail "a refresh of an ended session reported a rebuild"
-  assert_no_grep '--reopen' "$home/lavish-calls" "a refresh reopened an ended board session"
-  grep -q 't1' "$home/.lavish/bearings-board.data.js" || fail "the board data was not rewritten for the next open"
-  grep -q 'not live' "$home/state/.board-refresh.log" || fail "the ended session was not logged"
-  pass "a rebuild rewrites the board but never reopens an ended session"
+  counted_refresh "$home" || fail "a refresh of an ended session failed"
+  counted_refresh "$home" || fail "a second refresh of an ended session failed"
+  counted_refresh "$home" --force || fail "a forced refresh of an ended session failed"
+  assert_equals "0" "$(payload_runs "$home")" "a fleet snapshot was taken while nobody can see the board"
+  [ ! -s "$home/lavish-calls" ] || fail "a refresh called Lavish for an ended session: $(cat "$home/lavish-calls")"
+  ! grep -q 't1' "$home/.lavish/bearings-board.data.js" || fail "an ended board was rebuilt"
+  assert_equals "1" "$(grep -c 'session is ended' "$home/state/.board-refresh.log")" \
+    "the skip was not logged exactly once"
+  # The captain asks for the board again: the reopened board catches up on its
+  # own, from the refresh the reopen starts.
+  in_home "$home" "$BOARD" url >/dev/null 2>"$home/url.err" || fail "url failed: $(cat "$home/url.err")"
+  grep -q 'reopened: yes' "$home/url.err" || fail "url did not reopen the board: $(cat "$home/url.err")"
+  await_rebuilds "$home" 2 || fail "the reopened board was not brought current"
+  grep -q 't1' "$home/.lavish/bearings-board.data.js" || fail "the reopened board misses the change made while it was ended"
+  pass "an ended session takes no fleet snapshot, and reopening it brings the board current"
+}
+
+test_an_unchanged_fleet_takes_no_snapshot_until_its_live_inputs_age() {
+  local home
+  home=$(make_home unchanged)
+  add_task "$home" t1
+  build_initial_board "$home"
+  counted_refresh "$home" || fail "baseline refresh failed"
+  assert_equals "1" "$(payload_runs "$home")" "the first refresh took no fleet snapshot"
+  counted_refresh "$home" || fail "repeat refresh failed"
+  counted_refresh "$home" || fail "third refresh failed"
+  assert_equals "1" "$(payload_runs "$home")" "an unchanged fleet was snapshotted again"
+  counted_refresh "$home" --force || fail "forced refresh failed"
+  assert_equals "2" "$(payload_runs "$home")" "a forced refresh skipped the snapshot"
+  # Worker liveness, forge state, and the date move with no file write.
+  FM_BOARD_REFRESH_MAX_AGE=0 counted_refresh "$home" || fail "aged refresh failed"
+  assert_equals "3" "$(payload_runs "$home")" "an aged-out signature did not take a fresh snapshot"
+  pass "an unchanged fleet takes no snapshot until its live inputs age out"
+}
+
+test_every_kind_of_input_change_refreshes_the_board() {
+  local home mate runs=1
+  home=$(make_home on-change)
+  mate="$TMP_ROOT/on-change-mate"
+  mkdir -p "$mate/state"
+  printf -- '- mate - A test mate. (home: %s; scope: tests; projects: none; added 2026-11-13)\n' "$mate" \
+    > "$home/data/secondmates.md"
+  add_task "$home" t1
+  build_initial_board "$home"
+  counted_refresh "$home" || fail "baseline refresh failed"
+  assert_equals "1" "$(payload_runs "$home")" "the baseline refresh took no snapshot"
+  after() {  # <what changed>
+    counted_refresh "$home" || fail "refresh after $1 failed"
+    runs=$((runs + 1))
+    assert_equals "$runs" "$(payload_runs "$home")" "$1 did not take a fresh snapshot"
+  }
+  add_task "$home" t2
+  after "a new task"
+  printf 'working [at=%s]: started\n' "$(date +%s)" >> "$home/state/t2.status"
+  after "a status line"
+  rm -f "$home/state/t2.status"
+  after "a removed status"
+  rm -f "$home/state/t1.meta"
+  after "a finished task"
+  printf 'needs-decision [at=%s]: pick a name\n' "$(date +%s)" >> "$mate/state/m1.status"
+  after "a secondmate status line"
+  printf '{"generated":"2026-11-13T00:00:00Z","generated_epoch":1,"endpoints":[{"id":"m1","endpoint":{"observed_at":"2026-11-13T00:00:00Z"}}],"contributions":{"known":1,"valid_until":600}}\n' \
+    > "$mate/state/home-summary.json"
+  after "a new secondmate summary"
+  printf '{"generated_epoch":301,"contributions":{"valid_until":905,"known":1},"endpoints":[{"endpoint":{"observed_at":"2026-11-13T00:05:00Z"},"id":"m1"}],"generated":"2026-11-13T00:05:00Z"}\n' \
+    > "$mate/state/home-summary.json"
+  counted_refresh "$home" || fail "refresh after a restamped summary failed"
+  assert_equals "$runs" "$(payload_runs "$home")" "a secondmate summary that only changed its stamp took a snapshot"
+  pass "a task, status, removal, or secondmate change each refresh the board, and a restamped summary does not"
+}
+
+test_lavish_axi_is_found_without_it_on_path_or_retried_later() {
+  local home bare
+  home=$(make_home lavish-path)
+  build_initial_board "$home"
+  mkdir -p "$home/lavishbin"
+  mv "$home/fakebin/lavish-axi" "$home/lavishbin/lavish-axi"
+  bare=$(path_without_lavish)
+  [ -n "$bare" ] || fail "could not build a PATH without lavish-axi"
+  PATH="$home/lavishbin:$bare" counted_refresh "$home" || fail "refresh with lavish-axi on PATH failed"
+  assert_equals "1" "$(rebuilt_count "$home")" "the baseline refresh did not rebuild"
+  add_task "$home" t1
+  PATH="$bare" counted_refresh "$home" || fail "a refresh started without lavish-axi on PATH failed"
+  assert_equals "2" "$(rebuilt_count "$home")" "a refresh without lavish-axi on PATH did not find it where it was before"
+  rm -f "$home/state/.board-refresh.lavish-dir"
+  add_task "$home" t2
+  PATH="$bare" counted_refresh "$home" && fail "a refresh with no lavish-axi reported success"
+  assert_equals "2" "$(payload_runs "$home")" "a fleet snapshot was taken with no way to show it"
+  grep -q 'lavish-axi is not on PATH' "$home/state/.board-refresh.log" || fail "the missing lavish-axi was not logged"
+  PATH="$home/lavishbin:$bare" counted_refresh "$home" || fail "the retry failed"
+  assert_equals "3" "$(rebuilt_count "$home")" "the missed refresh was not retried once lavish-axi was back"
+  grep -q 't2' "$home/.lavish/bearings-board.data.js" || fail "the retried board misses the change"
+  pass "lavish-axi is found where an earlier refresh saw it, and a refresh without it is retried later"
 }
 
 # A home on the tasks-axi backend, so captain holds go through the real owner.
@@ -480,7 +605,10 @@ fm_test_run \
   test_a_kick_without_a_board_does_nothing \
   test_a_burst_of_kicks_coalesces_into_one_rebuild \
   test_a_wake_append_rebuilds_the_board \
-  test_a_rebuild_never_reopens_an_ended_session \
+  test_an_ended_session_takes_no_pass_and_a_reopen_brings_it_current \
+  test_an_unchanged_fleet_takes_no_snapshot_until_its_live_inputs_age \
+  test_every_kind_of_input_change_refreshes_the_board \
+  test_lavish_axi_is_found_without_it_on_path_or_retried_later \
   test_a_captain_hold_and_its_answer_rebuild_the_board \
   test_every_open_captain_hold_has_exactly_one_board_row \
   test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting \
