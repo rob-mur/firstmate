@@ -18,11 +18,13 @@ Every question card carries real default answer choices derived from its questio
 A yes/no question gets yes and no, numbered sub-questions become one choice each, a plain two-way "A or B" question gets both sides, and any other question gets approve and decline.
 Authored overlay options still replace the derived ones.
 `bin/fm-bearings-question-lib.sh` owns that derivation and the question-versus-wait rule for the payload and the snapshot.
-URLs in a question lift into the card's links (https only, at most five), and everything else stays escaped text.
+URLs in a question lift into the card's links (https only, at most eight), each labelled by what it points at (`PR 837`, `MR 872`, `Understand page`, `Review page`), and the question text shows that label in place of the URL; everything else stays escaped text.
 
 Every question the wake drain lists as an open decision reaches the board without `--all-decisions`.
 That covers a needs-decision or blocked status on a task under way and on a secondmate's task, and a captain hold whose reason asks a question even when the snapshot buckets it as blocked or aged.
 Each becomes a card, or a waiting row when it is a wait; a resolved key never shows.
+Only open calls stay cards: a hold deferred to a later date, from any home, is charted next with its date; a card whose PR or MR merged or closed, read live from the forge and kept when the read fails, drops; a round a newer round of the same work superseded drops; and a status line that only announces a page or PR is live folds its link into that work's card, or drops when there is none.
+The generator's header owns those rules.
 Status-sourced cards carry the key `status.[<mate>.]<task>.<key>`, and the snapshot row keeps `task`, `decision_key` and `mate`.
 The board's keyed-answer intake announces such a key as skipped, because no main-backlog hold owns it.
 Route the answer from the skipped row: run `FM_HOME=<home of the mate, or this home for a main task> bin/fm-send.sh <task> --resolve-key <decision_key> '<answer>'`, so the answer closes the question on the worker's side as well.
