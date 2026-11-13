@@ -4021,6 +4021,52 @@ assert_contains "$(cat "$TMP_ROOT/attached.out")" "captured:" \
   "the attached source result was not captured"
 pass "a foreground start refreshes its lease while its caller remains attached"
 
+# shellcheck disable=SC2016 # the inner shell expands these after sourcing the lib
+cadence=$(env -u FM_PROCEVENT_OWNER_LEASE_SECONDS -u FM_PROCEVENT_OWNER_CHECK_SECONDS bash -c '
+  . "$1/bin/fm-procevent-lib.sh"
+  printf "check=%s keep=%s" "$(fm_procevent_owner_check_seconds)" "$(fm_procevent_owner_keepalive_seconds)"
+  for lease in 1 7 8 600 86400 invalid; do
+    printf " %s:%s" "$lease" "$(FM_PROCEVENT_OWNER_LEASE_SECONDS=$lease fm_procevent_owner_keepalive_seconds)"
+  done' _ "$ROOT")
+assert_equals "check=30 keep=30 1:1 7:1 8:2 600:30 86400:30 invalid:1" "$cadence" \
+  "owner guard and attached keepalive cadence defaults"
+pass "the owner guard checks every 30 seconds and the keepalive refreshes a quarter lease apart"
+
+# A keepalive slower than one second must still hold a lease past several
+# lease lengths, while refreshing at its quarter-lease cadence, not every second.
+HKEEP="$TMP_ROOT/keepalive-cadence"; new_home "$HKEEP"
+fm_test_track_procevent_home "$HKEEP"
+KEEP_TRIGGER="$TMP_ROOT/keepalive-cadence.trigger"
+pe_register "$HKEEP" lavish keep-src -- "$BLOCKER" "$KEEP_TRIGGER" "keep payload" >/dev/null
+FM_PROCEVENT_OWNER_LEASE_SECONDS=8 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  pe "$HKEEP" start keep-src > "$TMP_ROOT/keepalive-cadence.out" 2>&1 &
+KEEP_START_PID=$!
+wait_for "$HKEEP/state/procevent/keep-src.runner" \
+  || fail "the keepalive cadence fixture never launched its source"
+keep_values=$(
+  keep_end=$((SECONDS + 20))
+  while [ "$SECONDS" -lt "$keep_end" ]; do
+    cat "$HKEEP/state/procevent/.owner-lease" 2>/dev/null
+    sleep 0.2
+  done | awk '!seen[$0]++' | wc -l | tr -d ' ')
+kill -0 "$KEEP_START_PID" 2>/dev/null \
+  || fail "a quarter-lease keepalive let its owner lease lapse while the caller remained attached"
+[ "$keep_values" -ge 5 ] && [ "$keep_values" -le 13 ] \
+  || fail "an 8-second lease should refresh about every 2 seconds over 20 seconds, saw $keep_values distinct leases"
+touch "$KEEP_TRIGGER"
+wait "$KEEP_START_PID" || fail "the keepalive cadence fixture did not complete"
+pass "a quarter-lease keepalive holds the lease past two lease lengths without refreshing every second"
+
+# A long keepalive nap must not hold a caller that reads the start's output
+# open after the source returns, and must not outlive the start.
+pe_register "$HKEEP" lavish quick-src -- "$(command -v sleep)" 1 >/dev/null
+quick_began=$SECONDS
+quick_out=$(FM_PROCEVENT_OWNER_LEASE_SECONDS=600 pe "$HKEEP" start quick-src 2>&1) \
+  || fail "the quick attached start failed: $quick_out"
+[ $((SECONDS - quick_began)) -lt 10 ] \
+  || fail "a caller reading the attached start's output waited $((SECONDS - quick_began)) seconds for the keepalive nap"
+pass "an attached start returns to a caller reading its output without waiting for the keepalive nap"
+
 HCLOCK="$TMP_ROOT/lease-clock"; new_home "$HCLOCK"
 fm_test_track_procevent_home "$HCLOCK"
 CLOCK_TRIGGER="$TMP_ROOT/lease-clock.trigger"
