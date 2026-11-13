@@ -811,6 +811,59 @@ test_annotated_decisions_offer_their_own_full_options_in_captain_terms() {
   pass "annotated decisions offer their own full options in captain terms, and page-backed ones only the page link"
 }
 
+# A decision the snapshot marks handed (the answer or the work went to a worker,
+# or the captain marked the card out of date) is no longer the captain's call:
+# it waits, saying who has it, until the worker raises a fresh question.
+test_a_handed_decision_waits_with_who_has_it_instead_of_a_card() {
+  local snap="$TMP_ROOT/handed.json" p
+  write_snapshot "$TMP_ROOT/handed-base.json"
+  jq '.decisions_open += [
+        {id: "h1", key: "h1", verb: "captain-hold", title: "Post the comments", reason: "Post the review comments?", owner: "(main)",
+         handed_at: "2026-11-13T09:30:00Z", handed_via: "steer", handed_task: "review-page-mr872", raised_at: "2026-11-13T09:00:00Z"},
+        {id: "h2", key: "h2", verb: "captain-hold", title: "Round five", reason: "Approve round five?", owner: "(main)",
+         handed_at: "2026-11-13T10:15:00Z", handed_via: "reconcile", handed_task: "firstmate", raised_at: "2026-11-13T09:00:00Z"},
+        {id: "mate/q", key: "status.mate.q.pick", verb: "needs-decision", source: "status", task: "q", decision_key: "pick", owner: "mate",
+         title_full: "q", reason_full: "Pick option one or two?", summary: "Pick option one or two?",
+         handed_at: "2026-11-13T11:00:00Z", handed_via: "steer", handed_task: "q", raised_at: "2026-11-13T10:00:00Z"},
+        {id: "q3", key: "q3", verb: "captain-hold", title: "Still open", reason: "Choose the public name?", owner: "(main)"}]' \
+    "$TMP_ROOT/handed-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "0" "$(jq '[.captains_call[] | select(.key == "h1" or .key == "h2" or .key == "status.mate.q.pick")] | length' <<<"$p")" \
+    "a handed decision is not a Captain's Call card"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "q3")] | length' <<<"$p")" "an unhanded decision stays a card"
+  assert_equals "With review-page-mr872 since 2026-11-13 09:30 UTC; it raises a fresh question when it needs the captain" \
+    "$(jq -r '.waiting[] | select(.key == "h1") | .reason' <<<"$p")" "a decision handed by a steer waits on the worker that has it"
+  assert_equals "true" "$(jq -r '.waiting[] | select(.key == "h2") | .reason | startswith("Marked out of date on the board at 2026-11-13 10:15 UTC")' <<<"$p")" \
+    "a decision marked out of date on the board waits for firstmate to check it"
+  assert_equals "1" "$(jq '[.waiting[] | select(.key == "status.mate.q.pick")] | length' <<<"$p")" "a handed status question waits too"
+  printf '%s\n' "$p" > "$TMP_ROOT/handed-payload.json"
+  validates "$TMP_ROOT/handed-payload.json" || fail "a payload with handed rows did not satisfy the board validator"
+  pass "a handed decision waits, saying who has it, instead of showing as a card"
+}
+
+# The captain's stored priority only orders cards: an id it ranks first that has
+# no open decision (answered, closed, or handed) never comes back as a card.
+test_a_priority_never_brings_back_a_closed_or_handed_decision() {
+  local snap="$TMP_ROOT/prio-closed.json" p
+  local PRIO="$ROOT/bin/fm-board-priority.sh"
+  write_snapshot "$TMP_ROOT/prio-closed-base.json"
+  jq '.decisions_open += [
+        {id: "h1", key: "h1", verb: "captain-hold", title: "Handed", reason: "Post the comments?", owner: "(main)",
+         handed_at: "2026-11-13T09:30:00Z", handed_via: "steer", handed_task: "t1", raised_at: "2026-11-13T09:00:00Z"},
+        {id: "q3", key: "q3", verb: "captain-hold", title: "Still open", reason: "Choose the public name?", owner: "(main)"}]' \
+    "$TMP_ROOT/prio-closed-base.json" > "$snap"
+  mkdir -p "$TMP_ROOT/prio-closed-data"
+  FM_DATA_OVERRIDE="$TMP_ROOT/prio-closed-data" "$PRIO" set gone-call h1 q3 >/dev/null || fail "set failed"
+  p=$(FM_DATA_OVERRIDE="$TMP_ROOT/prio-closed-data" "$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "0" "$(jq '[.captains_call[] | select(.key == "gone-call" or .key == "h1")] | length' <<<"$p")" \
+    "a priority entry with no open decision created a card"
+  assert_equals "0" "$(jq '[.waiting[]?, .charted[]? | select((.key // .id) == "gone-call")] | length' <<<"$p")" \
+    "a priority entry with no open decision created a row"
+  assert_equals "q3" "$(jq -r '[.captains_call[] | select(.key | test("^(q3|h1|gone-call)$")) | .key] | join(",")' <<<"$p")" \
+    "only the open decision is a card"
+  pass "the stored priority never brings back a closed or handed decision"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -841,4 +894,6 @@ fm_test_run \
   test_a_round_a_newer_round_superseded_leaves_the_board \
   test_a_numbered_option_question_stays_a_card_when_an_option_says_until \
   test_card_links_are_labelled_by_what_they_point_at \
-  test_annotated_decisions_offer_their_own_full_options_in_captain_terms
+  test_annotated_decisions_offer_their_own_full_options_in_captain_terms \
+  test_a_handed_decision_waits_with_who_has_it_instead_of_a_card \
+  test_a_priority_never_brings_back_a_closed_or_handed_decision

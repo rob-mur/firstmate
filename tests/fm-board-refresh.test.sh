@@ -261,10 +261,16 @@ test_every_open_captain_hold_has_exactly_one_board_row() {
   in_home "$home" env FM_BEARINGS_DECISIONS=2 "$ROOT/bin/fm-bearings-board-payload.sh" \
     > "$home/payload.json" || fail "payload failed"
   keys=$(jq -r '[(.captains_call[]?, .waiting[]?) | .key | select(test("call"))] | sort | join(",")' "$home/payload.json")
-  assert_equals "call-1,call-2,call-3,dated-call" "$keys" "every open captain hold must show exactly once"
-  assert_equals "0" "$(jq '[.charted[]? | select(.id | test("call"))] | length' "$home/payload.json")" \
-    "a captain hold was charted as a gate instead of shown"
-  pass "every open captain hold has exactly one board row past the decision cap and date buckets"
+  assert_equals "call-1,call-2,call-3" "$keys" "every open undated captain hold must show exactly once as a call"
+  # A call the captain deferred to a date sits in Charted Next with that date,
+  # never as a call card and never twice (docs/captain-hold-lifecycle.md).
+  assert_equals "1" "$(jq '[.charted[]? | select(.id == "dated-call")] | length' "$home/payload.json")" \
+    "a dated captain hold must be charted exactly once"
+  jq -e '.charted[] | select(.id == "dated-call") | .reason | test("until 2099-01-01")' "$home/payload.json" >/dev/null \
+    || fail "the charted dated hold does not show its date"
+  assert_equals "0" "$(jq '[.charted[]? | select(.id | test("^call-"))] | length' "$home/payload.json")" \
+    "an undated captain hold was charted as a gate instead of shown"
+  pass "every open captain hold has exactly one board row past the decision cap, a dated one charted with its date"
 }
 
 test_a_failed_build_is_logged_and_not_retried_until_state_changes() {
@@ -294,6 +300,131 @@ test_the_wake_drain_starts_a_refresh_in_the_background() {
   pass "a main wake drain refreshes the open board in the background"
 }
 
+card_keys() {  # <payload> <group> <pattern>
+  jq -r --arg g "$2" --arg re "$3" '[.[$g][]? | (.key // .id) | select(test($re))] | join(",")' "$1"
+}
+
+payload() {  # <home> <out>
+  in_home "$1" "$ROOT/bin/fm-bearings-board-payload.sh" > "$2" || fail "payload failed"
+}
+
+# A task whose terminal is a stubbed tmux pane, so fm-send can steer it.
+add_steerable_task() {  # <home> <id>
+  fm_write_meta "$1/state/$2.meta" "task=$2" "repo=alpha" "kind=ship" "window=sess:fm-$2" "harness=claude"
+}
+
+steer() {  # <home> <task> <text>
+  in_home "$1" env FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$2" "$3" >/dev/null 2>&1
+}
+
+test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting() {
+  local home later
+  [ -n "$TASKS_AXI_BIN" ] || { pass "skip: tasks-axi not found"; return; }
+  home=$(make_hold_home handed-steer)
+  add_steerable_task "$home" t1
+  captain "$home" hold board-call --title "Choose the board option" \
+    --reason "Ship the board option?" --repo sample --origin t1 >/dev/null || fail "hold failed"
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  sleep 1.1
+  steer "$home" t1 "Keep board-call held: the captain decides." || fail "the wait steer failed"
+  payload "$home" "$home/wait.json"
+  assert_equals "board-call" "$(card_keys "$home/wait.json" captains_call board-call)" \
+    "a steer telling the worker to wait for the captain took the card away"
+  steer "$home" t1 "Relaying a page note on another thread; carry on." || fail "the unrelated steer failed"
+  payload "$home" "$home/other.json"
+  assert_equals "board-call" "$(card_keys "$home/other.json" captains_call board-call)" \
+    "a steer that does not name the decision took the card away"
+  steer "$home" t1 "The captain chose option two for board-call; go ahead and ship it." || fail "the answering steer failed"
+  await_rebuilds "$home" 2 || fail "a steer did not refresh the open board"
+  grep -q 'With t1 since' "$home/.lavish/bearings-board.data.js" || fail "the open board does not show the handed decision as waiting on t1"
+  payload "$home" "$home/handed.json"
+  assert_equals "" "$(card_keys "$home/handed.json" captains_call board-call)" "a decision handed to its worker stayed a Captain's Call card"
+  assert_equals "board-call" "$(card_keys "$home/handed.json" waiting board-call)" "a decision handed to its worker is not shown waiting"
+  later=$(( $(date +%s) + 5 ))
+  printf 'needs-decision [at=%s]: board-call needs a fresh pick between the two layouts\n' "$later" >> "$home/state/t1.status"
+  payload "$home" "$home/again.json"
+  assert_equals "board-call" "$(card_keys "$home/again.json" captains_call '^board-call$')" \
+    "a fresh question from the worker did not bring the decision back as a card"
+  pass "a steer that hands a decision to its worker moves the card to waiting until the worker asks again"
+}
+
+test_a_board_reconcile_request_moves_the_card_to_waiting_at_once() {
+  local home
+  [ -n "$TASKS_AXI_BIN" ] || { pass "skip: tasks-axi not found"; return; }
+  home=$(make_hold_home reconcile)
+  captain "$home" hold board-call --title "Choose the board option" \
+    --reason "Ship the board option?" --repo sample >/dev/null || fail "hold failed"
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  sleep 1.1
+  captain "$home" bind board-src >/dev/null || fail "bind failed"
+  printf 'board-call\n' | captain "$home" reconcile-requests --source-id board-src \
+    --source "captured board result" >/dev/null || fail "the reconcile request failed"
+  await_rebuilds "$home" 2 || fail "a reconcile request did not refresh the open board"
+  grep -q 'Marked out of date on the board' "$home/.lavish/bearings-board.data.js" \
+    || fail "the open board does not show the out-of-date decision as waiting"
+  payload "$home" "$home/after.json"
+  assert_equals "" "$(card_keys "$home/after.json" captains_call board-call)" "a card marked out of date stayed a Captain's Call card"
+  pass "a reconcile request from the board moves the card to waiting and refreshes the open board"
+}
+
+test_an_answered_hold_ranked_first_never_returns_as_a_card() {
+  local home decision
+  [ -n "$TASKS_AXI_BIN" ] || { pass "skip: tasks-axi not found"; return; }
+  home=$(make_hold_home answered-ranked)
+  decision="$home/decision.txt"
+  printf 'go\n' > "$decision"
+  captain "$home" hold board-call --title "Choose the board option" \
+    --reason "Ship the board option?" --repo sample >/dev/null || fail "hold failed"
+  captain "$home" hold other-call --title "Choose the name" \
+    --reason "Pick the public name?" --repo sample >/dev/null || fail "second hold failed"
+  captain "$home" answer board-call --decision-file "$decision" >/dev/null || fail "answer failed"
+  in_home "$home" "$PRIO" set board-call other-call >/dev/null || fail "set failed"
+  payload "$home" "$home/after.json"
+  assert_equals "" "$(card_keys "$home/after.json" captains_call board-call)" "an answered hold ranked first came back as a card"
+  assert_equals "" "$(card_keys "$home/after.json" waiting board-call)" "an answered hold ranked first came back as a waiting row"
+  assert_equals "other-call" "$(card_keys "$home/after.json" captains_call call)" "the open hold is not the only card"
+  pass "an answered hold stays off the board even when the stored priority ranks it first"
+}
+
+# A secondmate home has no board; its decisions show on the parent's board, so
+# its record changes must refresh that board.
+make_mate_home() {  # <name> <parent> [route]
+  local mate
+  mate=$(make_home "$1")
+  if [ "${3:-local}" = local ]; then
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$2" > "$mate/.fm-secondmate-parent"
+  else
+    printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=box\n' > "$mate/.fm-secondmate-parent"
+  fi
+  printf '%s\n' "$mate"
+}
+
+test_a_secondmate_change_refreshes_the_parent_board() {
+  local parent mate remote
+  parent=$(make_home parent)
+  build_initial_board "$parent"
+  in_home "$parent" "$REFRESH" || fail "baseline refresh failed"
+  mate=$(make_mate_home mate "$parent")
+  remote=$(make_mate_home remote-mate "$parent" remote)
+  add_task "$parent" t1
+  in_home "$remote" "$REFRESH" --kick || fail "a remote-route kick failed"
+  sleep 0.5
+  [ "$(rebuilt_count "$parent")" = 1 ] || fail "a remote-route secondmate kick refreshed a local board"
+  [ ! -e "$remote/state/.board-refresh.pending" ] || fail "a kick without a board recorded a request in the secondmate home"
+  in_home "$mate" "$REFRESH" --kick || fail "the secondmate kick failed"
+  await_rebuilds "$parent" 2 || fail "a secondmate kick did not refresh the parent board"
+  grep -q 't1' "$parent/.lavish/bearings-board.data.js" || fail "the forwarded refresh did not read the parent home"
+  [ ! -e "$mate/.lavish/bearings-board.html" ] || fail "the forwarded refresh built a board in the secondmate home"
+  add_task "$parent" t2
+  # shellcheck disable=SC2016
+  in_home "$mate" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal "signal: m1" "m1"' _ "$ROOT" \
+    >/dev/null 2>&1 || fail "the secondmate wake append failed"
+  await_rebuilds "$parent" 3 || fail "a secondmate wake did not refresh the parent board"
+  pass "a secondmate kick or wake refreshes the parent board once, and a remote route does not"
+}
+
 fm_test_run \
   test_a_home_without_a_board_is_left_alone \
   test_the_board_is_rebuilt_only_when_fleet_state_changes \
@@ -306,4 +437,8 @@ fm_test_run \
   test_a_wake_append_rebuilds_the_board \
   test_a_rebuild_never_reopens_an_ended_session \
   test_a_captain_hold_and_its_answer_rebuild_the_board \
-  test_every_open_captain_hold_has_exactly_one_board_row
+  test_every_open_captain_hold_has_exactly_one_board_row \
+  test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting \
+  test_a_board_reconcile_request_moves_the_card_to_waiting_at_once \
+  test_an_answered_hold_ranked_first_never_returns_as_a_card \
+  test_a_secondmate_change_refreshes_the_parent_board
