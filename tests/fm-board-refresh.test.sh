@@ -388,6 +388,33 @@ test_an_answered_hold_ranked_first_never_returns_as_a_card() {
   pass "an answered hold stays off the board even when the stored priority ranks it first"
 }
 
+# A held task closed straight to done (a reconcile close, not an answer) keeps
+# its hold marker on the done line; the stored priority still naming it first
+# must not bring it back as a card, on the payload or on the open board.
+test_a_done_task_ranked_first_never_renders_as_a_card() {
+  local home
+  [ -n "$TASKS_AXI_BIN" ] || { pass "skip: tasks-axi not found"; return; }
+  home=$(make_hold_home done-ranked)
+  captain "$home" hold done-call --title "Post the held comments" \
+    --reason "Post the held set?" --repo sample >/dev/null || fail "hold failed"
+  captain "$home" hold other-call --title "Choose the name" \
+    --reason "Pick the public name?" --repo sample >/dev/null || fail "second hold failed"
+  build_initial_board "$home"
+  in_home "$home" env REAL_TASKS_AXI="$TASKS_AXI_BIN" "$ROOT/bin/fm-tasks-axi.sh" 'done' done-call >/dev/null \
+    || fail "the held task could not be closed as done"
+  grep -q '^- \[x\] done-call .*(hold: ' "$home/data/backlog.md" \
+    || fail "the done task did not keep its hold marker, so this test no longer covers that case"
+  in_home "$home" "$PRIO" set done-call other-call >/dev/null || fail "set failed"
+  in_home "$home" "$REFRESH" || fail "the refresh failed"
+  payload "$home" "$home/after.json"
+  assert_equals "" "$(card_keys "$home/after.json" captains_call done-call)" "a done task ranked first came back as a card"
+  assert_equals "" "$(card_keys "$home/after.json" waiting done-call)" "a done task ranked first came back as a waiting row"
+  assert_equals "other-call" "$(card_keys "$home/after.json" captains_call call)" "the open hold is not the only card"
+  grep -q 'other-call' "$home/.lavish/bearings-board.data.js" || fail "the open board lost the open hold"
+  ! grep -q 'done-call' "$home/.lavish/bearings-board.data.js" || fail "the open board still carries the done task"
+  pass "a done task stays off the board even when the stored priority ranks it first"
+}
+
 # A secondmate home has no board; its decisions show on the parent's board, so
 # its record changes must refresh that board.
 make_mate_home() {  # <name> <parent> [route]
@@ -441,4 +468,5 @@ fm_test_run \
   test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting \
   test_a_board_reconcile_request_moves_the_card_to_waiting_at_once \
   test_an_answered_hold_ranked_first_never_returns_as_a_card \
+  test_a_done_task_ranked_first_never_renders_as_a_card \
   test_a_secondmate_change_refreshes_the_parent_board
