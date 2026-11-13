@@ -74,6 +74,26 @@ test_open_registers_a_page_and_refreshes_the_board() {
   pass "dir gives the folder, open registers the written page and refreshes the board, and neither runs lavish-axi"
 }
 
+test_open_records_the_sessions_a_page_replaces() {
+  local home rec
+  home=$(make_home replaces)
+  show "$home" fos-round5 --title "Round 5" \
+    --replaces http://dev-1.tailf848b0.ts.net:4387/session/988b504d3271c0ea >/dev/null \
+    || fail "open with a replaced session url failed"
+  rec="$home/state/pages/fos-round5/page.json"
+  assert_equals '["988b504d3271c0ea"]' "$(jq -c .replaces "$rec")" "open did not record the session id from its url"
+  show "$home" fos-round5 --title "Round 5" --replaces 53e6c4bcfdcacae4 \
+    --replaces 988b504d3271c0ea >/dev/null || fail "reopen with a bare session id failed"
+  assert_equals '["53e6c4bcfdcacae4","988b504d3271c0ea"]' "$(jq -c .replaces "$rec")" \
+    "reopen did not keep the earlier session once and add the new one"
+  show "$home" fos-round5 --title "Round 5" >/dev/null || fail "reopen without --replaces failed"
+  assert_equals '["53e6c4bcfdcacae4","988b504d3271c0ea"]' "$(jq -c .replaces "$rec")" \
+    "reopen without --replaces dropped the recorded sessions"
+  show "$home" fos-round5 --title "Round 5" --replaces 'not a session' >/dev/null 2>&1 \
+    && fail "open accepted a replaced session that is neither a url nor an id"
+  pass "open records each replaced Lavish session by id and keeps them across reopens"
+}
+
 test_open_without_a_board_exits_3() {
   local home rc
   home=$(make_home noboard --no-board)
@@ -262,6 +282,7 @@ test_relay_annotate_mode_spares_controls_and_toggles_from_the_page() {
 
 fm_test_run \
   test_open_registers_a_page_and_refreshes_the_board \
+  test_open_records_the_sessions_a_page_replaces \
   test_open_without_a_board_exits_3 \
   test_bad_page_ids_are_refused \
   test_route_delivers_each_action_once_and_wait_prints_it \
