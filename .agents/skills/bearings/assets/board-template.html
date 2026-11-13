@@ -1160,7 +1160,10 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
      its tab shows a dot until opened. Full screen fixes the same page view
      over the whole window by a class alone, so the frame is never moved,
      re-created or reloaded; the same button or Esc leaves it, and Esc
-     pressed inside the page arrives as a message from its relay. */
+     pressed inside the page arrives as a message from its relay. Lavish's
+     annotate mode lives in this board alone and cannot see inside a frame, so
+     the board tells every page whether it is on and the page's relay
+     annotates its own elements. */
   var tabsEl = document.getElementById("bb-tabs");
   var mainView = document.querySelector(".bb-main");
   var pageView = document.getElementById("bb-pageview");
@@ -1229,6 +1232,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       frame.title = p.title;
       frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads");
       frame.hidden = true;
+      frame.addEventListener("load", function () { tellAnnotate(frame); });
       frame.src = p.href;
       frameHost.appendChild(frame);
       var tab = el("button", "bb-tab is-new", p.title);
@@ -1242,6 +1246,20 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     Object.keys(endedHere).forEach(function (k) { if (!live[k]) delete endedHere[k]; });
     tabsEl.hidden = !Object.keys(pageById).length;
   }
+  /* Lavish adds its cursor style while annotate is on and tells this board
+     every change, so the board can tell each page. */
+  var annotateOn = !!document.getElementById("lavish-cursor-style");
+  function tellAnnotate(frame) {
+    try {
+      if (frame.contentWindow) frame.contentWindow.postMessage({ type: "fm-board-page:annotate", enabled: annotateOn }, "*");
+    } catch (e) { /* a frame still loading hears it on load */ }
+  }
+  window.addEventListener("message", function (ev) {
+    var d = ev && ev.data;
+    if (!d || typeof d !== "object" || ev.source !== window.parent || d.type !== "lavish:setAnnotationMode") return;
+    annotateOn = !!d.enabled;
+    Object.keys(pageById).forEach(function (k) { tellAnnotate(pageById[k].frame); });
+  });
   function queueForPage(p, tag, prompt, opts) {
     if (!window.lavish || !window.lavish.queuePrompt) return;
     var o = opts && typeof opts === "object" ? opts : {};
@@ -1292,6 +1310,9 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       sendAll();
     } else if (d.type === "fm-board-page:endPage") {
       endPage(p);
+    } else if (d.type === "fm-board-page:toggleAnnotate") {
+      /* Lavish toggles on its own hotkey pressed in this board */
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "i", ctrlKey: true, metaKey: false, bubbles: true, cancelable: true }));
     }
   });
   syncPages(data.pages);

@@ -518,6 +518,36 @@ test_full_screen_keeps_the_same_page_frame() {
   pass "full screen keeps the same page frame, and the button or Esc leaves it"
 }
 
+# Lavish's annotate mode lives in the board alone, so the board tells every
+# in-place page whether it is on, passes a page's annotation to that page's
+# agent with the element it names, and toggles the mode on a page's hotkey.
+test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent() {
+  local home page out
+  home=$(make_home page-annotate)
+  page=$(register_page "$home" understand-mr-872 "Understand MR 872")
+  printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$page" > "$home/lavish-sessions"
+  render_card_links "$home" '[{url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"}]' >/dev/null
+  out=$(run_board "$home" "frameload:understand-mr-872,annotate:on,go,page:mr-872,annotation:understand-mr-872,stranger,pagetoggle:understand-mr-872,annotate:off")
+  printf '%s' "$out" | jq -e '
+    .framePosts["understand-mr-872"] == [
+      {type:"fm-board-page:annotate", enabled:false},
+      {type:"fm-board-page:annotate", enabled:true},
+      {type:"fm-board-page:annotate", enabled:false}]
+  ' >/dev/null || fail "the in-place page was not told when annotate mode changed: $out"
+  printf '%s' "$out" | jq -e '
+    [.calls[] | select(.tag == "page")] == [{
+      key:"", anchor:.calls[0].anchor, prompt:"unclear", tag:"page",
+      text:"Understand MR 872: Why this change",
+      data:{schema:"fm-board-page.v1", page:"understand-mr-872", tag:"annotation", text:"Why this change",
+        data:{selector:"p#why", id:"why", tag:"p", text:"Why this change"}}}]
+      and (.calls[0].anchor | startswith("#bb-page-frame-"))
+  ' >/dev/null || fail "an annotation inside the page did not reach the page agent with its element: $out"
+  printf '%s' "$out" | jq -e '
+    .keys == [{type:"keydown", key:"i", ctrlKey:true, metaKey:false}]
+  ' >/dev/null || fail "the hotkey pressed inside the page did not toggle annotate mode: $out"
+  pass "annotate mode reaches in-place pages and each page note reaches that page's agent"
+}
+
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
 test_every_card_type_renders_its_links
 test_every_card_link_opens_in_annotate_mode
@@ -525,6 +555,7 @@ test_a_registered_page_link_opens_in_the_board
 test_an_unregistered_page_link_says_it_is_not_in_the_board
 test_a_card_page_button_shows_the_page_in_place
 test_full_screen_keeps_the_same_page_frame
+test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent
 
 test_board_renders_only_the_captains_call() {
   local home out
