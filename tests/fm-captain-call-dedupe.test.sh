@@ -106,6 +106,51 @@ test_answered_matches_a_legacy_derived_call_id() {
   pass "answered matches the legacy derived call id"
 }
 
+# answered-batch must reach exactly the verdict answered reaches for every key,
+# including the ids the batch skips without a backlog read: an answer moved to
+# the Done archive, a legacy id, another origin's answer, a call still open, a
+# question raised again after the answer, and an id the backlog only mentions
+# inside another row.
+test_answered_batch_matches_answered_key_by_key() {
+  local home batch expected='' key opened want origin
+  home=$(make_home batch)
+  sed 's/^done_keep = .*/done_keep = 1/' "$home/.tasks.toml" > "$home/.tasks.toml.new" \
+    && mv "$home/.tasks.toml.new" "$home/.tasks.toml"
+  answer_call "$home" worker-a archived-call
+  answer_call "$home" worker-a api-shape
+  answer_call "$home" worker-a worker-a-decision-db
+  answer_call "$home" worker-b other-origin
+  in_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold still-open --title "Open call mentions no-row-call" \
+    --reason "captain must decide" --origin worker-a >/dev/null || fail "could not hold still-open"
+  grep -F -- '- [x] archived-call ' "$home/data/done-archive.md" >/dev/null \
+    || fail "the test setup did not archive archived-call"
+
+  for origin in worker-a worker-b; do
+    batch=$(printf '%s\t%s\n' archived-call "$BEFORE" api-shape "$BEFORE" db "$BEFORE" \
+      other-origin "$BEFORE" still-open "$BEFORE" no-row-call "$BEFORE" never-held "$BEFORE" \
+      | in_home "$home" "$ROOT/bin/fm-captain-hold.sh" answered-batch "$origin") \
+      || fail "answered-batch failed for $origin"
+    expected=''
+    for key in archived-call api-shape db other-origin still-open no-row-call never-held; do
+      if want=$(in_home "$home" "$ROOT/bin/fm-captain-hold.sh" answered "$origin" "$key" --opened-at "$BEFORE"); then
+        expected="$expected$key"$'\t'"$want"$'\n'
+      fi
+    done
+    [ "$batch"$'\n' = "$expected" ] || [ -z "$batch$expected" ] \
+      || fail "answered-batch for $origin disagreed with answered: got [$batch] want [$expected]"
+  done
+  batch=$(printf 'archived-call\t%s\n' "$BEFORE" | in_home "$home" "$ROOT/bin/fm-captain-hold.sh" answered-batch worker-a)
+  [ "$batch" = "archived-call"$'\t'"archived-call" ] || fail "an archived answer was not matched: [$batch]"
+  batch=$(printf 'db\t%s\n' "$BEFORE" | in_home "$home" "$ROOT/bin/fm-captain-hold.sh" answered-batch worker-a)
+  [ "$batch" = "db"$'\t'"worker-a-decision-db" ] || fail "a legacy id was not matched: [$batch]"
+  opened=$AFTER
+  batch=$(printf 'api-shape\t%s\nstill-open\t%s\nno-row-call\t%s\nbad line\n' "$opened" "$BEFORE" "$BEFORE" \
+    | in_home "$home" "$ROOT/bin/fm-captain-hold.sh" answered-batch worker-a) \
+    || fail "answered-batch failed on unanswered keys"
+  [ -z "$batch" ] || fail "a re-raised, open, unknown, or malformed key was treated as answered: [$batch]"
+  pass "answered-batch matches answered key by key, archived and legacy answers included"
+}
+
 test_wake_drain_does_not_ask_an_answered_decision_again() {
   local home out
   home=$(make_home drain)
@@ -184,6 +229,7 @@ test_overdue_reminder_skips_an_answered_decision() {
 
 test_answered_matches_only_a_clear_recorded_answer
 test_answered_matches_a_legacy_derived_call_id
+test_answered_batch_matches_answered_key_by_key
 test_overdue_reminder_skips_an_answered_decision
 test_wake_drain_does_not_ask_an_answered_decision_again
 test_snapshot_drops_an_answered_decision

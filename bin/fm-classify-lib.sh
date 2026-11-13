@@ -981,19 +981,34 @@ status_decision_opened_epoch() {  # <status-file> <key>
 # field while the decision is still unanswered. A surface that asks the captain
 # shows only the empty-tagged lines. bin/fm-captain-hold.sh `answered` owns the
 # matching rule and keeps every uncertain call unanswered; so does a home
-# without that script and a line whose opening time is unknown.
+# without that script and a line whose opening time is unknown. All of the
+# task's lines go to that script's `answered-batch` in one process.
 status_open_decisions_tag_answered() {  # <task> <status-file>
-  local task=$1 f=$2 line key opened answered_id
+  local task=$1 f=$2 line key opened open_lines='' batch='' answers='' answered_id
   local hold="$_FM_CLASSIFY_LIB_DIR/fm-captain-hold.sh"
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
+    open_lines="$open_lines$line"$'\n'
+    key=${line%%$'\t'*}
+    if [ -x "$hold" ] && opened=$(status_decision_opened_epoch "$f" "$key"); then
+      batch="$batch$key"$'\t'"$opened"$'\n'
+    fi
+  done
+  if [ -n "$batch" ]; then
+    answers=$(printf '%s' "$batch" | "$hold" answered-batch "$task" 2>/dev/null) || answers=''
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
     key=${line%%$'\t'*}
     answered_id=''
-    if [ -x "$hold" ] && opened=$(status_decision_opened_epoch "$f" "$key"); then
-      answered_id=$("$hold" answered "$task" "$key" --opened-at "$opened" 2>/dev/null) || answered_id=''
-    fi
+    case $'\n'"$answers"$'\n' in
+      *$'\n'"$key"$'\t'*)
+        case "$answers" in "$key"$'\t'*) answered_id=${answers#"$key"$'\t'} ;; *) answered_id=${answers#*$'\n'"$key"$'\t'} ;; esac
+        answered_id=${answered_id%%$'\n'*}
+        ;;
+    esac
     printf '%s\t%s\n' "$answered_id" "$line"
-  done
+  done <<< "$open_lines"
 }
 
 # The lines of an open-decision set (stdin) for <task> that no captain call has
