@@ -3,7 +3,7 @@
 ## Lavish board mode
 
 `/bearings lavish` adds one deliverable beside the unchanged chat digest: the interactive fleet board, a myfirstmate-styled Lavish page where the captain answers Captain's Call items directly instead of replying in chat.
-`bin/fm-bearings-board.sh` owns every board mechanic - the stable board path, fm-bearings-board.v1 payload validation, template injection, live Lavish session verification and ended-session reopening, the any-origin answer binding, and listener registration - so the per-invocation work is generating the payload and running its `build`.
+`bin/fm-bearings-board.sh` owns every board mechanic - the stable board path, fm-bearings-board.v1 payload validation, the board data file beside the page, live Lavish session verification and ended-session reopening, the any-origin answer binding, and listener registration - so the per-invocation work is generating the payload and running its `build`.
 
 `bin/fm-bearings-board-payload.sh` owns the payload's shape, so the board is identical every session.
 It maps the fleet snapshot to the fm-bearings-board.v1 payload deterministically: one decision card per captain-held task id (keyed by the task id, titled and described from the held task's own record), every non-done in-flight row as Underway with its projected `name`, landed rows, and the gates and warnings as Charted Next with `kind`, `dispatchable`, `filed`, `repo` and the omitted-row counts derived from structured fields.
@@ -68,6 +68,7 @@ A `priority` annotation (context schema `fm-bearings-priority.v1`, `keys` highes
 Record it with `bin/fm-board-priority.sh set --from-ctx <file>` (the script header owns the store, `data/board-priority.txt`), and echo the recorded order in chat.
 The session digest and wake drain print the ranking as CAPTAIN PRIORITY; read it with `bin/fm-board-priority.sh show` whenever you choose which queued task to dispatch, which wake to handle, or which decision to raise or answer next: a higher-ranked task goes first unless a dependency, blocker, time gate or capacity limit makes it unsafe, and say so when you skip one.
 The board refreshes itself on every fleet state change - each queued wake, captain hold, answer or reconcile, task cleanup, and main wake drain kicks `bin/fm-board-refresh.sh` in the background whenever a board exists - and a burst becomes one rebuild of the same Lavish session, only when the generated payload changed and never reopening a session the captain ended (the script header owns its triggers, debounce, lock and failure handling), so the stored priority and the board's own order store carry the captain's ranking across each rebuild.
+A rebuild never reloads the captain's open page: the page patches only the cards that changed and leaves alone a card the captain is answering.
 Rebuild by hand with the payload generator and `build` when you need the board current at once.
 Each answer carries the captain's priority, as `[priority N of M]` in its label and as `order` and `order_total` in its context data.
 When a result holds several answers, handle them lowest `order` first, and echo that sequence in chat.

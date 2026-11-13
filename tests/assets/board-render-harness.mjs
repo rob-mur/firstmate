@@ -3,6 +3,8 @@
 // asserted through the real template rather than by reading its source.
 //
 // Usage: node board-render-harness.mjs <built-board.html>
+// The payload is read from the bearings-board.data.js file the build writes
+// beside the page, the way the page's own <script src> loads it.
 // Prints one JSON document:
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text,action}]}],
@@ -72,11 +74,6 @@ class Node {
 }
 
 const byId = new Map();
-const dataNode = new Node("script");
-dataNode.textContent = html
-  .split('<script id="bearings-data" type="application/json">')[1]
-  .split("</script>")[0];
-byId.set("bearings-data", dataNode);
 
 globalThis.document = {
   createElement: (tag) => new Node(tag),
@@ -98,6 +95,11 @@ globalThis.document = {
 };
 globalThis.window = { addEventListener() {} };
 globalThis.TextEncoder = TextEncoder;
+// The page polls its data file for live updates; one render needs no polling.
+globalThis.setInterval = () => 0;
+let dataSource = "";
+try { dataSource = readFileSync(process.argv[2].replace(/\.html$/, ".data.js"), "utf8"); } catch { /* no data file */ }
+if (dataSource) new Function(dataSource)();
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();

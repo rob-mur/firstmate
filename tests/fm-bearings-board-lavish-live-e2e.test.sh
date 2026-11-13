@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-bearings-board-lavish-live-e2e.test.sh - live drift guard proving
 # the real lavish-axi still behaves the way bin/fm-bearings-board.sh's session
-# liveness check is written against.
+# liveness check is written against, and that a board rebuild serves new data
+# to the open page without lavish-axi reloading it.
 #
 # Why this file exists: the build's "is this board actually live" verdict comes
 # from what lavish-axi emits, which is a surface the vendor controls and changes
@@ -17,6 +18,10 @@
 # a human. The artifact is a scratch page in a temporary directory, and the
 # session it opens is ended again before the guard returns.
 #
+# The no-reload half listens on the live-event socket the browser frame uses,
+# with the ws module lavish-axi ships, and proves the listener works by
+# rewriting the page itself as a control.
+#
 # Standard CI has no lavish-axi, so this reports a capability skip there. The
 # portable counterpart in tests/fm-bearings-board.test.sh pins the build's logic
 # in CI against a stub that reproduces these shapes. Run this guard after a
@@ -29,6 +34,10 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 fm_live_gate default-on FM_BEARINGS_LAVISH_LIVE lavish-axi jq curl
+
+# A guard must never open a browser tab on the host running it: the board build's
+# reopen and this guard's own session reads would each launch one otherwise.
+export LAVISH_AXI_NO_OPEN=1
 
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
@@ -120,3 +129,53 @@ esac
 lavish-axi 2>/dev/null | grep -F "$BOARD," | grep -q ',open,' \
   || fail "the board build reported success while the session was still not live"
 pass "the board build reopens a captain-ended session against real lavish-axi instead of arming a dead one"
+
+# THE SECOND BEHAVIOR UNDER GUARD: a rebuild must never reload the captain's open
+# page. Lavish watches the artifact file and tells every open frame to reload
+# when it changes, which cuts off whatever the captain is typing, so a rebuild
+# rewrites only the data file beside the page and the page patches its cards in
+# place. This listens on the same live-event socket the browser frame does.
+command -v node >/dev/null 2>&1 || fail "node is required to listen for Lavish's live events"
+ws_module=$(dirname "$(readlink -f "$(command -v lavish-axi)")")/../node_modules/ws
+[ -d "$ws_module" ] || ws_module=$(dirname "$(readlink -f "$(command -v lavish-axi)")")/../lib/node_modules/lavish-axi/node_modules/ws
+[ -d "$ws_module" ] \
+  || fail "lavish-axi ${VERSION:-version-unknown} no longer ships the ws module this guard listens with"
+url=$(lavish-axi "$BOARD" | sed -n 's/^[[:space:]]*url:[[:space:]]*//p' | head -1 | tr -d '"')
+key=${url##*/}
+base=${url%/session/*}
+events="$LAB/live-events"
+: > "$events"
+cat > "$LAB/listen.cjs" <<'JS'
+const [, , wsModule, base, key, out] = process.argv;
+const WebSocket = require(wsModule);
+const fs = require("node:fs");
+const sock = new WebSocket(base.replace(/^http/, "ws") + "/events/" + encodeURIComponent(key), { headers: { Origin: base } });
+sock.on("open", () => fs.appendFileSync(out, "open\n"));
+sock.on("message", (m) => { try { fs.appendFileSync(out, JSON.parse(String(m)).type + "\n"); } catch {} });
+sock.on("error", (e) => { fs.appendFileSync(out, "error " + e.message + "\n"); process.exit(1); });
+setTimeout(() => process.exit(0), 60000);
+JS
+node "$LAB/listen.cjs" "$ws_module" "$base" "$key" "$events" &
+listener=$!
+for _ in $(seq 1 50); do grep -qx open "$events" && break; sleep 0.1; done
+grep -qx open "$events" || { kill "$listener" 2>/dev/null; fail "could not listen for the guard board's live events: $(cat "$events")"; }
+
+jq '.captains_call[0].title = "Guard placeholder reworded"' "$LAB/payload.json" > "$LAB/next.json"
+out=$(run_board build --no-reopen "$LAB/next.json" 2>&1) \
+  || { kill "$listener" 2>/dev/null; fail "the guard board rebuild failed: $out"; }
+sleep 2
+if grep -qx reload "$events"; then
+  kill "$listener" 2>/dev/null
+  fail "a board rebuild made lavish-axi ${VERSION:-version-unknown} reload the open page"
+fi
+curl -fsS "$base/artifact/$key/bearings-board.data.js" | grep -qF 'Guard placeholder reworded' \
+  || { kill "$listener" 2>/dev/null; fail "lavish-axi ${VERSION:-version-unknown} does not serve the rebuilt board data beside the page"; }
+
+# The control: rewriting the page itself does reload it, so the silence above
+# was the listener hearing nothing rather than hearing nothing at all.
+cp "$BOARD" "$LAB/page.copy" && cat "$LAB/page.copy" > "$BOARD"
+for _ in $(seq 1 50); do grep -qx reload "$events" && break; sleep 0.1; done
+kill "$listener" 2>/dev/null
+grep -qx reload "$events" \
+  || fail "lavish-axi ${VERSION:-version-unknown} sent no reload even when the page changed, so the no-reload check proved nothing"
+pass "a board rebuild serves new data to the open page without lavish-axi ${VERSION:-version-unknown} reloading it"

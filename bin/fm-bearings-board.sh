@@ -3,7 +3,8 @@
 #
 # The board is the captain-facing interactive surface of /bearings lavish: the
 # shipped template (.agents/skills/bearings/assets/board-template.html) plus one
-# injected fm-bearings-board.v1 JSON payload. bin/fm-bearings-board-payload.sh
+# fm-bearings-board.v1 JSON payload in a data file beside it.
+# bin/fm-bearings-board-payload.sh
 # generates that payload from the fleet snapshot, so its shape is the same every
 # session, and this script owns the mechanics so the invoking agent's per-run
 # work stays "generate the JSON, run build" - the agent never authors board UI
@@ -15,8 +16,9 @@
 #
 # build      Validate the payload, drop the Captain's Call cards whose subject
 #            already landed, give every surviving decision card the standard
-#            reconcile choice, and inject the result into a fresh copy of the
-#            shipped template at the stable board path. Establish the Lavish
+#            reconcile choice, and write the result to the board data file
+#            beside the stable board path, installing the shipped template
+#            there only when it differs. Establish the Lavish
 #            session on that board and PROVE it is live BEFORE binding and
 #            arming its answer source, so a registered poll can never race a
 #            session that does not exist or attach to one that has ended.
@@ -24,7 +26,8 @@
 #            precedes arm, so the board can never produce an answer that has
 #            nowhere to go (captain-hold-lifecycle's ordering rule, enforced
 #            here rather than left to agent memory). Output starts with
-#            `board: <path>`, then includes lavish-axi's session output and
+#            `board: <path>` and `data: <path>`, then includes lavish-axi's
+#            session output and
 #            the remaining status:
 #              session: live | reopened
 #              served: <path>
@@ -36,7 +39,7 @@
 #            line, so a rebuild states what it removed instead of quietly
 #            shrinking Captain's Call.
 #            --no-reopen is the automatic refresh's form
-#            (bin/fm-board-refresh.sh): the board file is still rewritten, but
+#            (bin/fm-board-refresh.sh): the board data is still rewritten, but
 #            a session the captain ended is left ended and the build refuses
 #            instead of reopening it, because reopening opens a browser tab
 #            nobody asked for.
@@ -99,10 +102,19 @@
 # positively show is landed or no longer an open captain call.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
-# re-invocation rebuilds the same file in place, which keeps the same Lavish
-# session URL and the same canonical process-event source id. Injection escapes
-# every `<` in the compact JSON as the \u003c string escape, so a payload string
-# containing "</script>" can never terminate the data block early.
+# re-invocation keeps the same Lavish session URL and the same canonical
+# process-event source id.
+#
+# A REBUILD NEVER RELOADS THE OPEN PAGE. Lavish reloads the whole open page
+# whenever the page file changes, which would wipe text the captain is typing.
+# So the payload goes to bearings-board.data.js beside the page, as one
+# `window.FM_BEARINGS_BOARD_DATA = <json>;` assignment, and the page file is
+# rewritten only when the shipped template itself differs from it. The open
+# page re-reads the data file and patches only the cards that changed. The
+# template must load that file through exactly one
+# `<script src="bearings-board.data.js"></script>` line. The data is written
+# as the compact JSON with every `<` escaped as the \u003c string escape, so a
+# payload string containing "</script>" stays inert.
 #
 # FM_BEARINGS_BOARD_TEMPLATE overrides the shipped template path (tests only).
 set -eu
@@ -112,7 +124,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
-PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
+DATA_SCRIPT='<script src="bearings-board.data.js"></script>'
+DATA_PREFIX='window.FM_BEARINGS_BOARD_DATA = '
 BOARD_SCHEMA=fm-bearings-board.v1
 
 usage() {
@@ -129,6 +142,7 @@ fail() {
 }
 
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
+board_data_path() { printf '%s.data.js\n' "${1%.html}"; }
 
 validate_payload() {  # <data.json>
   jq -e --arg schema "$BOARD_SCHEMA" '
@@ -289,7 +303,7 @@ establish_board_session() {  # <board> <reopen-0-or-1>
   BOARD_SESSION_REOPENED=0
   real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
   # --no-open: a rebuild must never open another browser tab. A window that is
-  # already connected picks the rewritten file up through Lavish's own reload.
+  # already connected re-reads the board data file itself.
   out=$(lavish-axi "$board" --no-open) || fail "cannot establish the board Lavish session"
   printf '%s\n' "$out"
   if lavish_board_live "$out" "$real"; then
@@ -401,7 +415,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data board json tmp sid extracted effective owner version pre_reopen_owner reopen=1
+  local data board board_data json tmp sid extracted effective owner version pre_reopen_owner reopen=1
   if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   data=$1
@@ -410,8 +424,8 @@ command_build() {
   jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"
   validate_payload "$data" || fail "board data does not satisfy $BOARD_SCHEMA: $data"
   [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "board template is missing: $TEMPLATE"
-  [ "$(grep -cxF "$PLACEHOLDER" "$TEMPLATE")" -eq 1 ] \
-    || fail "board template does not carry exactly one data slot: $TEMPLATE"
+  [ "$(grep -cxF "$DATA_SCRIPT" "$TEMPLATE")" -eq 1 ] \
+    || fail "board template does not load the board data file exactly once: $TEMPLATE"
 
   effective=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-payload.XXXXXX") \
     || fail "cannot stage the board payload"
@@ -426,29 +440,37 @@ command_build() {
   json=${json//</\\u003c}
 
   board=$(board_path)
+  board_data=$(board_data_path "$board")
   (umask 077; mkdir -p "${board%/*}") || fail "cannot create ${board%/*}"
-  tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") || fail "cannot stage the board"
-  if ! BOARD_JSON="$json" perl -pe "s/^\\Q$PLACEHOLDER\\E\$/\$ENV{BOARD_JSON}/" "$TEMPLATE" > "$tmp"; then
+  tmp=$(umask 077; mktemp "${board%/*}/.board-data.XXXXXX") || fail "cannot stage the board data"
+  if ! printf '%s%s;\n' "$DATA_PREFIX" "$json" > "$tmp"; then
     rm -f -- "$tmp"
-    fail "cannot inject the board data"
+    fail "cannot write the board data"
   fi
-  if grep -qxF "$PLACEHOLDER" "$tmp"; then
-    rm -f -- "$tmp"
-    fail "the board data slot survived injection"
-  fi
-  # Round-trip the injected payload back out of the built page, so a board that
-  # would fail to parse in the browser fails here instead.
-  extracted=$(sed -n '/<script id="bearings-data" type="application\/json">/,/<\/script>/p' "$tmp" \
-    | sed '1d;$d')
+  # Round-trip the payload back out of the data file, so a board that would
+  # fail to parse in the browser fails here instead.
+  extracted=$(cat -- "$tmp")
+  extracted=${extracted#"$DATA_PREFIX"}
+  extracted=${extracted%;}
   if ! printf '%s\n' "$extracted" | jq -e --arg schema "$BOARD_SCHEMA" '.schema == $schema' >/dev/null 2>&1; then
     rm -f -- "$tmp"
-    fail "the built board does not carry a readable $BOARD_SCHEMA payload"
+    fail "the built board data does not carry a readable $BOARD_SCHEMA payload"
   fi
-  if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$board"; }; then
+  if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$board_data"; }; then
     rm -f -- "$tmp"
-    fail "cannot publish the board"
+    fail "cannot publish the board data"
+  fi
+  # The page file changes only when the template does, because any change to
+  # it makes Lavish reload the captain's open page.
+  if ! cmp -s -- "$TEMPLATE" "$board"; then
+    tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") || fail "cannot stage the board"
+    if ! { cp -- "$TEMPLATE" "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$board"; }; then
+      rm -f -- "$tmp"
+      fail "cannot publish the board"
+    fi
   fi
   printf 'board: %s\n' "$board"
+  printf 'data: %s\n' "$board_data"
 
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
