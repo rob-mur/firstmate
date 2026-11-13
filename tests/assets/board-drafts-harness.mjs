@@ -26,11 +26,17 @@
 //   tick            let pending timers (the debounced priority send) fire
 //   reorder         press "Reorder" on the deck
 //   page:<key>      press the first in-place page button on that key's card
+//   max             press the shown page's full screen button
+//   esc             press Esc on the board
+//   pageesc         the shown page's relay passes up an Esc pressed inside it
+//   snap            record the page frames now ({serial, src, parent, hidden}),
+//                   so a later snap shows whether a frame was re-created or moved
 // Pending timers fire after each chrome message and at the end of the run.
 // The page's data file is read from beside <built-board.html> each time the
 // page loads it, so a rebuild between polls is seen by the next poll.
 // Prints { cards, storage, calls, queue, anchors, ids, order, reloads,
-//   opens, pageView }; opens lists every url the page asked to open elsewhere.
+//   opens, pageView, snaps }; opens lists every url the page asked to open
+//   elsewhere.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 
@@ -38,16 +44,24 @@ const [, , boardPath, storagePath, actionList = ""] = process.argv;
 const html = readFileSync(boardPath, "utf8");
 const sessionPath = storagePath + ".session.json";
 
+let nodeSeq = 0;
 class Node {
   constructor(tag) {
-    this.tagName = tag; this.className = ""; this.children = []; this.attributes = {};
+    this.serial = ++nodeSeq; this.tagName = tag;
+    // A frame's window, so a message can come from the page inside it.
+    if (tag === "iframe") this.contentWindow = { frame: this.serial }; this.className = ""; this.children = []; this.attributes = {};
     this._text = ""; this.hidden = false; this.disabled = false; this.innerHTML = "";
     this.parentNode = null; this.type = ""; this.name = ""; this.value = ""; this.checked = false;
     this.listeners = {};
     this.classList = {
       add: (c) => { if (!this.classList.contains(c)) this.className = (this.className + " " + c).trim(); },
       remove: (c) => { this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" "); },
-      toggle: () => {}, contains: (c) => this.className.split(/\s+/).includes(c),
+      toggle: (c, force) => {
+        const on = force ?? !this.classList.contains(c);
+        if (on) this.classList.add(c); else this.classList.remove(c);
+        return on;
+      },
+      contains: (c) => this.className.split(/\s+/).includes(c),
     };
   }
   get textContent() { return this.children.length ? this.children.map((c) => c.textContent).join("") : this._text; }
@@ -144,6 +158,7 @@ globalThis.document = {
 const store = existsSync(storagePath) ? JSON.parse(readFileSync(storagePath, "utf8")) : {};
 const session = existsSync(sessionPath) ? JSON.parse(readFileSync(sessionPath, "utf8")) : { queue: {}, review: [] };
 const listeners = [];
+const keyListeners = [];
 const calls = [];
 const timers = [];
 const parent = {};
@@ -158,7 +173,7 @@ globalThis.window = {
   parent,
   open: (url) => { opens.push(String(url)); return null; },
   location: { reload: () => reloads.push("location.reload"), assign: () => reloads.push("location.assign"), replace: () => reloads.push("location.replace") },
-  addEventListener: (t, fn) => { if (t === "message") listeners.push(fn); },
+  addEventListener: (t, fn) => { if (t === "message") listeners.push(fn); if (t === "keydown") keyListeners.push(fn); },
   localStorage: process.env.NO_STORAGE
     ? { getItem() { throw new Error("SecurityError"); }, setItem() { throw new Error("SecurityError"); } }
     : {
@@ -205,6 +220,9 @@ const controls = () => scopes().flatMap((scope) =>
   })));
 
 const forms = () => byId.get("bb-call").querySelectorAll("form");
+const frames = () => byId.get("bb-pageframes").children;
+const shownFrame = () => frames().find((f) => !f.hidden);
+const snaps = [];
 for (const act of actionList.split(",").filter(Boolean)) {
   const cut = act.indexOf(":");
   const [name, arg] = cut < 0 ? [act, undefined] : [act.slice(0, cut), act.slice(cut + 1)];
@@ -247,6 +265,15 @@ for (const act of actionList.split(",").filter(Boolean)) {
   } else if (name === "page") {
     const card = forms().find((f) => f.attributes["data-lavish-question"] === arg).parentNode.parentNode;
     card.querySelectorAll("button").find((b) => b.attributes["data-board-page"] != null).fire("click");
+  } else if (name === "max") {
+    byId.get("bb-page-max").fire("click");
+  } else if (name === "esc") {
+    for (const fn of keyListeners) fn({ key: "Escape", preventDefault() {} });
+  } else if (name === "pageesc") {
+    for (const fn of listeners) fn({ data: { type: "fm-board-page:escape", prompt: "", opts: {} }, source: shownFrame().contentWindow });
+    flush();
+  } else if (name === "snap") {
+    snaps.push(frames().map((f) => ({ serial: f.serial, src: f.src, parent: f.parentNode?.id ?? "", hidden: f.hidden })));
   } else if (name === "reorder") {
     byId.get("bb-reorder").fire("click");
   } else if (name === "send") {
@@ -277,7 +304,12 @@ process.stdout.write(JSON.stringify({
   ids: forms().map((f) => f.id || ""),
   reloads,
   opens,
-  pageView: { shown: !byId.get("bb-pageview").hidden, title: byId.get("bb-page-title").textContent },
+  pageView: {
+    shown: !byId.get("bb-pageview").hidden, title: byId.get("bb-page-title").textContent,
+    max: byId.get("bb-pageview").classList.contains("is-max"),
+    maxPressed: byId.get("bb-page-max").getAttribute("aria-pressed"),
+  },
+  snaps,
   polls: intervals.length,
   sub: byId.get("bb-call-sub").textContent,
   order: {
