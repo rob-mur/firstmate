@@ -1231,6 +1231,9 @@ else
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
+    # A steer can hand a waiting decision to the worker, so ask an open board
+    # to refresh, best-effort and detached (bin/fm-board-refresh.sh).
+    "$SCRIPT_DIR/fm-board-refresh.sh" --kick >/dev/null 2>&1 || true
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.

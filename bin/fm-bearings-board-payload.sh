@@ -29,6 +29,10 @@
 #   - a hold whose id is a round (`<base>-r<N>`, `-round<N>`, `-v<N>`) is dropped
 #     when the same home has a higher round of the same base in decisions, work
 #     under way, landed work, or gates;
+#   - a decision the snapshot marks handed (handed_at: after it was last raised,
+#     a steer naming it went to the task it tracks, a resolved line closed its
+#     key, or the captain marked it out of date on the board) is a waiting row
+#     saying who has it, until the worker raises a fresh question;
 #   - a status row that only announces a page or PR is live or ready
 #     (is_announcement in bin/fm-bearings-question-lib.sh) is never a card: its
 #     links fold into the card for the same work (same home and task or decision
@@ -378,7 +382,19 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # itself is never a card or a waiting row.
   | ( [ $held[] | select(is_announcement(.) and (is_wait(.) | not)) ] ) as $announced
   | ( [ $held[] | select(is_announcement(.) and (is_wait(.) | not) | not) ] ) as $held
-  | def waitlike($d): is_wait($d);
+  # A decision handed to a worker after it was raised (handed_at, set by
+  # bin/fm-bearings-snapshot.sh) no longer waits on the captain: it is a wait
+  # until the worker raises a fresh question.
+  | def handed($d): ($d.handed_at // null) != null;
+    def waitlike($d): is_wait($d) or handed($d);
+    def handed_reason($d):
+      (($d.handed_at | tostring | .[:16] | sub("T"; " ")) + " UTC") as $when
+      | if $d.handed_via == "reconcile" then
+          "Marked out of date on the board at " + $when + "; firstmate is checking it"
+        else
+          "With " + ($d.handed_task // "the worker") + " since " + $when
+          + "; it raises a fresh question when it needs the captain"
+        end;
     ( [ $held[] | select(waitlike(.) | not) ] ) as $asked
   # One question, one card: a status decision whose key names a captain-held
   # task in the same home is the same question, so it folds into that hold card
@@ -406,7 +422,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         | . as $d
         | { key: $d.key,
             title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
-            reason: (($d.reason_full // $d.reason) | nz(null) | if . == null then "waiting" else (clean_reason | nz("waiting")) end),
+            reason: (if handed($d) then handed_reason($d)
+                     else (($d.reason_full // $d.reason) | nz(null) | if . == null then "waiting" else (clean_reason | nz("waiting")) end) end),
             repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null) } ] ) as $waiting
   # A card link is labelled by what it points at, never by its raw URL: a
   # PR/MR/issue number from the URL shape, or for a Lavish page the kind the

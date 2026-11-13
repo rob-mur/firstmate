@@ -15,12 +15,15 @@
 # what the captain is typing (bin/fm-bearings-board.sh owns how).
 #
 # --kick records a refresh request and starts this script detached, returning at
-# once; it is a no-op for a home that has not built a board. It is the hook for
-# every fleet state change: each wake appended to the queue
-# (bin/fm-wake-lib.sh: worker status, PR and MR state, checks, heartbeats), each
-# captain hold placed, answered, or reconciled (bin/fm-captain-hold.sh), each
-# task cleanup (bin/fm-teardown.sh), and each main wake drain
-# (bin/fm-wake-drain.sh).
+# once. In a secondmate home with no board it forwards the request once to the
+# parent home named by a local-route .fm-secondmate-parent record, because the
+# parent board shows that home's decisions; any other home without a board makes
+# it a no-op. It is the hook for every fleet state change: each wake appended to
+# the queue (bin/fm-wake-lib.sh: worker status, PR and MR state, checks,
+# heartbeats), each captain hold placed, answered, or reconciled, and each board
+# reconcile request recorded (bin/fm-captain-hold.sh), each steer recorded in a
+# task inbox (bin/fm-send.sh), each task cleanup (bin/fm-teardown.sh), and each
+# main wake drain (bin/fm-wake-drain.sh).
 #
 # Requests are never dropped, only coalesced:
 #   - each request marks state/.board-refresh.pending; a mkdir lock under state/
@@ -53,11 +56,32 @@ DEBOUNCE="${FM_BOARD_REFRESH_DEBOUNCE:-3}"
 MIN_INTERVAL="${FM_BOARD_REFRESH_MIN_INTERVAL:-15}"
 LOCK_TTL="${FM_BOARD_REFRESH_LOCK_TTL:-300}"
 
+# A secondmate home has no board of its own, but its decisions show on the
+# main board, so its kick goes to the parent home it is bound to over a local
+# route (bin/fm-secondmate-parent-lib.sh), once and never further up.
+forward_kick_to_parent() {
+  local record="$FM_HOME/.fm-secondmate-parent"
+  [ -z "${FM_BOARD_REFRESH_FORWARDED:-}" ] || return 0
+  [ -f "$record" ] || return 0
+  # shellcheck source=bin/fm-secondmate-parent-lib.sh
+  . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh" 2>/dev/null || return 0
+  fm_secondmate_parent_record_parse "$record" 2>/dev/null || return 0
+  [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 0
+  [ "$FM_SECONDMATE_PARENT_HOME" != "$FM_HOME" ] || return 0
+  [ -f "$FM_SECONDMATE_PARENT_HOME/.lavish/bearings-board.html" ] || return 0
+  env -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_CONFIG_OVERRIDE \
+    FM_HOME="$FM_SECONDMATE_PARENT_HOME" FM_BOARD_REFRESH_FORWARDED=1 \
+    "$0" --kick >/dev/null 2>&1 || true
+}
+
 FORCE=0
 case "${1:-}" in
   --force) FORCE=1 ;;
   --kick)
-    [ -f "$BOARD" ] || exit 0
+    if [ ! -f "$BOARD" ]; then
+      forward_kick_to_parent
+      exit 0
+    fi
     mkdir -p "$STATE" 2>/dev/null && : >"$PENDING" 2>/dev/null || exit 0
     ( nohup "$0" >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
     exit 0
