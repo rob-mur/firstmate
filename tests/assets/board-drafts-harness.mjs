@@ -23,6 +23,8 @@
 //   down:<key>      press the move-down button on that key's row
 //   go              press "Start answering" on the order step
 //   open:<key>      press that key's title in the order list to open its card
+//   expand:<key>    press an underway row (its order key) or a waiting row
+//                   ("waiting:<key>") to expand or collapse it in place
 //   tick            let pending timers (the debounced priority send) fire
 //   reorder         press "Reorder" on the deck
 //   page:<key>      press the first in-place page button on that key's card
@@ -52,14 +54,16 @@
 // The page's data file is read from beside <built-board.html> each time the
 // page loads it, so a rebuild between polls is seen by the next poll.
 // Prints { cards, storage, calls, queue, anchors, ids, order, reloads,
-//   opens, pageView, snaps, framePosts, keys, errors, boot, polls }; each card
+//   opens, pageView, snaps, framePosts, keys, errors, boot, polls, rows }; each card
 //   also carries error {shown, text} from the box beside its answer, errors
 //   has the priority's and the page view's boxes, boot is the load problem
 //   the page shows while it waits for its data ({shown, text}), and polls
 //   counts the page's live intervals; opens lists every url the
 //   page asked to open elsewhere, framePosts every message the board sent
 //   each page frame, keyed by page id, and keys every key press the board
-//   dispatched to itself. Lavish's own elements (ids starting "lavish-")
+//   dispatched to itself, and rows every underway and waiting row that can
+//   expand ({key, expanded, details}, details the shown detail text or null).
+//   Lavish's own elements (ids starting "lavish-")
 //   are absent unless the simulated chrome adds them.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
@@ -301,6 +305,11 @@ const forms = () => get("bb-call").querySelectorAll("form");
 const frames = () => get("bb-pageframes").children;
 const shownFrame = () => frames().find((f) => !f.hidden);
 const snaps = [];
+const expandable = () => [
+  ...get("bb-order-list").children.map((r) => ({ key: r.attributes["data-order-key"], row: r })),
+  ...get("bb-waiting-list").children.map((r) => ({ key: r.attributes["data-waiting-key"], row: r })),
+].map(({ key, row }) => ({ key, button: row.querySelector(".bb-expand"), details: row.querySelector(".bb-row-details") }))
+  .filter((r) => r.button);
 for (const act of actionList.split(",").filter(Boolean)) {
   const cut = act.indexOf(":");
   const [name, arg] = cut < 0 ? [act, undefined] : [act.slice(0, cut), act.slice(cut + 1)];
@@ -327,6 +336,8 @@ for (const act of actionList.split(",").filter(Boolean)) {
   } else if (name === "open") {
     const row = byId.get("bb-order-list").children.find((r) => r.attributes["data-order-key"] === arg);
     row.querySelector(".bb-order__open").fire("click");
+  } else if (name === "expand") {
+    expandable().find((r) => r.key === arg).button.fire("click");
   } else if (name === "focus") {
     document.activeElement = forms().find((f) => f.attributes["data-lavish-question"] === arg).querySelector("input[name=note]");
   } else if (name === "blur") {
@@ -426,4 +437,8 @@ process.stdout.write(JSON.stringify({
     titles: get("bb-order-list").children.map((r) => r.children[1].children[0].textContent),
     reorderDisabled: get("bb-reorder").disabled,
   },
+  rows: expandable().map((r) => ({
+    key: r.key, expanded: r.button.getAttribute("aria-expanded"),
+    details: r.details && !r.details.hidden ? r.details.textContent : null,
+  })),
 }) + "\n");

@@ -267,6 +267,18 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 .bb-waiting__row { border: 1px solid var(--border, #d8d2c4); border-radius: 8px; padding: 8px 10px; }
 .bb-waiting__title { font-size: var(--fs-sm); font-weight: 800; color: var(--text-strong); overflow-wrap: anywhere; }
 .bb-waiting__why { font-size: var(--fs-2xs); color: var(--text-muted); line-height: 1.4; overflow-wrap: anywhere; }
+/* An underway or waiting row is a native button (Lavish annotate mode lets a
+   native control act) that expands in place: collapsed it clips each line,
+   expanded it wraps the full text and shows the row's details below. */
+.bb-expand { all: unset; display: block; box-sizing: border-box; min-width: 0; width: 100%; cursor: pointer; }
+.bb-expand:focus-visible { outline: 2px solid var(--ocean-600); outline-offset: 2px; border-radius: 4px; }
+.bb-expand > span { display: block; }
+.bb-expand[aria-expanded="false"] > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bb-order__row { flex-wrap: wrap; }
+.bb-order__main.bb-expand { width: auto; flex: 1 1 0; }
+.bb-row-details { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-top: 8px; }
+.bb-order__row > .bb-row-details { flex: 1 1 100%; }
+.bb-row-details[hidden] { display: none; }
 .bb-decision__kicker { font-size: var(--fs-2xs); color: var(--text-faint); font-family: var(--font-mono); overflow-wrap: anywhere; }
 .bb-reorder { margin-left: 6px; }
 
@@ -701,6 +713,56 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     return out;
   }
 
+  function appendLinks(pad, item) {
+    cardLinks(item).forEach(function (l) {
+      if (l.note) {
+        pad.appendChild(el("span", "bb-decision__link bb-decision__link--note", l.note));
+        return;
+      }
+      if (l.page) {
+        var b = el("button", "bb-decision__link bb-decision__link--page", l.label);
+        b.type = "button";
+        b.setAttribute("data-board-page", l.page);
+        b.addEventListener("click", function () { showPage(l.page); });
+        pad.appendChild(b);
+        return;
+      }
+      var a = el("a", "bb-decision__link", l.label ? l.label + " - " + l.url : l.url);
+      a.href = l.url; a.target = "_blank"; a.rel = "noopener";
+      /* Lavish annotate mode lets native controls act but turns a plain link
+         click into an annotation note; data-lavish-action makes it navigate.
+         Only these new-tab links carry it: the header link only switches
+         back to the board view (PAGES SHOWN IN PLACE below). */
+      a.setAttribute("data-lavish-action", "");
+      pad.appendChild(a);
+    });
+  }
+  /* An underway or waiting row expands in place on a tap or click and
+     collapses on the next. Which rows are open is kept by key, so a live
+     re-render keeps them open. */
+  var expandedRows = {};
+  function expandable(key, btn, details) {
+    btn.type = "button";
+    function show() {
+      var open = !!expandedRows[key];
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      details.hidden = !open;
+    }
+    btn.addEventListener("click", function () {
+      if (expandedRows[key]) delete expandedRows[key]; else expandedRows[key] = true;
+      show();
+    });
+    show();
+  }
+  function rowDetails(rows, item) {
+    var details = el("div", "bb-row-details");
+    var ctx = el("div", "bb-ctx");
+    rows.forEach(function (r) { if (r[1]) ctx.appendChild(ctxRow(r[0], r[1])); });
+    details.appendChild(ctx);
+    appendLinks(details, item);
+    return details;
+  }
+
   /* Captain's chosen answer order. Stored beside the drafts so it survives a
      rebuild the same way; a copy also rides in a hidden control Lavish restores
      with the form, for the sandboxed frame that has no storage. */
@@ -714,7 +776,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     /* tasks under way join the list as priority-only rows (no card) */
     (Array.isArray(underway) ? underway : []).forEach(function (u) {
       if (!u || typeof u.id !== "string" || !u.id) return;
-      rankItems.push({ key: "task:" + u.id, title: u.name || u.id, repo: u.repo || null, underway: true, doing: u.doing || "" });
+      rankItems.push({ key: "task:" + u.id, id: u.id, title: u.name || u.id, repo: u.repo || null, underway: true,
+        doing: u.doing || "", state: u.state || "", pr_url: u.pr_url, links: u.links });
     });
     rankItems.forEach(function (c) { itemByKey[c.key] = c; });
     /* The payload order is the recorded priority (board-priority.txt order),
@@ -770,8 +833,15 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     while (waitingList.children.length) waitingList.removeChild(waitingList.children[0]);
     waitingRows.forEach(function (w) {
       var li = el("li", "bb-waiting__row");
-      li.appendChild(el("div", "bb-waiting__title", w.title));
-      li.appendChild(el("div", "bb-waiting__why", w.reason));
+      var key = "waiting:" + (w.key || w.title);
+      li.setAttribute("data-waiting-key", key);
+      var btn = el("button", "bb-expand bb-waiting__toggle");
+      btn.appendChild(el("span", "bb-waiting__title", w.title));
+      btn.appendChild(el("span", "bb-waiting__why", w.reason));
+      li.appendChild(btn);
+      var details = rowDetails([["repo", w.repo]], w);
+      li.appendChild(details);
+      expandable(key, btn, details);
       waitingList.appendChild(li);
     });
     document.getElementById("bb-waiting").hidden = !waitingRows.length;
@@ -818,28 +888,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);
     }
-    cardLinks(item).forEach(function (l) {
-      if (l.note) {
-        pad.appendChild(el("span", "bb-decision__link bb-decision__link--note", l.note));
-        return;
-      }
-      if (l.page) {
-        var b = el("button", "bb-decision__link bb-decision__link--page", l.label);
-        b.type = "button";
-        b.setAttribute("data-board-page", l.page);
-        b.addEventListener("click", function () { showPage(l.page); });
-        pad.appendChild(b);
-        return;
-      }
-      var a = el("a", "bb-decision__link", l.label ? l.label + " - " + l.url : l.url);
-      a.href = l.url; a.target = "_blank"; a.rel = "noopener";
-      /* Lavish annotate mode lets native controls act but turns a plain link
-         click into an annotation note; data-lavish-action makes it navigate.
-         Only these new-tab links carry it: the header link only switches
-         back to the board view (PAGES SHOWN IN PLACE below). */
-      a.setAttribute("data-lavish-action", "");
-      pad.appendChild(a);
-    });
+    appendLinks(pad, item);
 
     var form = document.createElement("form");
     form.id = stableId("bb-card-", item.key);
@@ -1024,7 +1073,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   function orderSig() {
     return JSON.stringify(orderKeys.map(function (k) {
       var item = itemByKey[k];
-      return [k, item.title, item.repo || null, !!item.underway, item.doing || ""];
+      return [k, item.title, item.repo || null, !!item.underway, item.doing || "",
+        item.underway ? [item.state, item.pr_url || null, item.links || null] : null];
     }));
   }
   function renderOrder() {
@@ -1036,8 +1086,9 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       row.draggable = true;
       row.setAttribute("data-order-key", k);
       row.appendChild(el("span", "bb-order__rank", String(i + 1)));
-      var main = el("div", "bb-order__main");
-      var titleEl = el(item.underway ? "div" : "button", "bb-order__title" + (item.underway ? "" : " bb-order__open"), item.title);
+      /* a decision's title opens its card; an underway row expands in place */
+      var main = el(item.underway ? "button" : "div", "bb-order__main" + (item.underway ? " bb-expand bb-order__expand" : ""));
+      var titleEl = el(item.underway ? "span" : "button", "bb-order__title" + (item.underway ? "" : " bb-order__open"), item.title);
       if (!item.underway) {
         titleEl.type = "button";
         titleEl.setAttribute("aria-label", "Open card: " + item.title);
@@ -1045,7 +1096,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       }
       main.appendChild(titleEl);
       var sub = [item.underway ? "underway" : "needs you", item.repo, item.underway && item.doing ? item.doing : null].filter(Boolean).join(" · ");
-      main.appendChild(el("div", "bb-order__repo", sub));
+      main.appendChild(el(item.underway ? "span" : "div", "bb-order__repo", sub));
       row.appendChild(main);
       var moves = el("div", "bb-order__moves");
       var up = el("button", "bb-stacknav__btn bb-order__up", "\u2191");
@@ -1056,6 +1107,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       down.addEventListener("click", function () { moveKey(k, i + 1); });
       moves.appendChild(up); moves.appendChild(down);
       row.appendChild(moves);
+      if (item.underway) {
+        var details = rowDetails([["state", item.state], ["task", item.id], ["repo", item.repo]], item);
+        row.appendChild(details);
+        expandable(k, main, details);
+      }
       row.addEventListener("dragstart", function (ev) {
         dragKey = k;
         try { ev.dataTransfer.effectAllowed = "move"; ev.dataTransfer.setData("text/plain", k); } catch (e) { /* no dataTransfer */ }
@@ -1275,7 +1331,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     Array.prototype.forEach.call(orderList.children, function (row) {
       if (!act || !row.contains || !row.contains(act)) return;
       focusKey = row.getAttribute("data-order-key");
-      ["bb-order__up", "bb-order__down", "bb-order__open"].forEach(function (c) {
+      ["bb-order__up", "bb-order__down", "bb-order__open", "bb-order__expand"].forEach(function (c) {
         if (act.classList && act.classList.contains(c)) focusCls = c;
       });
     });
