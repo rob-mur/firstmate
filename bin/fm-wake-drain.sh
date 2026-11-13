@@ -499,7 +499,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line answered item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line answered tagged item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
   if [ -n "$snapshot" ]; then
@@ -512,15 +512,29 @@ print_open_decisions_section() {
     return 0
   fi
 
+  # A decision the captain already answered on its captain call is never asked
+  # again: it is listed as answered so its recorded answer is relayed to the
+  # worker instead (owner of the match: status_open_decisions_tag_answered in
+  # fm-classify-lib.sh). Each task's decisions are matched in one batch, and
+  # tagged holds "<task>\t<key>\t<answered-task-id>" for the answered ones.
+  tagged=''
+  for task in $(printf '%s\n' "$open" | awk -F '\t' '$1 != "" && !seen[$1]++ { print $1 }'); do
+    tagged="$tagged$(printf '%s\n' "$open" \
+      | awk -F '\t' -v t="$task" '$1 == t { print substr($0, length(t) + 2) }' \
+      | status_open_decisions_tag_answered "$task" "$STATE/$task.status" \
+      | awk -F '\t' -v t="$task" '$1 != "" { print t "\t" $2 "\t" $1 }')"$'\n'
+  done
+
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    # A decision the captain already answered on its captain call is never
-    # asked again: it is listed as answered so its recorded answer is relayed to
-    # the worker instead (owner of the match: status_open_decisions_tag_answered
-    # in fm-classify-lib.sh).
-    answered=$(printf '%s\t%s\t%s\n' "$key" "$verb" "$note" \
-      | status_open_decisions_tag_answered "$task" "$STATE/$task.status")
-    answered=${answered%%$'\t'*}
+    answered=''
+    case $'\n'"$tagged" in
+      *$'\n'"$task"$'\t'"$key"$'\t'*)
+        answered=$'\n'$tagged
+        answered=${answered#*$'\n'"$task"$'\t'"$key"$'\t'}
+        answered=${answered%%$'\n'*}
+        ;;
+    esac
     # State the folded key on EVERY entry, "default" included. This section's
     # own hint asks the operator to pass that key to fm-send, and the note is
     # unedited worker prose that may itself carry a "[key=...]" token the key

@@ -6,8 +6,9 @@
 # The command does not acquire the session lock, drain wakes, arm watchers,
 # mutate backlog state, or write reports. Its default ledger collector may
 # atomically refresh parent-side cached copies of remote home summaries under
-# state/secondmate-summary-cache; those observational cache writes are its only
-# fleet-state mutation.
+# state/secondmate-summary-cache, and it caches each local task's current-state
+# read under state/crew-state-cache; those observational cache writes are its
+# only fleet-state mutation.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -184,6 +185,8 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_CREW_STATE_CACHE_TTL=${FM_SNAPSHOT_CREW_STATE_CACHE_TTL:-30}
+FM_SNAPSHOT_CREW_STATE_CACHE_DIR=${FM_SNAPSHOT_CREW_STATE_CACHE_DIR:-$STATE/crew-state-cache}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -199,6 +202,15 @@ case "$FM_SNAPSHOT_SECONDMATES" in
     ;;
 esac
 validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
+case "$FM_SNAPSHOT_CREW_STATE_CACHE_TTL" in
+  ''|*[!0-9]*)
+    echo "fm-fleet-snapshot: FM_SNAPSHOT_CREW_STATE_CACHE_TTL must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
+# The cache clock is the real wall clock, never FM_SNAPSHOT_NOW_EPOCH, so a
+# pinned observation time cannot keep a cached read alive forever.
+CREW_STATE_CACHE_NOW=$(date +%s)
 validate_positive_bound FM_SNAPSHOT_LOCAL_READ_CONCURRENCY "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY"
 validate_positive_bound FM_SNAPSHOT_BUDGET "$FM_SNAPSHOT_BUDGET"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
@@ -283,6 +295,10 @@ observations run in batches of up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY tasks
 own observation worker, and each batch waits for its slowest task before the next
 batch starts. That fold and the bounded current-state read both scan the task's
 whole status history, so collection time still grows with accumulated history.
+A known current-state read is reused from FM_SNAPSHOT_CREW_STATE_CACHE_DIR
+(default state/crew-state-cache) while the task's status log and metadata are
+unchanged, for at most FM_SNAPSHOT_CREW_STATE_CACHE_TTL seconds (default 30;
+0 disables the cache).
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
@@ -317,13 +333,6 @@ bool_json() {
   if [ "$1" = 1 ]; then printf 'true'; else printf 'false'; fi
 }
 
-path_present_json() {  # <contract-path> [<observed-path>]
-  local path=$1 observed=${2:-$1} present=0
-  [ -e "$observed" ] && present=1
-  jq -n --arg path "$path" --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present}'
-}
-
 meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
 }
@@ -335,8 +344,10 @@ last_nonempty_line() {  # <file>
 
 # A local crew-state read is bounded so one slow child cannot extend this
 # snapshot without limit. Remote secondmate endpoint liveness is never read here.
-# A local read that hits the bound folds to state unknown.
-crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
+# A local read that hits the bound folds to state unknown. The result is a
+# four-line record (raw, state, source, detail; each a single line) that
+# task_json_lines turns into the current_state object inside its one jq call.
+crew_state_record() {  # <id> [<captured-meta>] [<captured-status>]
   local id=$1 captured_meta=${2:-} captured_status=${3:-} raw rest state source detail sep
   raw=$(
     fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
@@ -366,30 +377,66 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
       esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  printf '%s\n%s\n%s\n%s\n' "$raw" "$state" "$source" "$detail"
 }
 
-status_event_json() {  # <observed-status-log> [<contract-path>]
-  local log=$1 path=${2:-$1} present=0 raw='' verb='' note='' epoch=null age=null
-  if [ -f "$log" ]; then
-    present=1
-    raw=$(last_nonempty_line "$log" || true)
-    verb=$(status_line_verb "$raw")
-    note=$(status_line_note "$raw")
-    epoch=$(status_line_at_epoch "$raw") || epoch=null
-    if [ "$epoch" != null ] && [ "$epoch" -le "$SNAPSHOT_EPOCH" ]; then
-      age=$((SNAPSHOT_EPOCH - epoch))
-    fi
+# Identity of one live input file for the crew-state cache key: device, inode,
+# mtime and size, or "absent". An append changes the size and an atomic rewrite
+# changes the inode, so either invalidates the cached read.
+crew_state_file_stamp() {  # <file>
+  local stamp
+  if [ "$(uname)" = Darwin ]; then
+    stamp=$(/usr/bin/stat -f '%d:%i:%m:%z' "$1" 2>/dev/null) || stamp=absent
+  else
+    stamp=$(stat -c '%d:%i:%Y:%s' "$1" 2>/dev/null) || stamp=absent
   fi
-  jq -n \
-    --arg path "$path" \
-    --arg raw "$raw" \
-    --arg verb "$verb" \
-    --arg note "$note" \
-    --argjson age "$age" \
-    --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,age_seconds:$age}}'
+  printf '%s' "$stamp"
+}
+
+# Per-task cache of the crew-state record. fm-crew-state.sh is the costliest
+# per-task read, and most snapshots see the same status and meta as the last one.
+# A cached record is reused only while the live state/<id>.status and
+# state/<id>.meta keep the stamps they had when it was read, and only for
+# FM_SNAPSHOT_CREW_STATE_CACHE_TTL seconds (default 30; 0 disables the cache).
+# The TTL bounds how long a change in a source the stamps cannot see (a
+# no-mistakes run step, a pane going idle, a forge merge) stays hidden.
+# The caller takes the key before it captures the status log, so an append that
+# lands after the capture leaves a stale key and the next snapshot reads again.
+# An unknown read (a timeout, a missing helper) is never cached.
+crew_state_cache_key() {  # <id>
+  printf '%s/%s' "$(crew_state_file_stamp "$STATE/$1.status")" "$(crew_state_file_stamp "$STATE/$1.meta")"
+}
+
+crew_state_cached_record() {  # <id> <captured-meta> <captured-status> <cache-key>
+  local id=$1 key=$4 cache tmp stored_key stored_at record
+  if [ "$FM_SNAPSHOT_CREW_STATE_CACHE_TTL" = 0 ]; then
+    crew_state_record "$id" "$2" "$3"
+    return
+  fi
+  cache="$FM_SNAPSHOT_CREW_STATE_CACHE_DIR/$id"
+  if [ -f "$cache" ] && { IFS= read -r stored_key && IFS= read -r stored_at; } < "$cache" \
+    && [ "$stored_key" = "$key" ] \
+    && case "$stored_at" in ''|*[!0-9]*) false ;; *) true ;; esac \
+    && [ "$CREW_STATE_CACHE_NOW" -ge "$stored_at" ] \
+    && [ $((CREW_STATE_CACHE_NOW - stored_at)) -lt "$FM_SNAPSHOT_CREW_STATE_CACHE_TTL" ]; then
+    tail -n +3 "$cache"
+    return
+  fi
+  record=$(crew_state_record "$id" "$2" "$3")
+  printf '%s\n' "$record"
+  case "$record" in $'\n'*|*$'\n'unknown$'\n'*) return 0 ;; esac
+  mkdir -p "$FM_SNAPSHOT_CREW_STATE_CACHE_DIR" 2>/dev/null || return 0
+  tmp="$cache.tmp.$$"
+  if printf '%s\n%s\n%s\n' "$key" "$CREW_STATE_CACHE_NOW" "$record" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$cache" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+  return 0
+}
+
+crew_state_unknown_record() {  # <detail>
+  printf '\nunknown\nnone\n%s\n' "$1"
 }
 
 first_pr_url_in_file() {  # <file>
@@ -647,10 +694,10 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture open_file
+  local status_log status_capture report_path report_capture open_file crew_key=''
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
-  current_file="$SNAPSHOT_TASK_DIR/$id.json"
+  current_file="$SNAPSHOT_TASK_DIR/$id.crew"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
   open_file="$SNAPSHOT_TASK_DIR/$id.open-decisions"
   status_log="$STATE/$id.status"
@@ -662,16 +709,17 @@ prefetch_task_observations() {  # <meta> <id>
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
+    [ "$FM_SNAPSHOT_CREW_STATE_CACHE_TTL" = 0 ] || crew_key=$(crew_state_cache_key "$id")
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
   if [ -n "$remote_host" ]; then
-    jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
+    crew_state_unknown_record "remote endpoint liveness not collected by fleet snapshot" \
       > "$current_file" || current_rc=1
     agent_alive=unknown
   elif [ "$generation_current" = 1 ]; then
-    crew_state_json "$id" "$meta" "$status_capture" > "$current_file" &
+    crew_state_cached_record "$id" "$meta" "$status_capture" "$crew_key" > "$current_file" &
     current_pid=$!
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
@@ -686,7 +734,7 @@ prefetch_task_observations() {  # <meta> <id>
       fi
     fi
   else
-    jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
+    crew_state_unknown_record "task generation changed during snapshot" \
       > "$current_file" || current_rc=1
     agent_alive=unknown
   fi
@@ -701,7 +749,7 @@ prefetch_task_observations() {  # <meta> <id>
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
     rm -f -- "$status_capture" "$report_capture"
     : > "$open_file" || current_rc=1
-    jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
+    crew_state_unknown_record "task generation changed during snapshot" \
       > "$current_file" || current_rc=1
     endpoint_exists=null
     agent_alive=unknown
@@ -774,9 +822,10 @@ prefetch_task_current_states() {
 task_json_row() {  # <captured-meta> <id>
   local meta=$1 id=$2 original_meta kind harness mode yolo project worktree home projects spawn_gen branch backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local pr pr_source endpoint_exists agent_alive
+  local last_event_raw last_event_verb last_event_note last_event_age last_event_epoch status_present
+  local current_raw current_state current_source current_detail report_present=0 pr_from_status
+  local meta_present report_path_present worktree_present home_present open_decisions_tsv open_decisions_history
 
   original_meta="$STATE/$id.meta"
   kind=$(meta_value "$meta" kind)
@@ -813,13 +862,32 @@ task_json_row() {  # <captured-meta> <id>
     pr_source=absent
   fi
 
-  current_file="$SNAPSHOT_TASK_DIR/$id.json"
-  current_json=$(<"$current_file") || return 1
-  event_json=$(status_event_json "$status_log" "$STATE/$id.status")
-  last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
-  read -r current_state current_source < <(
-    printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
-  )
+  # Every per-task field is gathered in the shell and composed by the one jq
+  # call at the end of this function, so a task costs one jq process.
+  current_file="$SNAPSHOT_TASK_DIR/$id.crew"
+  [ -f "$current_file" ] || return 1
+  {
+    IFS= read -r current_raw || true
+    IFS= read -r current_state || true
+    IFS= read -r current_source || true
+    IFS= read -r current_detail || true
+  } < "$current_file"
+  # The status log's newest event, observed from the captured copy.
+  status_present=0
+  last_event_raw=''
+  last_event_verb=''
+  last_event_note=''
+  last_event_age=null
+  if [ -f "$status_log" ]; then
+    status_present=1
+    last_event_raw=$(last_nonempty_line "$status_log" || true)
+    last_event_verb=$(status_line_verb "$last_event_raw")
+    last_event_note=$(status_line_note "$last_event_raw")
+    last_event_epoch=$(status_line_at_epoch "$last_event_raw") || last_event_epoch=null
+    if [ "$last_event_epoch" != null ] && [ "$last_event_epoch" -le "$SNAPSHOT_EPOCH" ]; then
+      last_event_age=$((SNAPSHOT_EPOCH - last_event_epoch))
+    fi
+  fi
 
   # Durable keyed open-decision set: the worker folded the WHOLE status stream
   # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -852,26 +920,15 @@ task_json_row() {  # <captured-meta> <id>
     open_decisions_tsv=$(printf '%s\n' "$open_decisions_tsv" \
       | status_open_decisions_unanswered "$id" "$status_log")
   fi
-  open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
-    [ splits("\n") | select(length > 0)
-      | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
-      | select(. != null) ]')
   # A decision raised again under the same key keeps only its newest line in
   # the fold; the notes of its earlier lines ride along as .earlier so a
   # reader can recover what the current line only refers to (owner of the
-  # walk: status_open_decision_history in fm-classify-lib.sh).
+  # walk: status_open_decision_history in fm-classify-lib.sh). The final jq
+  # parses both sets.
+  open_decisions_history=''
   if [ -n "$open_decisions_tsv" ]; then
-    open_decisions_json=$(status_open_decision_history "$status_log" "$kind" \
-      | jq -R -s --argjson open "$open_decisions_json" '
-        ( [ splits("\n") | select(length > 0)
-            | (capture("^(?<key>[^\t]*)\t(?<note>.*)$")?) | select(. != null) ]
-          | group_by(.key) | map({key: .[0].key, value: ([.[].note] | .[:-1])})
-          | from_entries ) as $hist
-        | $open | map(. as $d | ($hist[$d.key] // []) as $e
-            | if ($e | length) > 0 then . + {earlier: $e} else . end)')
+    open_decisions_history=$(status_open_decision_history "$status_log" "$kind")
   fi
-  pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
-  blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
   endpoint_exists=null
   agent_alive=not_checked
@@ -883,16 +940,15 @@ task_json_row() {  # <captured-meta> <id>
     esac
   done < "$endpoint_file" || return 1
   [ -f "$report_path" ] && report_present=1 || report_present=0
-  meta_json=$(path_present_json "$original_meta" "$meta")
-  status_json=$event_json
-  report_json=$(path_present_json "$DATA/$id/report.md" "$report_path")
-  if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
+  [ -e "$meta" ] && meta_present=true || meta_present=false
+  [ -e "$report_path" ] && report_path_present=true || report_path_present=false
+  worktree_present=false
+  [ -z "$worktree" ] || [ ! -e "$worktree" ] || worktree_present=true
+  home_present=false
   if [ -n "$home" ] && [ -n "$remote_host" ]; then
-    home_json=$(jq -n --arg path "$home" '{path:$path,present:null}')
-  elif [ -n "$home" ]; then
-    home_json=$(path_present_json "$home")
-  else
-    home_json=$(jq -n '{path:null,present:false}')
+    home_present=null
+  elif [ -n "$home" ] && [ -e "$home" ]; then
+    home_present=true
   fi
 
   jq -n \
@@ -917,18 +973,44 @@ task_json_row() {  # <captured-meta> <id>
     --arg agent_alive "$agent_alive" \
     --arg observed_at "$SNAPSHOT_NOW" \
     --arg last_event_raw "$last_event_raw" \
-    --argjson current_state "$current_json" \
-    --argjson meta_path "$meta_json" \
-    --argjson status_log "$status_json" \
-    --argjson report "$report_json" \
-    --argjson worktree_path "$worktree_json" \
-    --argjson home_path "$home_json" \
+    --arg last_event_verb "$last_event_verb" \
+    --arg last_event_note "$last_event_note" \
+    --argjson last_event_age "$last_event_age" \
+    --arg current_raw "$current_raw" \
+    --arg current_state "$current_state" \
+    --arg current_source "$current_source" \
+    --arg current_detail "$current_detail" \
+    --arg meta_contract_path "$original_meta" \
+    --argjson meta_present "$meta_present" \
+    --arg status_contract_path "$STATE/$id.status" \
+    --argjson status_present "$(bool_json "$status_present")" \
+    --arg report_contract_path "$DATA/$id/report.md" \
+    --argjson report_path_present "$report_path_present" \
+    --argjson worktree_present "$worktree_present" \
+    --argjson home_present "$home_present" \
     --argjson endpoint_exists "$endpoint_exists" \
-    --argjson open_decisions "$open_decisions_json" \
-    --argjson pending_decision "$(bool_json "$pending_decision")" \
-    --argjson blocked_event "$(bool_json "$blocked_event")" \
+    --arg open_decisions_tsv "$open_decisions_tsv" \
+    --arg open_decisions_history "$open_decisions_history" \
     --argjson report_present "$(bool_json "$report_present")" \
-    '{
+    '( [ $open_decisions_tsv | splits("\n") | select(length > 0)
+         | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
+         | select(. != null) ] ) as $open
+    | ( [ $open_decisions_history | splits("\n") | select(length > 0)
+          | (capture("^(?<key>[^\t]*)\t(?<note>.*)$")?) | select(. != null) ]
+        | group_by(.key) | map({key: .[0].key, value: ([.[].note] | .[:-1])})
+        | from_entries ) as $hist
+    | ( $open | map(. as $d | ($hist[$d.key] // []) as $e
+          | if ($e | length) > 0 then . + {earlier: $e} else . end) ) as $open_decisions
+    | any($open_decisions[]; .verb == "needs-decision") as $pending_decision
+    | any($open_decisions[]; .verb == "blocked") as $blocked_event
+    | {state:$current_state,source:$current_source,detail:$current_detail,raw:$current_raw} as $current_state
+    | {path:$meta_contract_path,present:$meta_present} as $meta_path
+    | {path:$status_contract_path,present:$status_present,kind:"event_history",
+       last_event:{state:$last_event_verb,note:$last_event_note,raw:$last_event_raw,age_seconds:$last_event_age}} as $status_log
+    | {path:$report_contract_path,present:$report_path_present} as $report
+    | {path:($worktree | if . == "" then null else . end),present:$worktree_present} as $worktree_path
+    | {path:($home | if . == "" then null else . end),present:$home_present} as $home_path
+    | {
       id:$id,
       kind:$kind,
       harness:($harness // ""),
