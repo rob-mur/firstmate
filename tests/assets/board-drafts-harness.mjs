@@ -136,6 +136,11 @@ const byId = new Map();
 // Any other selector the page asks for is one stable element per selector.
 const bySel = new Map();
 const dataPath = boardPath.replace(/\.html$/, ".data.js");
+// A built page loads its code from bearings-board.app.js beside it; the bare
+// template carries the same code inline.
+const boardCode = (path, page) => page.includes("<script>")
+  ? page.slice(page.indexOf("<script>") + 8, page.lastIndexOf("</script>"))
+  : readFileSync(path.replace(/\.html$/, ".app.js"), "utf8");
 // A data file that is cut short still "loads": the browser runs what arrived,
 // which throws, and fires the script's load event anyway.
 const loadData = () => {
@@ -190,6 +195,8 @@ globalThis.document = {
     }
     return n;
   },
+  querySelectorAll: (sel) => [...new Set([...byId.values()].map((n) => { while (n.parentNode) n = n.parentNode; return n; }))]
+    .flatMap((root) => root.querySelectorAll(sel)),
   dispatchEvent: (ev) => { keys.push({ type: ev.type, key: ev.key, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey }); return true; },
   getElementById: (id) => {
     if (id.startsWith("lavish-")) return null;
@@ -225,10 +232,11 @@ globalThis.window = {
   location: { reload: () => reloads.push("location.reload"), assign: () => reloads.push("location.assign"), replace: () => reloads.push("location.replace") },
   addEventListener: (t, fn) => { if (t === "message") listeners.push(fn); if (t === "keydown") keyListeners.push(fn); },
   localStorage: process.env.NO_STORAGE
-    ? { getItem() { throw new Error("SecurityError"); }, setItem() { throw new Error("SecurityError"); } }
+    ? { getItem() { throw new Error("SecurityError"); }, setItem() { throw new Error("SecurityError"); }, removeItem() { throw new Error("SecurityError"); } }
     : {
         getItem: (k) => (k in store ? store[k] : null),
         setItem: (k, v) => { store[k] = String(v); writeFileSync(storagePath, JSON.stringify(store)); },
+        removeItem: (k) => { delete store[k]; writeFileSync(storagePath, JSON.stringify(store)); },
       },
 };
 // Lavish keys a queued prompt by the explicit queueKey, else by the anchoring
@@ -260,7 +268,7 @@ globalThis.FormData = class {
 globalThis.TextEncoder = TextEncoder;
 
 loadData();
-new Function(html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>")))();
+new Function(boardCode(boardPath, html))();
 
 const post = (data) => { for (const fn of listeners) fn({ data, source: parent }); flush(); };
 // A frame load or a send always reports; a queue call reports only a change
