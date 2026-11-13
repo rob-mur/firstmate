@@ -79,6 +79,8 @@ esac
 file=$1
 shift
 printf '%s\n' "$*" >> "$state/open-calls"
+# Record any open that would have been allowed to launch a browser.
+[ "${LAVISH_AXI_NO_OPEN-}" = 1 ] || : > "$state/browser-allowed"
 reopen=0
 for arg in "$@"; do [ "$arg" != --reopen ] || reopen=1; done
 real=$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")
@@ -704,6 +706,92 @@ test_a_waiting_page_agent_restarts_the_board_listener() {
   pass "a page agent that waits restarts the board listener so its actions arrive at once"
 }
 
+# --- the stable board link ---------------------------------------------------
+
+test_url_refuses_before_any_board_is_built() {
+  local home rc out
+  home=$(make_home url-unbuilt)
+  set +e
+  out=$(run_board "$home" url 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "url printed a link for a board that was never built: $out"
+  assert_contains "$out" "no board has been built" "the refusal did not say why: $out"
+  [ ! -e "$home/lavish-state/open" ] || fail "url opened a Lavish session with no board"
+  pass "url refuses before any board is built"
+}
+
+test_url_prints_only_the_live_link_without_a_browser() {
+  local home data board out err sid
+  home=$(make_home url-live)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  rm -f "$home/lavish-state/browser-allowed"
+  cp "$board" "$home/board-before"
+  out=$(run_board "$home" url 2>"$home/url.err") || fail "url failed on a live board: $(cat "$home/url.err")"
+  err=$(cat "$home/url.err")
+  [ "$out" = "http://127.0.0.1:4387/session/0123456789abcdef" ] \
+    || fail "url did not print exactly the listed board link: $out"
+  case "$err" in *reopened*) fail "url reported a reopen for a live board: $err" ;; esac
+  [ ! -e "$home/lavish-state/browser-allowed" ] || fail "url let Lavish open a browser"
+  cmp -s "$board" "$home/board-before" || fail "url rebuilt the board instead of only serving it"
+  sid=$(run_lavish_source_id "$home" "$board")
+  [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
+    || fail "url left the live board without a listener"
+  pass "url prints only the live board link, without a browser or a rebuild"
+}
+
+test_url_reopens_a_board_the_captain_ended() {
+  local home data board out err sid claim old_pid old_token
+  home=$(make_home url-ended)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  sid=$(run_lavish_source_id "$home" "$board")
+  claim="$home/procevent-claims/$sid.claim"
+  old_pid=$(sed -n '2p' "$claim")
+  old_token=$(sed -n '3p' "$claim")
+
+  # The captain closed the board: the old listener sees the end, and a plain
+  # open now refuses. Asking for the link must bring the same board back with
+  # somewhere for its answers to go.
+  : > "$home/lavish-state/poll-trigger"
+  sleep 0.5
+  rm -f "$home/lavish-state/poll-trigger"
+  end_session_as_captain "$home"
+  out=$(run_board "$home" url 2>"$home/url.err") || fail "url refused a recoverable ended board: $(cat "$home/url.err")"
+  err=$(cat "$home/url.err")
+  [ "$out" = "http://127.0.0.1:4387/session/0123456789abcdef" ] \
+    || fail "url did not print the reopened board link: $out"
+  assert_contains "$err" "reopened: yes" "url did not report the reopen: $err"
+  [ -s "$home/lavish-state/open" ] || fail "url printed a link while the session stayed ended"
+  [ "$(sed -n '2p' "$claim")" != "$old_pid" ] || [ "$(sed -n '3p' "$claim")" != "$old_token" ] \
+    || fail "url kept the pre-reopen source generation"
+  [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
+    || fail "the reopened board has no live listener"
+  pass "url reopens a board the captain ended and re-arms its answers"
+}
+
+test_url_refuses_when_the_board_stays_ended() {
+  local home data rc out
+  home=$(make_home url-dead)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  end_session_as_captain "$home"
+  : > "$home/lavish-state/refuse-reopen"
+  set +e
+  out=$(run_board "$home" url 2>/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "url succeeded on a board that stayed ended"
+  [ -z "$out" ] || fail "url printed a link to a board that stayed ended: $out"
+  pass "url prints no link when the board cannot be brought back"
+}
+
 # --- part 2: a landed subject is not a live call ----------------------------
 
 test_build_drops_decision_cards_whose_subject_already_landed() {
@@ -891,6 +979,10 @@ test_build_reopens_when_an_opened_session_ends_before_listing
 test_build_refuses_to_arm_when_the_session_stays_ended
 test_build_starts_a_listener_for_an_already_armed_board
 test_a_waiting_page_agent_restarts_the_board_listener
+test_url_refuses_before_any_board_is_built
+test_url_prints_only_the_live_link_without_a_browser
+test_url_reopens_a_board_the_captain_ended
+test_url_refuses_when_the_board_stays_ended
 test_build_drops_decision_cards_whose_subject_already_landed
 test_build_keeps_a_decision_absent_from_the_main_backlog
 test_build_fails_when_reconcile_cannot_establish_a_listener
