@@ -63,7 +63,10 @@
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
-#     booleans derived from that set.
+#     booleans derived from that set. A decision raised more than once under
+#     its key since it last opened carries .earlier, the notes of its
+#     superseded lines oldest first, so options only an earlier line spelled
+#     out stay recoverable.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
@@ -850,6 +853,20 @@ task_json_row() {  # <captured-meta> <id>
     [ splits("\n") | select(length > 0)
       | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
       | select(. != null) ]')
+  # A decision raised again under the same key keeps only its newest line in
+  # the fold; the notes of its earlier lines ride along as .earlier so a
+  # reader can recover what the current line only refers to (owner of the
+  # walk: status_open_decision_history in fm-classify-lib.sh).
+  if [ -n "$open_decisions_tsv" ]; then
+    open_decisions_json=$(status_open_decision_history "$status_log" "$kind" \
+      | jq -R -s --argjson open "$open_decisions_json" '
+        ( [ splits("\n") | select(length > 0)
+            | (capture("^(?<key>[^\t]*)\t(?<note>.*)$")?) | select(. != null) ]
+          | group_by(.key) | map({key: .[0].key, value: ([.[].note] | .[:-1])})
+          | from_entries ) as $hist
+        | $open | map(. as $d | ($hist[$d.key] // []) as $e
+            | if ($e | length) > 0 then . + {earlier: $e} else . end)')
+  fi
   pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
   blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 

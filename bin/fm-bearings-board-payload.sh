@@ -50,7 +50,10 @@
 #                      derived default choices (bin/fm-bearings-question-lib.sh: the
 #                      reason's own numbered, lettered or listed options in full, a two-way
 #                      or, yes/no, else approve/decline; an authored overlay `options` still
-#                      wins) with reconcile secondary, and any
+#                      wins) with reconcile secondary. Options the text refers to but does
+#                      not list ("A/B/C") come from its other listing or its `reason_earlier`
+#                      lines; when none lists them the card carries `malformed`, a sentence
+#                      saying so, and no button for them (recover_options). And any
 #                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`.
 #                      A link is labelled by what it points at - `PR <n>`, `MR <n>`,
 #                      `Issue <n>`, or for a Lavish page `Understand page`, `Review page`,
@@ -551,6 +554,16 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                     ([.[] | select(.label == $l.label or (.label | startswith($l.label + " (")))] | length) as $n
                     | . + [if $n > 0 then $l + {label: ($l.label + " (" + (($n + 1) | tostring) + ")")} else $l end])
                 | if length > 0 then {links: .} else {} end ) )
+          # A card whose text refers to options it does not carry takes them
+          # from its own or earlier text, else says it refers to options it
+          # does not list (recover_options in bin/fm-bearings-question-lib.sh).
+          | if ($d.verb // "") == "review-ready" then .
+            else recover_options(
+                   [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
+                   | map(nz(null) | select(. != null) | clean_reason);
+                   [ ($d.reason_earlier // [])[], (($d.twins // [])[] | (.reason_earlier // [])[]) ]
+                   | map(tostring | clean_reason) | reverse)
+            end
           # A decision answered on its Lavish page shows only the link to that
           # page: no recap, no choices, and a title that names what the page is
           # about rather than the sentence pointing at it.
@@ -569,7 +582,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                      + ( [ (.links // [])[] | select(.url | startswith("http://dev-1.tailf848b0.ts.net:4387/")) ]
                          | if length > 0 then {links: .} else {} end ) )
             end
-          | . + overlay("captains_call"; $d.key; card_fields)
+          | overlay("captains_call"; $d.key; card_fields) as $ov
+          | . + $ov
+          | if ($ov | has("options")) then del(.malformed) else . end
           | . as $card
           | select((($copy.captains_call // {}) | has($d.key) | not)
                    or ($copy.captains_call[$d.key] != null))

@@ -43,7 +43,8 @@
 # dated deferral from a live call, plus hold_set and origin for the hand-off
 # check below (a decision handed to a worker gains handed_* fields). A needs-decision or blocked status
 # on a task under way, main or secondmate, also reaches decisions_open as a
-# source:"status" row with task, decision_key and mate for routing the answer. A
+# source:"status" row with task, decision_key and mate for routing the answer,
+# plus reason_earlier when the same key was raised before with other text. A
 # secondmate question the parent status log shows (the wake drain's open
 # decisions) is read from the parent task itself, so it reaches the board even
 # when the home summary is invalid; it is skipped only when the home is valid
@@ -466,7 +467,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        title:($title | trunc(60)),reason:((.summary // "-") | trunc(80)),
        title_full:$title,reason_full:(.summary // "-"),
        summary:hold_summary($title; (.summary // "captain decision pending")),
-       question:(.summary // "-"),owner:$owner};
+       question:(.summary // "-"),owner:$owner}
+      + (if ((.earlier // []) | length) > 0 then {reason_earlier:.earlier} else {} end);
   # A finished task whose last event names a live Lavish review page is a page
   # the captain has not opened yet: it is a question card linking to that page.
   def review_page_row($t):
