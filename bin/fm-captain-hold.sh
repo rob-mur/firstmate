@@ -34,6 +34,7 @@
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh answered <origin-task-id> <decision-key> --opened-at <epoch>
+#   fm-captain-hold.sh answered-batch <origin-task-id>   (<decision-key>\t<epoch> lines on stdin)
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -220,6 +221,16 @@
 # question re-raised after the answer, an unknown time, or an unreadable
 # backlog, exits 1 so the surface keeps showing the call. It never closes,
 # answers, or writes anything.
+#
+# `answered-batch` asks `answered` for every keyed decision of one origin in a
+# single process: each stdin line is `<decision-key><TAB><epoch>`, and it prints
+# `<decision-key><TAB><answered-task-id>` for each one `answered` would match,
+# nothing for the rest, and always exits 0. The matching rule is `answered`'s,
+# run per key. Only the cost differs: the tasks-axi compatibility probe runs
+# once per batch instead of once per candidate id, and on the markdown backend
+# a candidate id whose text appears in neither the backlog file nor the Done
+# archive is known absent without a tasks-axi read, which is exactly what
+# `answered` concludes for it after its reads.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -2491,6 +2502,11 @@ command_answered() {  # <origin-task-id> <decision-key> --opened-at <epoch>
   case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   case "$opened" in ''|*[!0-9]*) return 1 ;; esac
   for id in "$key" "$origin-decision-$key"; do
+    # A batch that read the markdown backlog and archive knows an id neither
+    # mentions is absent: not open, no live row, no archived row.
+    if [ "$ANSWERED_BATCH_TEXT_SET" = 1 ]; then
+      case "$ANSWERED_BATCH_TEXT" in *"$id"*) ;; *) continue ;; esac
+    fi
     # Still an open captain call (0) or cannot tell (2): not answered.
     ( command_open "$id" ) >/dev/null 2>&1 && return 1
     [ "$?" -eq 1 ] || return 1
@@ -2525,6 +2541,49 @@ command_answered() {  # <origin-task-id> <decision-key> --opened-at <epoch>
   return 1
 }
 
+# The keyed decisions of one origin that the captain already answered, in one
+# process (see the header). Each key runs command_answered in its own subshell,
+# so a read that stops the command for one key leaves that key unanswered and
+# the batch running. ANSWERED_BATCH_TEXT, when set, holds the markdown backlog
+# and archive text read once for the batch; command_answered skips a candidate
+# id that text never mentions.
+ANSWERED_BATCH_TEXT_SET=0
+ANSWERED_BATCH_TEXT=
+answered_batch_index() {
+  local data root backend file archive
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  backend=$(fm_tasks_axi_backend_resolve "$root" 2>/dev/null) || return 1
+  [ "$backend" = markdown ] || return 1
+  file=$(fm_backlog_file "$data") || return 1
+  [ -f "$file" ] && [ -r "$file" ] || return 1
+  ANSWERED_BATCH_TEXT=$(cat -- "$file") || return 1
+  if archive=$(captain_markdown_archive_path) && { [ -e "$archive" ] || [ -L "$archive" ]; }; then
+    [ -f "$archive" ] && [ -r "$archive" ] || return 1
+    ANSWERED_BATCH_TEXT="$ANSWERED_BATCH_TEXT"$'\n'$(cat -- "$archive") || return 1
+  fi
+  ANSWERED_BATCH_TEXT_SET=1
+}
+
+command_answered_batch() {  # <origin-task-id>; "<key>\t<epoch>" lines on stdin
+  local origin=${1:-} line key opened id
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  case "$origin" in ''|*[!A-Za-z0-9._-]*) cat >/dev/null; return 0 ;; esac
+  answered_batch_index || { ANSWERED_BATCH_TEXT_SET=0; ANSWERED_BATCH_TEXT=; }
+  # Prime the memo in this shell so every per-key subshell inherits it.
+  fm_tasks_axi_compatible >/dev/null 2>&1 || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    key=${line%%$'\t'*}
+    opened=${line#*$'\t'}
+    [ "$opened" != "$line" ] || continue
+    if id=$( command_answered "$origin" "$key" --opened-at "$opened" 2>/dev/null ) && [ -n "$id" ]; then
+      printf '%s\t%s\n' "$key" "$id"
+    fi
+  done
+  return 0
+}
+
 # A hold or answer changes what this home's published summary says about open
 # captain calls, so a successful one republishes it. The refresh is side-band
 # and best-effort: it can never change the hold's or answer's result.
@@ -2553,6 +2612,7 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
   answered) shift; command_answered "$@" ;;
+  answered-batch) shift; command_answered_batch "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   pr-policy) shift; command_pr_policy "$@" ;;
