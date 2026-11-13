@@ -117,7 +117,7 @@ test_the_board_is_rebuilt_only_when_fleet_state_changes() {
   add_task "$home" t1
   in_home "$home" "$REFRESH" || fail "third refresh failed"
   [ "$(rebuilt_count "$home")" = 2 ] || fail "a new task did not rebuild the board"
-  grep -q 't1' "$home/.lavish/bearings-board.html" || fail "the rebuilt board does not show the new task"
+  grep -q 't1' "$home/.lavish/bearings-board.data.js" || fail "the rebuilt board does not show the new task"
   pass "the board is rebuilt only when fleet state changes"
 }
 
@@ -177,7 +177,7 @@ test_a_burst_of_kicks_coalesces_into_one_rebuild() {
   await_rebuilds "$home" 2 || fail "the kicked refresh did not rebuild the board"
   sleep 1.5
   [ "$(rebuilt_count "$home")" = 2 ] || fail "a burst of kicks rebuilt more than once: $(rebuilt_count "$home")"
-  grep -q 't5' "$home/.lavish/bearings-board.html" || fail "the coalesced rebuild missed the last change"
+  grep -q 't5' "$home/.lavish/bearings-board.data.js" || fail "the coalesced rebuild missed the last change"
   pass "a burst of kicks coalesces into one rebuild with the latest state"
 }
 
@@ -205,7 +205,7 @@ test_a_rebuild_never_reopens_an_ended_session() {
   add_task "$home" t1
   in_home "$home" "$REFRESH" && fail "a refresh of an ended session reported a rebuild"
   assert_no_grep '--reopen' "$home/lavish-calls" "a refresh reopened an ended board session"
-  grep -q 't1' "$home/.lavish/bearings-board.html" || fail "the board file was not rewritten for the next open"
+  grep -q 't1' "$home/.lavish/bearings-board.data.js" || fail "the board data was not rewritten for the next open"
   grep -q 'not live' "$home/state/.board-refresh.log" || fail "the ended session was not logged"
   pass "a rebuild rewrites the board but never reopens an ended session"
 }
@@ -239,7 +239,7 @@ test_a_captain_hold_and_its_answer_rebuild_the_board() {
   captain "$home" hold board-call --title "Choose the board option" \
     --reason "Ship the board option?" --repo sample >/dev/null || fail "hold failed"
   await_rebuilds "$home" 2 || fail "a captain hold did not refresh the open board"
-  grep -q 'board-call' "$home/.lavish/bearings-board.html" || fail "the new hold has no card"
+  grep -q 'board-call' "$home/.lavish/bearings-board.data.js" || fail "the new hold has no card"
   captain "$home" answer board-call --decision-file "$decision" >/dev/null || fail "answer failed"
   await_rebuilds "$home" 3 || fail "an answer did not refresh the open board"
   in_home "$home" "$ROOT/bin/fm-bearings-board-payload.sh" > "$home/after.json" || fail "payload failed"
