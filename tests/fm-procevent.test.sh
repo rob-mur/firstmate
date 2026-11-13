@@ -3198,6 +3198,7 @@ printf 'garbage that is not a session block\n' > "$SIL"
 silent_says no "an unreadable result fails closed and is announced"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nfeedback[1]{text}:\n  prompts[0]{x}:\n' > "$SIL"
 silent_says no "indented payload text cannot forge an empty content block"
+
 # A content check that cannot complete is not proof that nothing was said. Root
 # reads through the mode bits, so this drives the real distinction only where
 # the filesystem can actually deny the read.
@@ -3208,6 +3209,37 @@ if [ "$(id -u)" != 0 ]; then
   chmod 600 "$SIL"
 fi
 pass "the adapter owns which Lavish results are silent, and fails closed on everything else"
+
+# A page shown inside the board sends its actions through the board's session as
+# rows tagged `page`. `pages` lifts them out for bin/fm-board-page.sh, and
+# `silent` keeps a result quiet only when every row in it was such an action and
+# each already reached its page's agent.
+PAGE_HOME="$TMP_ROOT/page-home"
+mkdir -p "$PAGE_HOME/state" "$PAGE_HOME/.lavish"
+: > "$PAGE_HOME/.lavish/bearings-board.html"
+page_env() { FM_HOME="$PAGE_HOME" FM_STATE_OVERRIDE="$PAGE_HOME/state" FM_BOARD_PAGE_REFRESH=true "$@"; }
+page_env "$ROOT/bin/fm-board-page.sh" open p1 --title "Page one" >/dev/null || fail "could not register the test page"
+PAGE_ROW='"1","Page one: my answer\n\nContext data:\n{\n  \"schema\": \"fm-board-page.v1\",\n  \"page\": \"p1\",\n  \"tag\": \"answer\",\n  \"text\": \"my answer\",\n  \"data\": {\n    \"n\": 1\n  }\n}","iframe",page,"Page one: my answer"'
+BOARD_ROW='"2","Headline: yes\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-call\",\n  \"selection\": \"yes\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(1)",choice,"Headline: yes"'
+PG="$TMP_ROOT/src.7.result"
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  %s\n' "$PAGE_ROW" > "$PG"
+rows=$(page_env "$ROOT/bin/fm-procevent-lavish.sh" pages "$PG") || fail "pages refused a complete result"
+printf '%s\n' "$rows" | jq -e '
+  .key == "src.7-1" and .page == "p1" and .tag == "answer" and .text == "my answer"
+  and .data == {n: 1} and .prompt == "Page one: my answer\n\nContext data:\n{\n  \"n\": 1\n}"' >/dev/null \
+  || fail "pages did not lift the page action: $rows"
+page_env "$ROOT/bin/fm-procevent-lavish.sh" silent "$PG" >/dev/null 2>&1 \
+  && fail "silent suppressed a page action no page agent has received"
+printf '%s\n' "$rows" | page_env "$ROOT/bin/fm-board-page.sh" route || fail "the page action did not route"
+page_env "$ROOT/bin/fm-procevent-lavish.sh" silent "$PG" >/dev/null 2>&1 \
+  || fail "silent announced a page action its page agent already received"
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts[2]{uid,prompt,selector,tag,text}:\n  %s\n  %s\n' "$PAGE_ROW" "$BOARD_ROW" > "$PG"
+assert_equals 1 "$(page_env "$ROOT/bin/fm-procevent-lavish.sh" pages "$PG" | wc -l | tr -d ' ')" "pages lifted a board answer as a page action"
+page_env "$ROOT/bin/fm-procevent-lavish.sh" silent "$PG" >/dev/null 2>&1 \
+  && fail "silent suppressed a board answer that rode with a page action"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$PG"
+assert_equals '{"app_ended":true}' "$(page_env "$ROOT/bin/fm-procevent-lavish.sh" pages "$PG")" "pages did not report the board session ending"
+pass "the adapter lifts page actions for their page agents and stays silent only when they all arrived"
 
 # `read` is the handler's presentation of a captured result. Exercised through
 # the published command against representative captures, not by inspecting the

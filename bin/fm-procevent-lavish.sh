@@ -8,6 +8,7 @@
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh reconciles <result-file>
+#   fm-procevent-lavish.sh pages <result-file>
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
@@ -72,7 +73,8 @@
 # happened. `silent` therefore holds two narrow, positively-determined shapes -
 # a session this adapter classifies `ended` that carries no queued content block
 # at all, or `browser_disconnected`, which carries no answer while the session
-# remains open - and every other result stays announced.
+# remains open - and every other result stays announced. The page-prompt
+# shape described under `pages` below is the one addition.
 #
 # Deliberately narrow, in both directions. A `Send & End` close carrying the
 # captain's actual answer arrives as `status: feedback` with `session_ended`, so
@@ -117,6 +119,20 @@
 #
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
+#
+# `pages` is this adapter's half of the page-prompt seam in bin/fm-procevent.sh.
+# A page shown in place inside the bearings board queues its prompts on the
+# board's own session tagged `page`, with an `fm-board-page.v1` Context data
+# block naming the page (bin/fm-board-page.sh's header owns that contract).
+# `pages` prints one JSON line per such prompt -
+# `{key, page, tag, text, prompt, data}`, where `prompt` is the page's own words
+# with the page's own data appended as Lavish would have, and `key` is unique to
+# the capture and the prompt's place in it - plus `{"app_ended":true}` when the
+# board session itself ended. It routes nothing; bin/fm-board-page.sh route
+# owns delivery. It exits 3 like `answers` when the result is not fully
+# accounted for. `silent` also holds a result whose every queued item is a page
+# prompt, once `fm-board-page.sh routed` confirms each one reached its page, so
+# a page's answer goes to the page's agent and never wakes the handler.
 #
 # It wraps the published `lavish-axi poll` and `lavish-axi reply` interfaces,
 # verified against 0.1.80. `poll` long-polls indefinitely; `reply` exits only
@@ -745,10 +761,14 @@ result_has_queued_content() {  # <result-file>
 # handler learns nothing from being told. Anything else - a real answer, a
 # missing or waiting session, an unreadable result - is announced.
 cmd_silent() {
-  local file=${1-} content_rc
+  local file=${1-} content_rc lines
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   [ "$(cmd_classify "$file")" = disconnected ] && return 0
+  # Every queued item is a page prompt and each one already reached its page.
+  if lines=$(page_rows only "$file" 2>/dev/null) && [ -n "$lines" ]; then
+    printf '%s\n' "$lines" | FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board-page.sh" routed >/dev/null 2>&1 && return 0
+  fi
   [ "$(cmd_classify "$file")" = ended ] || return 1
   result_has_queued_content "$file"
   content_rc=$?
@@ -864,6 +884,75 @@ cmd_choice_rows() {
 }
 
 cmd_answers() { cmd_choice_rows answers "$@"; }
+
+# The `pages` lines described in the header. In `only` mode it prints nothing
+# and exits 4 unless the result's every queued item is a page prompt and it
+# carries no feedback block.
+page_rows() {  # all|only <result-file>
+  local mode=$1 file=${2-} base ended=0
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  base=$(basename -- "$file")
+  base=${base%.result}
+  [ "$(cmd_classify "$file")" = ended ] && ended=1
+  case "$(session_field "$file" session_ended)" in
+    true|True|TRUE) ended=1 ;;
+  esac
+  perl -MJSON::PP -e "$(lavish_result_parser)"'
+    use strict; use warnings;
+    my ($mode, $path, $base, $ended) = @ARGV;
+    $base =~ s/[^A-Za-z0-9._-]/_/g;
+    $base = substr($base, -100);
+    my ($form, $want, $items, $malformed) = lavish_result($path, "prompts");
+    defined $form or exit 1;
+    my $mark = "\n\nContext data:\n";
+    my $out = JSON::PP->new->utf8->canonical;
+    my $pretty = JSON::PP->new->utf8->canonical->pretty->space_before(0)->indent_length(2);
+    my (@lines, $n, $other);
+    $n = 0; $other = 0;
+    for my $item (@$items) {
+      $n++;
+      my %f = %$item;
+      my $prompt = $f{prompt};
+      my $at = defined $prompt ? rindex($prompt, $mark) : -1;
+      my $data = $at >= 0 ? eval { decode_json(substr($prompt, $at + length($mark))) } : undef;
+      unless (defined $f{tag} && $f{tag} eq "page" && ref($data) eq "HASH"
+          && defined($data->{schema}) && !ref($data->{schema})
+          && $data->{schema} eq "fm-board-page.v1"
+          && defined($data->{page}) && !ref($data->{page})
+          && $data->{page} =~ /\A[a-z0-9][a-z0-9-]{0,63}\z/) {
+        $other++;
+        next;
+      }
+      my $tag = $data->{tag};
+      $tag = "prompt" unless defined $tag && !ref($tag) && length $tag;
+      my $text = defined($data->{text}) && !ref($data->{text}) ? $data->{text} : "";
+      my $words = substr($prompt, 0, $at);
+      utf8::decode($words);
+      if (defined $data->{data}) {
+        my $ctx = $pretty->encode($data->{data});
+        $ctx =~ s/\n\z//;
+        utf8::decode($ctx);
+        $words .= $mark . $ctx;
+      }
+      push @lines, $out->encode({ key => "$base-$n", page => $data->{page}, tag => $tag,
+        text => $text, prompt => $words, data => $data->{data} });
+    }
+    my $incomplete = $malformed || @$items != $want;
+    if ($mode eq "only") {
+      my ($fform) = lavish_result($path, "feedback");
+      exit 4 if $incomplete || $other || !@lines || !defined($fform) || $fform ne "none";
+    }
+    print "$_\n" for @lines;
+    print "{\"app_ended\":true}\n" if $ended;
+    if ($incomplete) {
+      print STDERR "error: the result is not fully accounted for: declared $want, parsed ",
+        scalar(@$items), ", malformed $malformed\n";
+      exit 3;
+    }
+  ' "$mode" "$file" "$base" "$ended"
+}
+cmd_pages() { page_rows all "$@"; }
 cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 
 # Present one already-captured result for a handler. Body lines are prefixed
@@ -975,6 +1064,7 @@ case "${1-}" in
   silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
   reconciles) shift; cmd_reconciles "$@" ;;
+  pages)     shift; cmd_pages "$@" ;;
   read)      shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
