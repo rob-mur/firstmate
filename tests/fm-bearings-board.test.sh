@@ -124,6 +124,16 @@ run_procevent() {  # <home> <command args...>
     "$ROOT/bin/fm-procevent.sh" "$@"
 }
 
+run_page() {  # <home> <fm-board-page args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_FAKE_STATE="$home/lavish-state" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    FM_BOARD_PAGE_REFRESH=true "$ROOT/bin/fm-board-page.sh" "$@"
+}
+
 run_decisions() {  # <home> <command args...>
   local home=$1
   shift
@@ -666,6 +676,34 @@ test_build_starts_a_listener_for_an_already_armed_board() {
   pass "a rebuild starts a listener when an already-armed board has none"
 }
 
+test_a_waiting_page_agent_restarts_the_board_listener() {
+  local home data board sid claim dir out
+  home=$(make_home page-wait-listens)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the build failed"
+  sid=$(run_lavish_source_id "$home" "$board")
+  dir=$(run_page "$home" dir p1) || fail "page dir failed"
+  printf '<html></html>\n' > "$dir/page.html"
+  run_page "$home" open p1 --title P1 >/dev/null || fail "page open failed"
+
+  # The listener exits after each result it captures; drop it the same way.
+  claim="$home/procevent-claims/$sid.claim"
+  assert_present "$claim" "the build left no listener to lose"
+  kill -KILL -"$(sed -n '2p' "$claim")" 2>/dev/null || true
+  kill -KILL "$(sed -n '2p' "$claim")" 2>/dev/null || true
+  sleep 1
+  [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" != live ] \
+    || fail "the listener survived being killed"
+
+  out=$(run_page "$home" wait p1 --timeout-s 1) || fail "page wait failed"
+  assert_contains "$out" "status: timeout" "page wait reported something it was not sent: $out"
+  [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
+    || fail "a page agent waited while nothing listened for its page actions"
+  pass "a page agent that waits restarts the board listener so its actions arrive at once"
+}
+
 # --- part 2: a landed subject is not a live call ----------------------------
 
 test_build_drops_decision_cards_whose_subject_already_landed() {
@@ -832,6 +870,7 @@ test_rebuild_of_a_live_session_never_opens_another_tab
 test_build_reopens_when_an_opened_session_ends_before_listing
 test_build_refuses_to_arm_when_the_session_stays_ended
 test_build_starts_a_listener_for_an_already_armed_board
+test_a_waiting_page_agent_restarts_the_board_listener
 test_build_drops_decision_cards_whose_subject_already_landed
 test_build_keeps_a_decision_absent_from_the_main_backlog
 test_build_fails_when_reconcile_cannot_establish_a_listener
