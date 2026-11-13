@@ -14,6 +14,7 @@
 #   fm-bearings-board.sh build [--no-reopen] <data.json>
 #   fm-bearings-board.sh path
 #   fm-bearings-board.sh url
+#   fm-bearings-board.sh ended
 #
 # build      Validate the payload, drop the Captain's Call cards whose subject
 #            already landed, give every surviving decision card the standard
@@ -51,8 +52,20 @@
 #            (prove the session live, reopen it if it ended, bind, arm, prove a
 #            listener) runs against the already-built board, without rebuilding
 #            it and with LAVISH_AXI_NO_OPEN=1 so no browser is ever opened.
-#            Prints `reopened: yes` on stderr when it had to reopen. Refuses
-#            when no board has been built in this home yet.
+#            Prints `reopened: yes` on stderr when it had to reopen, and then
+#            starts an automatic refresh (bin/fm-board-refresh.sh --kick), so a
+#            board left behind while its session was ended catches up in place
+#            rather than by a reload. Refuses when no board has been built in
+#            this home yet.
+# ended      Exit 0 only when Lavish's own saved state names this home's board
+#            and every session it records for it has ended; exit 1 otherwise.
+#            It reads $LAVISH_AXI_STATE_DIR/state.json (default
+#            ~/.lavish-axi/state.json) and never calls the Lavish server, so the
+#            automatic refresh can ask it before every pass. A missing,
+#            unreadable, or unfamiliar state file, or no record of the board,
+#            answers not ended, so the refresh keeps working if Lavish changes
+#            that file. Verified against lavish-axi 0.1.96, whose session
+#            statuses are open, feedback, ended, and user-ended.
 #
 # THE URL IS STABLE BUT NOT ALWAYS SERVED. Lavish names a session by the first
 # 16 hex digits of sha256(realpath of the board file), so the stable board path
@@ -176,6 +189,7 @@
 # authors `pages`; the validator refuses one that does.
 #
 # FM_BEARINGS_BOARD_TEMPLATE overrides the shipped template path (tests only).
+# FM_BEARINGS_BOARD_REFRESH replaces the refresh command `url` starts after a reopen (tests only).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -733,15 +747,39 @@ command_url() {
   url=$(lavish_listed_url "$(board_realpath "$board")") \
     || fail "the board is live but the Lavish listing carries no URL for it"
   case "$out" in
-    *"session: reopened"*) printf 'reopened: yes\n' >&2 ;;
+    *"session: reopened"*)
+      printf 'reopened: yes\n' >&2
+      # The automatic refresh skips passes while the session is ended, so the
+      # reopened board's data catches up now; the open page patches it in place.
+      if [ -n "${FM_BEARINGS_BOARD_REFRESH:-}" ]; then
+        $FM_BEARINGS_BOARD_REFRESH >/dev/null 2>&1 </dev/null || true
+      else
+        "$SCRIPT_DIR/fm-board-refresh.sh" --kick >/dev/null 2>&1 </dev/null || true
+      fi
+      ;;
   esac
   printf '%s\n' "$url"
+}
+
+# Lavish's saved session record, read from disk; see `ended` in the header.
+command_ended() {
+  local board real state
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  board=$(board_path)
+  real=$(board_realpath "$board") || return 1
+  state="${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json"
+  [ -r "$state" ] || return 1
+  jq -e --arg file "$real" '
+    [.sessions | objects | .[] | objects | select(.file == $file) | .status]
+    | length > 0 and all(.[]; . == "ended" or . == "user-ended")
+  ' "$state" >/dev/null 2>&1
 }
 
 case "${1-}" in
   build) shift; command_build "$@" ;;
   path) board_path ;;
   url) shift; command_url "$@" ;;
+  ended) shift; command_ended "$@" ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
