@@ -1225,9 +1225,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   /* LIVE UPDATE. The open page re-reads bearings-board.data.js and patches
      only what changed: a new card is added, a departed card removed, and a
      changed card rebuilt in place. The page itself never reloads, so typed
-     text, focus, scroll and the step on screen all stay. A card the captain
-     is working in (focus inside it, an unsent selection or typed text, or an
-     answer waiting in the queue) keeps its old content until they are done. */
+     text, focus, scroll and the step on screen all stay. A changed card the
+     captain is working in (focus inside it, an unsent selection or typed
+     text, or an answer waiting in the queue) keeps its old content until they
+     are done. A departed card always goes, busy or not: its decision no longer
+     waits on the captain, so nothing on the page may keep it on the board. */
   var deferred = false;
   function cardBusy(rec) {
     var state = rec.target.hidden.value;
@@ -1476,16 +1478,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   syncPages(data.pages);
 
   function applyData(next) {
-    var nextKeys = {};
-    next.captains_call.forEach(function (c) { nextKeys[c.key] = true; });
     var pinned = false;
     var calls = next.captains_call.map(function (c) {
       var rec = cardByKey[c.key];
       if (rec && rec.sig !== itemSig(c) && cardBusy(rec)) { pinned = true; return rec.item; }
       return c;
-    });
-    Object.keys(cardByKey).forEach(function (k) {
-      if (!nextKeys[k] && cardBusy(cardByKey[k])) { pinned = true; calls.push(cardByKey[k].item); }
     });
     var merged = {};
     Object.keys(next).forEach(function (k) { merged[k] = next[k]; });
