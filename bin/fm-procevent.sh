@@ -989,9 +989,16 @@ owner_lease_refresh() {
 }
 
 owner_lease_keepalive() {  # <parent-pid> <parent-identity>
-  local parent=$1 identity=$2 state
+  local parent=$1 identity=$2 state interval nap=''
+  interval=$(fm_procevent_owner_keepalive_seconds)
+  # The nap runs detached from the caller's output and dies with the keeper, so
+  # a caller reading the start's output is never held open for a nap interval.
+  trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; exit 0' TERM
   while :; do
-    sleep 1
+    sleep "$interval" >/dev/null 2>&1 &
+    nap=$!
+    wait "$nap"
+    nap=''
     fm_procevent_pid_state "$parent" "$identity"
     state=$?
     case "$state" in
