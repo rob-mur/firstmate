@@ -107,6 +107,28 @@ test_open_without_a_board_exits_3() {
   pass "dir and open without a board exit 3 so the caller runs its page standalone"
 }
 
+# A secondmate home has no board; bound to a local parent home that has one,
+# its pages register on that board, and without one it still exits 3.
+test_a_secondmate_page_goes_on_its_parent_board() {
+  local parent mate dir rc
+  parent=$(make_home sm-parent)
+  mate=$(make_home sm-mate --no-board)
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$mate/.fm-secondmate-parent"
+  dir=$(in_home "$mate" "$PAGE" dir cpu-fixes) || fail "dir in a secondmate home failed"
+  assert_equals "$parent/.lavish/pages/cpu-fixes" "$dir" "dir did not use the parent board's page folder"
+  printf '<html></html>\n' > "$dir/page.html"
+  in_home "$mate" "$PAGE" open cpu-fixes --title "CPU fixes" >/dev/null || fail "open in a secondmate home failed"
+  assert_equals "$(printf 'cpu-fixes\tlive\tCPU fixes')" "$(in_home "$parent" "$PAGE" list)" "the parent board did not list the page"
+  [ -f "$parent/state/pages/cpu-fixes/page.json" ] || fail "the page was not recorded in the parent home"
+  [ ! -e "$mate/state/pages" ] || fail "the page was recorded in the secondmate home"
+  [ ! -e "$mate/.lavish" ] || fail "the page was served from the secondmate home"
+  rm -f "$parent/.lavish/bearings-board.html"
+  in_home "$mate" "$PAGE" dir other >/dev/null 2>&1
+  rc=$?
+  assert_equals 3 "$rc" "dir with no board in either home did not exit 3"
+  pass "a secondmate home's page registers on its local parent's board, and exits 3 when there is none"
+}
+
 test_bad_page_ids_are_refused() {
   local home
   home=$(make_home badid)
@@ -284,6 +306,7 @@ fm_test_run \
   test_open_registers_a_page_and_refreshes_the_board \
   test_open_records_the_sessions_a_page_replaces \
   test_open_without_a_board_exits_3 \
+  test_a_secondmate_page_goes_on_its_parent_board \
   test_bad_page_ids_are_refused \
   test_route_delivers_each_action_once_and_wait_prints_it \
   test_routed_reports_only_fully_delivered_lines \
