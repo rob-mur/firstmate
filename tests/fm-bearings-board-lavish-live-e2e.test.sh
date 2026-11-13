@@ -18,6 +18,10 @@
 # a human. The artifact is a scratch page in a temporary directory, and the
 # session it opens is ended again before the guard returns.
 #
+# The board refresh skips its passes while Lavish's saved session record says
+# the board is ended, so the guard also proves `fm-bearings-board.sh ended`
+# reads that record as ended after the captain ends it and live after a reopen.
+#
 # The no-reload half listens on the live-event socket the browser frame uses,
 # with the ws module lavish-axi ships, and proves the listener works by
 # rewriting the page itself as a control.
@@ -119,6 +123,12 @@ lavish-axi 2>/dev/null | grep -F "$BOARD," | grep -q ',open,' \
   && fail "lavish-axi ${VERSION:-version-unknown} still lists a captain-ended session as open; the board build's liveness check must be revisited"
 pass "lavish-axi ${VERSION:-version-unknown} reports a captain-ended session without reopening it and without failing"
 
+# The automatic refresh skips its passes on the strength of Lavish's saved
+# session record, so that record must still read as ended here.
+run_board ended \
+  || fail "lavish-axi ${VERSION:-version-unknown} no longer records a captain-ended session as ended in its saved state; the board refresh's no-viewer skip must be revisited"
+pass "lavish-axi ${VERSION:-version-unknown} saves a captain-ended session as ended, so the refresh can skip it"
+
 # THE BEHAVIOR UNDER GUARD: the build must not accept that, and must recover.
 out=$(run_board build "$LAB/payload.json" 2>&1) \
   || fail "the board build refused a recoverable captain-ended session: $out"
@@ -129,6 +139,9 @@ esac
 lavish-axi 2>/dev/null | grep -F "$BOARD," | grep -q ',open,' \
   || fail "the board build reported success while the session was still not live"
 pass "the board build reopens a captain-ended session against real lavish-axi instead of arming a dead one"
+run_board ended \
+  && fail "lavish-axi ${VERSION:-version-unknown} still records the reopened session as ended in its saved state; the board refresh would never refresh it"
+pass "lavish-axi ${VERSION:-version-unknown} saves a reopened session as live, so the refresh resumes"
 
 # THE SECOND BEHAVIOR UNDER GUARD: a rebuild must never reload the captain's open
 # page. Lavish watches the artifact file and tells every open frame to reload
