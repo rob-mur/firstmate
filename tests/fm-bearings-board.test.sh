@@ -298,10 +298,10 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "a non-boolean renderer field was accepted"
 
   write_valid_payload "$data"
-  jq '.captains_call[0].options = [] | .captains_call[0].allow_freeform = false' "$data" > "$data.tmp" \
+  jq '.captains_call[1].options = [] | .captains_call[1].allow_freeform = false' "$data" > "$data.tmp" \
     && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "an unanswerable captains_call item was accepted"
+  [ "$rc" -ne 0 ] || fail "an unanswerable non-decision captains_call item was accepted"
 
   write_valid_payload "$data"
   jq '.captains_call[1].pr_url = "javascript:alert(1)"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
@@ -824,6 +824,26 @@ test_every_decision_card_carries_the_reconcile_choice() {
   pass "every decision card carries exactly one reconcile choice"
 }
 
+# A decision answered on its own page carries no options and no free text;
+# the build still accepts it and gives it only the reconcile choice, labelled
+# plainly so it never reads as one of the decision's own options.
+test_a_page_backed_decision_gets_only_the_plain_reconcile_choice() {
+  local home data board
+  home=$(make_home reconcile-page-backed)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '.captains_call[0].options = [] | .captains_call[0].allow_freeform = false' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a decision with no options and no free text was refused"
+  extract_payload "$board" | jq -e '
+    .captains_call[0].options == [{value: "reconcile",
+      label: "Already settled? Re-check and close it",
+      hint: .captains_call[0].options[0].hint}]
+  ' >/dev/null || fail "the page-backed decision did not get only the plainly labelled reconcile choice: $(extract_payload "$board" | jq -c '.captains_call[0].options')"
+  pass "a decision answered on its page builds with only the plainly labelled reconcile choice"
+}
+
 test_build_refuses_a_payload_that_occupies_the_reconcile_value() {
   local home data rc out
   home=$(make_home reconcile-reserved)
@@ -875,5 +895,6 @@ test_build_drops_decision_cards_whose_subject_already_landed
 test_build_keeps_a_decision_absent_from_the_main_backlog
 test_build_fails_when_reconcile_cannot_establish_a_listener
 test_every_decision_card_carries_the_reconcile_choice
+test_a_page_backed_decision_gets_only_the_plain_reconcile_choice
 test_build_refuses_a_payload_that_occupies_the_reconcile_value
 test_build_refuses_a_nondecision_reconcile_value

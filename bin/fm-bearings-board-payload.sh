@@ -39,9 +39,10 @@
 #                      titled from the row's full `title_full` (else `title`), `about` from
 #                      its full `reason_full` (else `reason`),
 #                      `pr_url` and `repo` from the PR the task recorded, and a
-#                      derived default choices (bin/fm-bearings-question-lib.sh: yes/no,
-#                      numbered or lettered parts, two-way or, else approve/decline; an authored
-#                      overlay `options` still wins) with reconcile secondary, and any
+#                      derived default choices (bin/fm-bearings-question-lib.sh: the
+#                      reason's own numbered, lettered or listed options in full, a two-way
+#                      or, yes/no, else approve/decline; an authored overlay `options` still
+#                      wins) with reconcile secondary, and any
 #                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`.
 #                      A link is labelled by what it points at - `PR <n>`, `MR <n>`,
 #                      `Issue <n>`, or for a Lavish page `Understand page`, `Review page`,
@@ -51,11 +52,19 @@
 #                      open captain hold is a row here (see --all-decisions above).
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
-#                      one short `question` (at most 120 characters): the reason's
-#                      sentence led by "Question:", else its first sentence ending in
-#                      "?", else its first sentence, dropped when it only repeats the
-#                      title. Every reason shown has its `corr=<hex>` tokens removed
-#                      (clean_reason in bin/fm-bearings-question-lib.sh).
+#                      one short `question` (at most 120 characters, first letter
+#                      capitalised): for a reason with its own options, the sentence
+#                      that introduces them; else the sentence led by "Question:", else
+#                      its first sentence ending in "?", else its first sentence; dropped
+#                      when it only repeats the title. `about` holds the rest of the
+#                      text without the options and without any sentence that only
+#                      repeats the question. Every reason shown has its `corr=<hex>`
+#                      tokens removed (clean_reason in bin/fm-bearings-question-lib.sh).
+#                      A reason answered on its Lavish page (a tailnet page link plus
+#                      "is on the ... page", "the page shows", "answer ... on the page")
+#                      is a page-backed card: no question, about, or choices, only its
+#                      tailnet page link, titled by what the page is about; `build`
+#                      gives it only the reconcile choice.
 #                      A `source:"status"` row is titled from its decision, never the
 #                      asking home: the task its decision key names, else a given title
 #                      that is not just the task or home, else that same asking
@@ -418,6 +427,33 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         else ($u | sub("^https://"; "") | split("/")[0]) end;
     def labelled_urls:
       . as $t | reduce ([$t | card_urls] | unique | sort_by(-length))[] as $u ($t; split($u) | join(link_label($u; $t)));
+    # The heading of a text that lists its own options comes from the text
+    # before the options: the sentence that introduces them when it ends in a
+    # colon ("Merge PR 13: (1) ..."), else its asking sentence, without a
+    # trailing colon or dash.
+    def lead_sentence:
+      gsub("[[:space:]]+"; " ") | sub("^ "; "")
+      | if test(":[[:space:]]*$") and (test("Question:"; "i") | not)
+        then ([ scan("[^[:space:]].*?(?:[.?!](?=[[:space:]]|$)|$)") | select(length > 0) ][-1] // "")
+        else ask_sentence end
+      | sub("[[:space:]:;,-]+$"; "");
+    # The body shows the lead and tail of a text; its options are the choices on the card.
+    # A tail that only repeats a link label adds nothing the card links lack.
+    def without_options:
+      (option_parse) as $p
+      | if $p == null then .
+        else [ ($p.lead | sub("[[:space:]:;,-]+$"; "") | if length > 0 and (test("[.?!]$") | not) then . + "." else . end),
+               ($p.tail | sub("^[[:space:]]+"; "")
+                | if test("^((PR|MR|Issue) [0-9]+|[A-Z][a-z]+ page|Report)[.]?$") then "" else . end) ]
+             | map(select(length > 0)) | join(" ") end;
+    # A decision answered on a Lavish page: its text holds a tailnet page link
+    # and says the question is on that page.
+    def page_phrase: "(?:is|are) on (?:one|the|a|this|its|that) (?:[a-z0-9-]+ ){0,2}page|the page (?:now )?(?:shows|has|holds|asks|carries|lists)|(?:answer|pick|choose|decide|reply|respond)[^.?!]{0,40} on the page";
+    def page_backed: test("http://dev-1\\.tailf848b0\\.ts\\.net:4387/") and test(page_phrase; "i");
+    def page_subject:
+      [match(page_phrase; "i")][0].offset as $o
+      | .[:$o] | gsub("[[:space:]]+"; " ") | sub("[[:space:]:;,.-]+$"; "")
+      | (split(". ") | last // "") | sub("^ "; "");
     ( $question_rows
       | map(
           . as $d
@@ -446,11 +482,25 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                 | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end) as $texts
                 | (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key) | tostring) as $title
                 | (($texts | max_by(length)) // null) as $long
-                | (if $long == null then null else ($long | ask_sentence | short_text_n(120) | nz(null)) end) as $q
-                | (if $q != null and $title != $q and ($title | endswith(": " + $q) | not)
-                   then {question: $q} else {} end)
-                  + (if ($texts | length) > 0 and ($texts | join("\n\n")) != $q
-                     then {about: ($texts | join("\n\n"))} else {} end) )
+                | (if $long == null then null
+                   elif ($long | option_parse) != null then ($long | option_parse | .lead | lead_sentence | short_text_n(120) | nz(null))
+                   else ($long | ask_sentence | short_text_n(120) | nz(null)) end) as $q0
+                | (if $q0 == null then null else ($q0 | cap) end) as $q
+                | (if ($d.verb // "") == "review-ready" then $texts else [ $texts[] | without_options ] end) as $body
+                | ($q != null and $title != $q and ($title | endswith(": " + $q) | not)) as $asks
+                # The body drops each whole sentence that only repeats the heading.
+                | ($body | join("\n\n")
+                   | ($q0 // "" | sub("[.?!]+$"; "")) as $qs
+                   | if $asks and length > ($qs | length) then
+                       reduce (". ", "? ", "! ", ".\n", "?\n", "!\n") as $e (.; split($qs + $e) | join(""))
+                       | if endswith($qs + ".") or endswith($qs + "?") or endswith($qs + "!")
+                         then .[:(length - ($qs | length) - 1)] else . end
+                       | sub("[[:space:]]+$"; "")
+                     else . end) as $about
+                | (if $asks then {question: $q} else {} end)
+                  + (if ($about | length) > 0 and $about != $q0
+                        and ($about | sub("[[:space:]?.!:]+$"; "")) != ($q0 // "" | sub("[[:space:]?.!:]+$"; ""))
+                     then {about: $about} else {} end) )
             + (if $pr != null then {pr_url: $pr} else {} end)
             + ( [ ( ($d.announced // [])[] | ((.reason_full // .reason // "") | tostring) as $t
                     | $t | card_urls | {url: ., label: link_label(.; $t)} ),
@@ -461,7 +511,25 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                     ([.[] | select(.label == $l.label or (.label | startswith($l.label + " (")))] | length) as $n
                     | . + [if $n > 0 then $l + {label: ($l.label + " (" + (($n + 1) | tostring) + ")")} else $l end])
                 | if length > 0 then {links: .} else {} end ) )
-          + overlay("captains_call"; $d.key; card_fields)
+          # A decision answered on its Lavish page shows only the link to that
+          # page: no recap, no choices, and a title that names what the page is
+          # about rather than the sentence pointing at it.
+          | ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
+              | map(nz(null) | select(. != null) | clean_reason)
+              | [ .[] | select(page_backed) ][0] ) as $paged
+          | if $paged == null then .
+            else ( ($paged | page_subject) as $subject
+                   | ($d.owner // "(main)") as $owner
+                   | .title as $t
+                   | { key, type, repo,
+                       title: (if ($t | test(page_phrase; "i")) and ($subject | length) > 0 and ($subject | length) <= 120
+                               then (if $owner != "(main)" and ($t | startswith($owner + ": ")) then $owner + ": " else "" end) + $subject
+                               else $t end),
+                       options: [], allow_freeform: false }
+                     + ( [ (.links // [])[] | select(.url | startswith("http://dev-1.tailf848b0.ts.net:4387/")) ]
+                         | if length > 0 then {links: .} else {} end ) )
+            end
+          | . + overlay("captains_call"; $d.key; card_fields)
           | . as $card
           | select((($copy.captains_call // {}) | has($d.key) | not)
                    or ($copy.captains_call[$d.key] != null))
