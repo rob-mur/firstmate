@@ -1076,5 +1076,50 @@ test_a_markup_change_rewrites_the_page() {
   pass "a change to the board's markup or styles rewrites the page"
 }
 
+# A tap on a touch screen reaches a native button as a click, so one click
+# path covers both; the rows are native buttons for Lavish's annotate mode.
+test_a_click_or_tap_on_an_underway_or_waiting_row_expands_it_in_place() {
+  local home out run base
+  home=$(make_home expand)
+  build_call_board "$home" '["k1"]' '[]' \
+    '[{"id":"t1","name":"Task one","repo":"r","state":"working","doing":"doing the thing","kind":"ship","pr_url":"https://example.com/o/r/pull/7"},
+      {"id":"t2","name":"Task two","repo":"r","state":"paused","doing":"-","kind":"ship"}]'
+  run=$(rebuild_command "$home" '.waiting = [{key:"w1", title:"Forge ops", reason:"Parked for the weekend", repo:"forge"}]')
+  FM_HARNESS_RUN="$run" run_board "$home" "run" >/dev/null
+  base=$(run_board "$home" "")
+  printf '%s' "$base" | jq -e '
+    (.rows | map(.key)) == ["task:t1","task:t2","waiting:w1"]
+      and all(.rows[]; .expanded == "false" and .details == null)
+  ' >/dev/null || fail "the underway and waiting rows did not render as collapsed rows that can expand: $base"
+
+  out=$(run_board "$home" "expand:task:t1,expand:waiting:w1")
+  printf '%s' "$out" | jq -e --argjson base "$base" '
+    (.rows | map({key, expanded})) == [{key:"task:t1",expanded:"true"},{key:"task:t2",expanded:"false"},{key:"waiting:w1",expanded:"true"}]
+      and (.rows[0].details | contains("working") and contains("t1") and contains("https://example.com/o/r/pull/7"))
+      and (.rows[2].details | contains("forge"))
+      and .order.list == $base.order.list and .calls == $base.calls
+      and .reloads == [] and .opens == [] and .pageView == $base.pageView
+  ' >/dev/null || fail "a click did not expand the rows in place, or it moved or opened something: $out"
+
+  out=$(run_board "$home" "expand:task:t1,expand:task:t1")
+  printf '%s' "$out" | jq -e '.rows[0].expanded == "false" and .rows[0].details == null' >/dev/null \
+    || fail "a second click did not collapse the row: $out"
+
+  out=$(run_board "$home" "up:task:t2,expand:task:t2")
+  printf '%s' "$out" | jq -e '
+    .order.list == ["k1","task:t2","task:t1"]
+      and (.rows[] | select(.key == "task:t2") | .expanded == "true")
+  ' >/dev/null || fail "move up stopped working beside the expanding row: $out"
+
+  run=$(rebuild_command "$home" '.underway[0].doing = "doing the next thing"')
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "expand:task:t1,run,poll")
+  printf '%s' "$out" | jq -e '
+    (.rows[] | select(.key == "task:t1") | .expanded == "true" and (.details != null))
+      and .reloads == []
+  ' >/dev/null || fail "a live update collapsed an expanded row or reloaded the page: $out"
+  pass "a click or tap on an underway or waiting row expands it in place and a second one collapses it"
+}
+
 test_new_board_code_reaches_the_open_page_only_while_the_reader_is_idle
 test_a_markup_change_rewrites_the_page
+test_a_click_or_tap_on_an_underway_or_waiting_row_expands_it_in_place
