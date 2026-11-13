@@ -31,12 +31,21 @@
 //   pageesc         the shown page's relay passes up an Esc pressed inside it
 //   snap            record the page frames now ({serial, src, parent, hidden}),
 //                   so a later snap shows whether a frame was re-created or moved
+//   annotate:on|off the chrome turns Lavish's annotate mode on or off
+//   frameload:<id>  the in-place page <id> finishes loading in its frame
+//   annotation:<id> the in-place page <id>'s relay passes up an annotation of
+//                   its element p#why ("Why this change") with the note "unclear"
+//   pagetoggle:<id> the in-place page <id>'s relay asks to toggle annotate mode
+//   stranger        an unknown frame passes up an annotation
 // Pending timers fire after each chrome message and at the end of the run.
 // The page's data file is read from beside <built-board.html> each time the
 // page loads it, so a rebuild between polls is seen by the next poll.
 // Prints { cards, storage, calls, queue, anchors, ids, order, reloads,
-//   opens, pageView, snaps }; opens lists every url the page asked to open
-//   elsewhere.
+//   opens, pageView, snaps, framePosts, keys }; opens lists every url the
+//   page asked to open elsewhere, framePosts every message the board sent
+//   each page frame, keyed by page id, and keys every key press the board
+//   dispatched to itself. Lavish's own elements (ids starting "lavish-")
+//   are absent unless the simulated chrome adds them.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 
@@ -104,6 +113,9 @@ class Node {
 }
 
 globalThis.Event = class { constructor(type, init = {}) { this.type = type; this.bubbles = !!init.bubbles; } };
+globalThis.KeyboardEvent = class extends Event {
+  constructor(type, init = {}) { super(type, init); this.key = init.key || ""; this.ctrlKey = !!init.ctrlKey; this.metaKey = !!init.metaKey; this.shiftKey = !!init.shiftKey; this.altKey = !!init.altKey; }
+};
 
 const byId = new Map();
 const dataPath = boardPath.replace(/\.html$/, ".data.js");
@@ -111,6 +123,11 @@ const loadData = () => { if (existsSync(dataPath)) new Function(readFileSync(dat
 // Anything that would replace the whole page is recorded, never performed.
 const reloads = [];
 const opens = [];
+const keys = [];
+// An in-place page frame records what the board sends it, keyed by page id.
+const framePosts = {};
+const iframes = [];
+const pageOf = (frame) => (String(frame.src).match(/^pages\/([^/]+)\/page\.html$/) || [])[1] || "";
 // A script element added to the body loads its src from beside the board.
 const body = new Node("body");
 const bodyAppend = body.appendChild.bind(body);
@@ -143,8 +160,17 @@ globalThis.document = {
   activeElement: body,
   write: () => reloads.push("document.write"),
   open: () => reloads.push("document.open"),
-  createElement: (tag) => new Node(tag),
+  createElement: (tag) => {
+    const n = new Node(tag);
+    if (tag === "iframe") {
+      n.contentWindow = { postMessage: (data) => (framePosts[pageOf(n)] ||= []).push(data) };
+      iframes.push(n);
+    }
+    return n;
+  },
+  dispatchEvent: (ev) => { keys.push({ type: ev.type, key: ev.key, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey }); return true; },
   getElementById: (id) => {
+    if (id.startsWith("lavish-")) return null;
     if (!byId.has(id)) { const n = new Node("div"); n.id = id; new Node("div").appendChild(n); byId.set(id, n); }
     return byId.get(id);
   },
@@ -186,7 +212,7 @@ globalThis.window = {
     queuePrompt: (prompt, opts) => {
       const anchor = anchorFor(opts.element);
       const key = opts.queueKey !== undefined ? opts.queueKey : "question:" + opts.element.attributes["data-lavish-question"];
-      calls.push({ key, anchor, prompt, data: opts.data });
+      calls.push({ key, anchor, prompt, tag: opts.tag, text: opts.text, data: opts.data });
       session.queue[key] = { anchor, prompt };
     },
   },
@@ -276,6 +302,17 @@ for (const act of actionList.split(",").filter(Boolean)) {
     snaps.push(frames().map((f) => ({ serial: f.serial, src: f.src, parent: f.parentNode?.id ?? "", hidden: f.hidden })));
   } else if (name === "reorder") {
     byId.get("bb-reorder").fire("click");
+  } else if (name === "annotate") {
+    post({ type: "lavish:setAnnotationMode", enabled: arg === "on" });
+  } else if (name === "frameload") {
+    iframes.find((f) => pageOf(f) === arg).fire("load");
+  } else if (name === "annotation" || name === "pagetoggle" || name === "stranger") {
+    const source = name === "stranger" ? {} : iframes.find((f) => pageOf(f) === arg).contentWindow;
+    const data = name === "pagetoggle" ? { type: "fm-board-page:toggleAnnotate", prompt: "", opts: {} }
+      : { type: "fm-board-page:queuePrompt", prompt: "unclear", opts: { tag: "annotation", text: "Why this change",
+          data: { selector: "p#why", id: "why", tag: "p", text: "Why this change" } } };
+    for (const fn of listeners) fn({ data, source });
+    flush();
   } else if (name === "send") {
     session.queue = {};
     anchors();
@@ -310,6 +347,8 @@ process.stdout.write(JSON.stringify({
     maxPressed: byId.get("bb-page-max").getAttribute("aria-pressed"),
   },
   snaps,
+  framePosts,
+  keys,
   polls: intervals.length,
   sub: byId.get("bb-call-sub").textContent,
   order: {
