@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-board-page.sh dir <page-id>
-#   fm-board-page.sh open <page-id> --title <title>
+#   fm-board-page.sh open <page-id> --title <title> [--replaces <session-url-or-id>]...
 #   fm-board-page.sh wait <page-id> [--timeout-s <seconds>]
 #   fm-board-page.sh reply <page-id> <text>
 #   fm-board-page.sh end <page-id>
@@ -31,7 +31,10 @@
 #          the board loads each page frame once and never reloads it. Prints the
 #          folder like dir. Opening an already registered page keeps its folder
 #          and answers, sets the new title, and makes it live again. Exit 3 when
-#          this home has no board.
+#          this home has no board. Each --replaces names a standalone Lavish
+#          session this page now stands in for (its /session/<id> URL or bare
+#          id); the board then opens a card link to that old session as this
+#          page, in place. Re-opening keeps the sessions already recorded.
 # wait     Block until the page has something for its agent, then print
 #            page: <page-id>
 #            status: feedback | ended | timeout
@@ -82,7 +85,7 @@
 # (inside the board's Lavish artifact folder, so the board can frame them, and
 # outside the board file Lavish watches, so writing them never reloads the
 # board), and its record under state/pages/<id>/: page.json
-# ({id,title,opened,state}) plus inbox/ and inbox/handled/.
+# ({id,title,opened,state,replaces}) plus inbox/ and inbox/handled/.
 #
 # One refresh policy covers the whole board app: no frame ever reloads. The
 # board and each page poll their own data file and patch in place; the board
@@ -155,12 +158,19 @@ cmd_dir() {
 }
 
 cmd_open() {
-  local id=${1-} title='' dir
+  local id=${1-} title='' dir sid replaces=()
   need_id "$id"
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) [ $# -ge 2 ] || usage; title=$2; shift 2 ;;
+      --replaces)
+        [ $# -ge 2 ] || usage
+        sid=$2
+        [[ $sid =~ /session/([A-Za-z0-9]+)([/?#]|$) ]] && sid=${BASH_REMATCH[1]}
+        [[ $sid =~ ^[A-Za-z0-9]{1,128}$ ]] || die "--replaces needs a Lavish session URL or id, not '$2'"
+        replaces+=("$sid")
+        shift 2 ;;
       *) usage ;;
     esac
   done
@@ -170,8 +180,10 @@ cmd_open() {
   mkdir -p "$(inbox "$id")/handled" || die "cannot create the inbox for $id"
   # shellcheck disable=SC2016 # jq program text, not shell expansion.
   write_json "$(record "$id")" \
-    '{id: $id, title: $title, opened: (.opened // $now), state: "live"}' \
+    '{id: $id, title: $title, opened: (.opened // $now), state: "live",
+      replaces: (((.replaces // []) | arrays | map(strings)) + $rep | unique)}' \
     --arg id "$id" --arg title "$title" --arg now "$(date -u +%FT%TZ)" \
+    --argjson rep "$(jq -nc '$ARGS.positional' --args ${replaces[@]+"${replaces[@]}"})" \
     || die "cannot record page $id"
   refresh_board
   printf '%s\n' "$dir"

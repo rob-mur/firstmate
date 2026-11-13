@@ -221,6 +221,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   letter-spacing: 0.07em; color: var(--navy-700); background: var(--gold-300);
   border: 1px solid var(--gold-600); border-radius: var(--radius-xs); padding: 3px 7px 2px; }
 .bb-opt:has(input:checked) { border-color: var(--rust-500); background: var(--rust-050); box-shadow: inset 0 0 0 1px var(--rust-500); }
+/* The reconcile choice the build adds sits apart from the decision's own
+   options, under a hairline, so it never reads as one of them. */
+.bb-opts--aside { padding-top: 9px; border-top: 1px dashed var(--border-default); }
+.bb-opts--aside .bb-opt { padding: 6px 12px; background: transparent; }
+.bb-opts--aside .bb-opt__label { font-weight: 600; color: var(--text-muted); }
 .bb-decision__foot { display: flex; align-items: center; gap: 10px; margin-top: auto; }
 .bb-queued {
   display: none; align-items: center; gap: 6px;
@@ -722,7 +727,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     form.id = stableId("bb-card-", item.key);
     form.setAttribute("data-lavish-question", item.key);
     var target = makeTarget("card:" + item.key, form, card, form);
+    /* The decision's own options, then the reconcile choice the build adds,
+       in a separate group so it never reads as one of them. One radio name
+       spans both groups, so either answers the card. */
     var opts = el("div", "bb-opts");
+    var aside = el("div", "bb-opts bb-opts--aside");
     item.options.forEach(function (o) {
       var lab = el("label", "bb-opt");
       var input = document.createElement("input");
@@ -735,9 +744,10 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       if (item.recommend_value && o.value === item.recommend_value) {
         lab.appendChild(el("span", "bb-opt__rec", "rec"));
       }
-      opts.appendChild(lab);
+      (o.value === "reconcile" ? aside : opts).appendChild(lab);
     });
-    form.appendChild(opts);
+    if (opts.children.length) form.appendChild(opts);
+    if (aside.children.length) form.appendChild(aside);
 
     if (item.allow_freeform) {
       var ff = document.createElement("input");
