@@ -407,9 +407,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 
 <!-- THE DATA FILE. bin/fm-bearings-board.sh build writes the fresh
      fm-bearings-board.v1 payload to bearings-board.data.js beside this page and
-     leaves this page file alone: Lavish reloads the whole open page whenever the
-     page file changes, so a rebuild changes only the data file, which the open
-     page re-reads and patches into place (LIVE UPDATE below). -->
+     installs the script below as bearings-board.app.js, rewriting this page
+     file only when its markup or styles change: Lavish reloads the whole open
+     page whenever the page file changes, so a rebuild changes only the data
+     and code files, which the open page re-reads and patches into place (LIVE
+     UPDATE and NEW CODE WITHOUT A FORCED RELOAD below). -->
 <script src="bearings-board.data.js"></script>
 
 <script>
@@ -1516,6 +1518,60 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     showStep();
     deferred = pinned;
   }
+  /* NEW CODE WITHOUT A FORCED RELOAD. build stamps this script and its data
+     with the checksum of the template that made them (bin/fm-bearings-board.sh
+     owns the files). When a poll brings data stamped for newer code, the page
+     reloads itself into it, but only while the reader is not working in it:
+     nothing focused, nothing typed or picked, no answer waiting in the queue,
+     no drag, priority send or page tab under way. Until then it keeps running
+     the code it has and patching the new data in as before. The shown card
+     and scroll position survive the reload through VIEW_KEY; a page with no
+     storage never reloads itself, and a reload that came back on other code
+     than it asked for never retries that code, so a stale cache cannot loop. */
+  var PAGE_CODE = typeof window.FM_BEARINGS_BOARD_CODE === "string" ? window.FM_BEARINGS_BOARD_CODE : "";
+  var VIEW_KEY = "fm-bearings-board.view.v1";
+  var failedCode = "";
+  (function restoreView() {
+    var kept = jsonLoad(VIEW_KEY, false);
+    try { window.localStorage.removeItem(VIEW_KEY); } catch (e) { /* storage unavailable */ }
+    if (typeof kept.to !== "string" || !kept.to) return;
+    if (kept.to !== PAGE_CODE) failedCode = kept.to;
+    var at = typeof kept.card === "string" ? cardKeys.indexOf(kept.card) : -1;
+    if (at >= 0 && orderConfirmed) showCard(at);
+    if (typeof kept.scroll === "number" && kept.scroll > 0) {
+      try { window.scrollTo(0, kept.scroll); } catch (e) { /* no scrolling here */ }
+    }
+  })();
+  function readerIdle() {
+    var act = document.activeElement;
+    if (act && act !== document.body) return false;
+    if (dragKey !== null || shownPage !== null || reorderTimer !== null) return false;
+    var ids = Object.keys(targets);
+    if (ids.some(function (id) { return targets[id].hidden.value === "queued"; })) return false;
+    /* an answer already sent leaves its picks behind; they are not work */
+    var settled = ids.filter(function (id) { return targets[id].hidden.value; })
+      .map(function (id) { return targets[id].hidden.parentNode; });
+    var typed = false;
+    ["input", "textarea"].forEach(function (tag) {
+      Array.prototype.forEach.call(document.querySelectorAll(tag), function (n) {
+        if (n.type === "hidden") return;
+        if (settled.some(function (host) { return host && host.contains(n); })) return;
+        if (n.type === "radio" || n.type === "checkbox") { if (n.checked) typed = true; }
+        else if (n.value) typed = true;
+      });
+    });
+    return !typed;
+  }
+  function takeNewCode(next) {
+    var to = next.board_code;
+    if (!PAGE_CODE || typeof to !== "string" || !to || to === PAGE_CODE || to === failedCode) return false;
+    if (!readerIdle()) return false;
+    var view = { card: cards.length ? cardKeys[active] : null, scroll: window.scrollY || 0, to: to };
+    jsonStore(VIEW_KEY, view);
+    if (JSON.stringify(jsonLoad(VIEW_KEY, false)) !== JSON.stringify(view)) return false;
+    try { window.location.reload(); } catch (e) { return false; }
+    return true;
+  }
   var liveJson = JSON.stringify(data);
   var polling = null, pollWaits = 0, pollSeq = 0;
   function pollData() {
@@ -1539,6 +1595,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       done();
       var next = window.FM_BEARINGS_BOARD_DATA;
       if (dataProblem(next)) return;
+      if (takeNewCode(next)) return;
       var json = JSON.stringify(next);
       if (json === liveJson && !deferred) return;
       liveJson = json;
