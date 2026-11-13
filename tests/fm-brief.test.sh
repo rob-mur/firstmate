@@ -1150,6 +1150,8 @@ test_scout_lavish_line_follows_presentation_floor() {
     if [ "$expect" = hosting ]; then
       assert_grep "$hosting" "$brief" "$label: scout brief did not offer the Lavish review loop"
       assert_no_grep "$text_only" "$brief" "$label: scout brief withheld Lavish from a compatible build"
+      assert_grep "FM_HOME='$case_dir/home' '$ROOT/bin/fm-board-page.sh' dir <task-id>" "$brief" \
+        "$label: scout brief did not put a visual artifact on the board first"
     else
       assert_grep "$text_only" "$brief" "$label: scout brief did not ask for a text report"
       assert_no_grep "$hosting" "$brief" "$label: scout brief offered a below-floor Lavish"
