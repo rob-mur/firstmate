@@ -5,7 +5,8 @@
  * page already has Lavish's window.lavish and this file does nothing. Shown in
  * place inside the board, the page is a nested frame Lavish does not equip, so
  * this file gives it the same three calls and passes each one to the board,
- * which queues it on the board's own Lavish session for the page's agent.
+ * which queues it on the board's own Lavish session for the page's agent, and
+ * passes Esc up so the board can leave full screen.
  * bin/fm-board-page.sh's header owns the contract.
  */
 (function () {
@@ -33,4 +34,9 @@
     sendQueuedPrompts: function () { post('fm-board-page:sendQueuedPrompts', ''); },
     endSession: function () { post('fm-board-page:endPage', ''); }
   };
+  /* Keys typed in the page stay in its frame, so pass Esc up for the board to
+     leave full screen; a page that handles Esc itself prevents the default. */
+  window.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && !ev.defaultPrevented) post('fm-board-page:escape', '');
+  });
 }());

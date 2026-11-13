@@ -491,12 +491,40 @@ test_a_card_page_button_shows_the_page_in_place() {
   pass "a card page button shows its page in place inside the board"
 }
 
+# Full screen maximises the page in place: the same frame, never re-created,
+# moved or re-pointed, and the same button, Esc on the board, or Esc pressed
+# inside the page leaves it.
+test_full_screen_keeps_the_same_page_frame() {
+  local home page out leave
+  home=$(make_home page-max)
+  page=$(register_page "$home" understand-mr-872 "Understand MR 872")
+  printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$page" > "$home/lavish-sessions"
+  render_card_links "$home" '[{url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"}]' >/dev/null
+  out=$(run_board "$home" "go,page:mr-872,snap,max,snap")
+  printf '%s' "$out" | jq -e '
+    .pageView.shown and .pageView.max and .pageView.maxPressed == "true"
+      and .reloads == [] and .opens == [] and (.snaps | length) == 2
+      and (.snaps[0] | length) == 1 and .snaps[0][0].hidden == false
+      and .snaps[0][0].src == "pages/understand-mr-872/page.html"
+      and .snaps[1] == .snaps[0]
+  ' >/dev/null || fail "full screen did not keep the same page frame: $out"
+  for leave in max esc pageesc; do
+    out=$(run_board "$home" "go,page:mr-872,snap,max,$leave,snap")
+    printf '%s' "$out" | jq -e '
+      .pageView.shown and (.pageView.max | not) and .pageView.maxPressed == "false"
+        and .reloads == [] and .snaps[1] == .snaps[0]
+    ' >/dev/null || fail "$leave did not leave full screen with the same page frame: $out"
+  done
+  pass "full screen keeps the same page frame, and the button or Esc leaves it"
+}
+
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
 test_every_card_type_renders_its_links
 test_every_card_link_opens_in_annotate_mode
 test_a_registered_page_link_opens_in_the_board
 test_an_unregistered_page_link_says_it_is_not_in_the_board
 test_a_card_page_button_shows_the_page_in_place
+test_full_screen_keeps_the_same_page_frame
 
 test_board_renders_only_the_captains_call() {
   local home out
