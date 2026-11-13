@@ -151,7 +151,7 @@ test_rows_map_deterministically_from_the_snapshot() {
 
   assert_equals "alpha-fix,old-row" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "captains_call is one card per open decision"
   assert_equals "Pick the alpha retry policy" "$(jq -r '.captains_call[0].title' <<<"$p")" "the card title comes from the clean title field"
-  assert_equals "two options measured" "$(jq -r '.captains_call[0].question' <<<"$p")" "the card leads with the hold reason as its question"
+  assert_equals "Two options measured" "$(jq -r '.captains_call[0].question' <<<"$p")" "the card leads with the hold reason as its question"
   assert_equals "Legacy fused summary" "$(jq -r '.captains_call[1].title' <<<"$p")" "a row with no title falls back to its summary"
   assert_equals "https://github.com/acme/alpha/pull/3" "$(jq -r '.captains_call[0].pr_url' <<<"$p")" "the recorded PR is attached to its card"
   assert_equals "alpha" "$(jq -r '.captains_call[0].repo' <<<"$p")" "the card repo comes from the recorded PR"
@@ -204,7 +204,7 @@ EOF
   p=$("$GEN" --snapshot "$snap" --copy "$copy") || fail "the generator refused a valid overlay"
   assert_equals "alpha-fix,merge-widgets" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "a null overlay drops its card and extra cards append"
   assert_equals "Alpha retry: pick one" "$(jq -r '.captains_call[0].title' <<<"$p")" "the overlay title wins"
-  assert_equals "two options measured" "$(jq -r '.captains_call[0].question' <<<"$p")" "unlisted fields keep the generated value"
+  assert_equals "Two options measured" "$(jq -r '.captains_call[0].question' <<<"$p")" "unlisted fields keep the generated value"
   assert_equals "Queued, reworded" "$(jq -r '.charted[] | select(.id == "plain-queued") | .title' <<<"$p")" "the overlay can reword a charted row"
   printf '%s\n' "$p" > "$TMP_ROOT/with-copy.json"
   validates "$TMP_ROOT/with-copy.json" || fail "the payload with a copy overlay did not satisfy the board validator"
@@ -425,7 +425,7 @@ test_every_question_card_gets_real_default_choices() {
   printf '{"captains_call":{"a1":{"options":[{"value":"fast","label":"Fast"}],"recommend_value":"fast"}}}\n' > "$copy"
   p=$("$GEN" --snapshot "$snap" --copy "$copy") || fail "the generator failed"
   assert_equals "option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "n1") | [.options[].value] | join(",")' <<<"$p")" "numbered sub-questions become their own choices"
-  assert_equals "build the separated text dataset as its own PR" "$(jq -r '.captains_call[] | select(.key == "n1") | .options[0].label' <<<"$p")" "a numbered choice is labelled with its own text"
+  assert_equals "Build the separated text dataset as its own PR" "$(jq -r '.captains_call[] | select(.key == "n1") | .options[0].label' <<<"$p")" "a numbered choice is labelled with its own text"
   assert_equals "actionlint" "$(jq -r '.captains_call[] | select(.key == "n1") | .options[1].label' <<<"$p")" "the last numbered choice keeps its text"
   assert_equals "yes,no" "$(jq -r '.captains_call[] | select(.key == "y1") | [.options[].value] | join(",")' <<<"$p")" "a yes/no question gets yes and no"
   assert_equals "option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "o1") | [.options[].value] | join(",")' <<<"$p")" "an either-or question splits into its alternatives"
@@ -527,8 +527,8 @@ test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice(
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   assert_equals "0" "$(jq '[.captains_call[], .waiting[]] | map(select(.key == "status.mate.slot")) | length' <<<"$p")" "the status twin does not render its own card or waiting row"
   assert_equals "1" "$(jq '[.captains_call[] | select(.key == "slot" and (.title | test("Retire")))] | length' <<<"$p")" "the hold renders exactly one card"
-  assert_equals "Yes,No,land now,wait for the dedupe fix,drop it" "$(jq -r '.captains_call[] | select(.key == "slot" and (.title | test("Retire"))) | .options | map(.label) | join(",")' <<<"$p")" "the card keeps every choice from both the hold and its status twin"
-  jq -e '.captains_call[] | select(.key == "slot" and (.title | test("Retire"))) | [.question, (.about // "")] | join(" ") | test("land now") and test("Should I land")' <<<"$p" >/dev/null || fail "the card keeps the text of both questions"
+  assert_equals "Yes,No,Land now,Wait for the dedupe fix,Drop it" "$(jq -r '.captains_call[] | select(.key == "slot" and (.title | test("Retire"))) | .options | map(.label) | join(",")' <<<"$p")" "the card keeps every choice from both the hold and its status twin"
+  jq -e '.captains_call[] | select(.key == "slot" and (.title | test("Retire"))) | [.question, (.about // ""), (.options[].label)] | join(" ") | test("Land now") and test("Should I land")' <<<"$p" >/dev/null || fail "the card keeps the text of both questions, an option list as its choices"
   assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.other.slot")] | length' <<<"$p")" "a status question with the same key in another home stays its own card"
   assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.mate.upstream")] | length' <<<"$p")" "a status question with no hold twin stays its own card"
   printf '%s\n' "$p" > "$TMP_ROOT/twin-payload.json"
@@ -757,12 +757,58 @@ test_card_links_are_labelled_by_what_they_point_at() {
   assert_equals "MR 872,Understand page,Review page" "$(jq -r '.captains_call[] | select(.key == "mr-872") | .links | map(.label) | join(",")' <<<"$p")" \
     "MR and Lavish page links are labelled by what they are"
   assert_equals "PR 837,Issue 12" "$(jq -r '.captains_call[] | select(.key == "pr-837") | .links | map(.label) | join(",")' <<<"$p")" "PR and issue links are labelled by number"
-  assert_equals "Bot comments on MR 872 are in; understand page at Understand page, review page at Review page. Post the blocking finding now?" \
+  assert_equals "Bot comments on MR 872 are in; understand page at Understand page, review page at Review page." \
     "$(jq -r '.captains_call[] | select(.key == "mr-872") | .about' <<<"$p")" "the card text names each link instead of repeating its URL"
   assert_equals "0" "$(jq '[.captains_call[] | (.question // ""), (.about // "") | select(test("https?://"))] | length' <<<"$p")" "no question or about text repeats a raw URL"
   printf '%s\n' "$p" > "$TMP_ROOT/labels-payload.json"
   validates "$TMP_ROOT/labels-payload.json" || fail "a payload with labelled links did not satisfy the board validator"
   pass "card links are labelled by what they point at and question text shows the labels"
+}
+
+# The decisions the captain annotated on the board: each card offers the
+# decision's own options in full and in captain terms, and a decision answered
+# on its Lavish page shows only the link to that page.
+test_annotated_decisions_offer_their_own_full_options_in_captain_terms() {
+  local snap="$TMP_ROOT/annotated.json" p
+  fresh_homes annotated
+  write_snapshot "$TMP_ROOT/annotated-base.json"
+  jq '.decisions_open = [
+    {id: "ci-onboard", key: "ci-onboard", verb: "captain-hold", owner: "(main)", title: "Onboard to the CI pipeline with lint and test checks",
+     reason: "Merge PR 13: (1) Add the CD_PIPELINE_TOKEN secret, then merge once all checks pass (recommended) (2) Merge now and skip the one failing check. https://github.com/acme/research/pull/13"},
+    {id: "ready-signal", key: "ready-signal", verb: "captain-hold", owner: "(main)", title: "Should the tool tell systemd when the mount is ready?",
+     reason: "Keep the optional systemd ready signal (PR 89)? 1) Keep it. 2) Drop it: close PR 89 and #68; if anything needs it, dotfiles wait for the folder to mount. Recommendation: 2, since the mount never needs systemd."},
+    {id: "cd/gate-part2", key: "status.cd.gate-part2", verb: "needs-decision", source: "status", task: "gate-part2", decision_key: "default", owner: "cd",
+     reason: "#835 second half - a gate stop already posted never clears, even after a later push removes nothing. Changing it is a published-contract choice: A) leave it; PR 837 stops new false stops, and the stale ones get one manual dismissal each (recommended). B) the gate dismisses its own stop when a later run finds nothing; every adopter then needs review-dismiss rights and the earlier ruling reverses. C) a later run posts APPROVE to clear it; that makes the gate an approver, against the gate judging nothing. Detail: /fixture/part2-decision.md"},
+    {id: "cd/gate-merge", key: "status.cd.gate-merge", verb: "needs-decision", source: "status", task: "gate-merge", decision_key: "default", owner: "cd", title: "#835 fix is two PRs",
+     reason: "#835 fix is two PRs. 1) Spec PR https://github.com/acme/cd/pull/836 (regression scenario) is green; it carries the gate review 576, so it needs your dismissal and your merge word. 2) Fix PR https://github.com/acme/cd/pull/837 (gate measures removals from the merge base) is red on acceptance only until 836 lands; then it rebases and goes green for your merge word."},
+    {id: "research/round5", key: "status.research.round5", verb: "needs-decision", source: "status", task: "round5", decision_key: "default", owner: "research",
+     reason: "Grilling round 5 (research plan without the pipeline) is on one Lavish page: http://dev-1.tailf848b0.ts.net:4387/session/988b504d3271c0ea - 7 questions, each with options and a recommendation: (1) run the baseline now (rec: yes); (2) scored candidates (rec: two smaller models); (3) techniques (rec: add one combined arm). PR 13 stays parked."},
+    {id: "research/exp1", key: "status.research.exp1", verb: "needs-decision", source: "status", task: "exp1", decision_key: "default", owner: "research",
+     reason: "experiment 1 plan revised per the note: the page now shows the exact current prompt and a proposed simplest prompt with no aids. Decision: use it as written (recommended) / name the Act / change wording. No calls made. Page http://dev-1.tailf848b0.ts.net:4387/session/53e6c4bcfdcacae4. PR 13 stays parked."},
+    {id: "review-mr872", key: "status.review-mr872.post-question", verb: "needs-decision", source: "status", task: "review-mr872", decision_key: "post-question", owner: "(main)", title: "Review page for MR 872",
+     reason: "a product question for MR 872 is held unposted with a draft in the review report. Options: firstmate posts it / I post it if authorized / keep held. https://gitlab.example.com/grp/app/-/merge_requests/872"}]' "$TMP_ROOT/annotated-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
+  opts() { card "$1" | jq -r '[.options[].label] | join("|")'; }
+  assert_equals "Merge PR 13" "$(card ci-onboard | jq -r .question)" "a numbered list heading comes from the sentence that introduces it"
+  assert_equals "Add the CD_PIPELINE_TOKEN secret, then merge once all checks pass (recommended)|Merge now and skip the one failing check" "$(opts ci-onboard)" "numbered options are the choices, not approve and decline"
+  assert_equals "Keep it|Drop it: close PR 89 and #68; if anything needs it, dotfiles wait for the folder to mount" "$(opts ready-signal)" "a long option is kept in full"
+  assert_equals "Recommendation: 2, since the mount never needs systemd." "$(card ready-signal | jq -r .about)" "the body does not repeat the heading or the options"
+  assert_equals "3" "$(card status.cd.gate-part2 | jq '.options | length')" "the third lettered option is not lost"
+  assert_equals "A later run posts APPROVE to clear it; that makes the gate an approver, against the gate judging nothing" "$(card status.cd.gate-part2 | jq -r '.options[2].label')" "the third option keeps its full text"
+  assert_equals "option-1,option-2" "$(card status.cd.gate-merge | jq -r '[.options[].value] | join(",")')" "numbered options after a plain sentence are the choices"
+  assert_equals "Post it for me|The worker posts it if authorized|Keep held" "$(opts status.review-mr872.post-question)" "worker-perspective options are put in captain terms"
+  assert_equals "A product question for MR 872 is held unposted with a draft in the review report" "$(card status.review-mr872.post-question | jq -r .question)" "the heading starts with a capital letter"
+  assert_equals "0" "$(jq '[.captains_call[] | .options[].value | select(. == "approve" or . == "decline")] | length' <<<"$p")" "no decision with its own options offers approve or decline"
+  for k in status.research.round5 status.research.exp1; do
+    assert_equals '{"options":[],"allow_freeform":false,"about":null,"question":null,"links":["Lavish page"]}' \
+      "$(card "$k" | jq -c '{options, allow_freeform, about, question, links: [.links[].label]}')" "a page-backed decision shows only the page link"
+  done
+  assert_equals "research: Grilling round 5 (research plan without the pipeline)" "$(card status.research.round5 | jq -r .title)" "a page-backed card is titled by what its page is about"
+  assert_equals "research: experiment 1 plan revised per the note" "$(card status.research.exp1 | jq -r .title)" "a page-backed card is titled by what its page is about"
+  printf '%s\n' "$p" > "$TMP_ROOT/annotated-payload.json"
+  validates "$TMP_ROOT/annotated-payload.json" || fail "a payload with the annotated decisions did not satisfy the board validator"
+  pass "annotated decisions offer their own full options in captain terms, and page-backed ones only the page link"
 }
 
 fm_test_run \
@@ -794,4 +840,5 @@ fm_test_run \
   test_a_secondmate_dated_hold_is_charted_with_its_date \
   test_a_round_a_newer_round_superseded_leaves_the_board \
   test_a_numbered_option_question_stays_a_card_when_an_option_says_until \
-  test_card_links_are_labelled_by_what_they_point_at
+  test_card_links_are_labelled_by_what_they_point_at \
+  test_annotated_decisions_offer_their_own_full_options_in_captain_terms
