@@ -113,12 +113,20 @@
 # as the compact JSON with every `<` escaped as the \u003c string escape, so a
 # payload string containing "</script>" stays inert.
 #
+# PAGES SHOWN IN PLACE. build adds `pages` to the board data: one
+# {id, title, href} row per live page registered through bin/fm-board-page.sh
+# (its header owns registration, the page folders, and the one refresh policy of
+# the board app), read from state/pages/*/page.json at build time. The board
+# lists them and shows each in place inside its own tab. A payload never
+# authors `pages`; the validator refuses one that does.
+#
 # FM_BEARINGS_BOARD_TEMPLATE overrides the shipped template path (tests only).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 DATA_SCRIPT='<script src="bearings-board.data.js"></script>'
@@ -251,7 +259,22 @@ validate_payload() {  # <data.json>
     and ((has("waiting") | not) or ((.waiting | type == "array") and ([.waiting[] | waiting_item] | all)))
     and ([.landed[] | landed_item] | all)
     and ([.charted[] | charted_item] | all)
+    and (has("pages") | not)
   ' "$1" >/dev/null
+}
+
+# Every live page registered through bin/fm-board-page.sh, oldest first, as the
+# board data's `pages` array. A record that does not parse or carries a bad id
+# is left out rather than failing the build.
+live_pages_json() {
+  local f
+  for f in "$STATE"/pages/*/page.json; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    jq -c 'select(type == "object" and .state == "live"
+             and (.id | type == "string" and test("^[a-z0-9][a-z0-9-]{0,63}$"))
+             and (.title | type == "string" and length > 0))
+           | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/page.html")}' "$f" 2>/dev/null
+  done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))'
 }
 
 # --- Lavish session liveness -------------------------------------------------
@@ -430,7 +453,8 @@ command_build() {
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
   fi
-  json=$(jq -c . "$effective") || { rm -f -- "$effective"; fail "cannot compact the board data"; }
+  json=$(jq -c --argjson pages "$(live_pages_json)" '. + {pages: $pages}' "$effective") \
+    || { rm -f -- "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
   # `<` never appears in JSON syntax outside strings, so escaping every
   # occurrence keeps the payload valid JSON while making </script> inert.
