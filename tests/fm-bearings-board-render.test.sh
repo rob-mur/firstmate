@@ -201,7 +201,7 @@ rebuild_command() {  # <home> <jq-filter>
 
 page_identity() {  # <home>
   local page="$1/.lavish/bearings-board.html"
-  printf '%s %s' "$(ls -i "$page" | awk '{print $1}')" "$(cksum < "$page")"
+  printf '%s %s' "$(stat -c %i "$page" 2>/dev/null || stat -f %i "$page")" "$(cksum < "$page")"
 }
 
 test_a_refresh_patches_changed_cards_without_reloading_or_touching_typed_text() {
