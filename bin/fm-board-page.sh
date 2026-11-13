@@ -24,8 +24,9 @@
 #          page's own script, then run open. dir registers nothing.
 #          <page-id> is a slug: lowercase letters, digits and dashes, starting
 #          with a letter or digit, at most 64 characters.
-#          Exit 3 when this home has no board ($FM_HOME/.lavish/bearings-board.html);
-#          the caller then runs its page standalone.
+#          Exit 3 when this home has no board ($FM_HOME/.lavish/bearings-board.html)
+#          and no parent board to use (below); the caller then runs its page
+#          standalone.
 # open     Register the page and ask the board to refresh, which lists it and
 #          shows it in place. Refused while the folder has no page.html, because
 #          the board loads each page frame once and never reloads it. Prints the
@@ -93,6 +94,11 @@
 # data-file pattern its own skill documents: page.html is written once and only
 # its data file changes.
 #
+# A secondmate home has no board of its own. When it is bound to its parent
+# home over a local route (.fm-secondmate-parent) and that home has a board,
+# every command uses the parent home in place of FM_HOME, so a page a
+# secondmate's worker opens shows on the board that carries its decisions.
+#
 # FM_BOARD_PAGE_REFRESH overrides the refresh command (tests only); the default
 # is a detached `bin/fm-board-refresh.sh --force`.
 set -u
@@ -105,6 +111,26 @@ BOARD="$FM_HOME/.lavish/bearings-board.html"
 SERVED="$FM_HOME/.lavish/pages"
 RECORDS="$STATE/pages"
 RELAY="$SCRIPT_DIR/../.agents/skills/bearings/assets/lavish-relay.js"
+
+# A secondmate home has no board, so its pages go on the board of the parent
+# home it is bound to over a local route (bin/fm-secondmate-parent-lib.sh), the
+# board that shows its decisions. Every command then works on that home, and
+# the refresh it asks for runs there too.
+if [ ! -f "$BOARD" ] && [ -f "$FM_HOME/.fm-secondmate-parent" ]; then
+  # shellcheck source=bin/fm-secondmate-parent-lib.sh
+  if . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh" 2>/dev/null \
+    && fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" 2>/dev/null \
+    && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] \
+    && [ "$FM_SECONDMATE_PARENT_HOME" != "$FM_HOME" ] \
+    && [ -f "$FM_SECONDMATE_PARENT_HOME/.lavish/bearings-board.html" ]; then
+    export FM_HOME="$FM_SECONDMATE_PARENT_HOME"
+    unset FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE
+    STATE="$FM_HOME/state"
+    BOARD="$FM_HOME/.lavish/bearings-board.html"
+    SERVED="$FM_HOME/.lavish/pages"
+    RECORDS="$STATE/pages"
+  fi
+fi
 
 die() { printf 'fm-board-page: %s\n' "$1" >&2; exit "${2:-1}"; }
 usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit "${1:-2}"; }
