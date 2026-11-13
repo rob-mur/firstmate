@@ -1036,6 +1036,44 @@ status_open_decisions() {  # <status-file> [<kind>]
   printf '%s' "$open"
 }
 
+# Every note a still-open decision has carried since it last opened, oldest
+# first: one TAB-separated "<key>\t<note>" line per needs-decision or blocked
+# line that raised it, its current note last. A later line of the same key
+# supersedes an earlier one in status_open_decisions, so a reader that needs
+# what the earlier lines said (options the current line only refers to) reads
+# them here. Same fold and arguments as status_open_decisions; a decision that
+# closed and reopened keeps only the lines since it reopened.
+status_open_decision_history() {  # <status-file> [<kind>]
+  local f=$1 kind=${2:-} line resolve held open='' hist='' kept h verb key note
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  kind=$(_fm_status_kind "$f" "$kind")
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb "$line" verb
+    case "$verb" in
+      needs-decision|blocked|done|failed|"$resolve"|"$held") ;;
+      *) continue ;;
+    esac
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+    kept=''
+    while IFS= read -r h; do
+      [ -n "$h" ] || continue
+      case $'\n'"$open" in *$'\n'"${h%%$'\t'*}"$'\t'*) kept="${kept}${h}"$'\n' ;; esac
+    done <<EOF
+$hist
+EOF
+    hist=$kept
+    case "$verb" in needs-decision|blocked) ;; *) continue ;; esac
+    key=$(_fm_decision_key "$line") || continue
+    note=$(status_line_note "$line")
+    case $'\n'"$open" in
+      *$'\n'"$key"$'\t'"$verb"$'\t'"$note"*) hist="${hist}${key}"$'\t'"${note}"$'\n' ;;
+    esac
+  done < "$f"
+  printf '%s' "$hist"
+}
+
 # The emission epoch of the line that opened keyed decision <key> in the log -
 # the newest needs-decision/blocked line carrying it, which is the record the
 # fold keeps open. Prints nothing and returns 1 when that line has no [at=] time.

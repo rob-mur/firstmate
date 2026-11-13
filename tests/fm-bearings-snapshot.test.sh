@@ -3527,7 +3527,7 @@ test_supplied_secondmate_questions_and_legacy_optional_fields() {
 test_status_questions_reach_decisions_open_with_routing_fields() {
   local home fakebin json
   home=$(make_home status-questions); write_fixture "$home"
-  printf 'blocked [key=synthetic-dependency]: Slack MCP tools are missing\n' > "$home/state/ship-task.status"
+  printf 'blocked [key=synthetic-dependency]: Options: A) wait. B) skip it.\nblocked [key=synthetic-dependency]: Slack MCP tools are missing\n' > "$home/state/ship-task.status"
   printf 'needs-decision [key=captain-hold-mirror]: mirror of a hold\nneeds-decision [key=pending-reply-abc]: relay\n' > "$home/state/scout-x.status"
   record_claude_state "$home/state" ship-task idle
   fakebin=$(make_fakebin "$home")
@@ -3535,13 +3535,15 @@ test_status_questions_reach_decisions_open_with_routing_fields() {
   printf '%s' "$json" | jq -e '
     (.decisions_open | any(.[]; .key == "status.ship-task.synthetic-dependency" and .source == "status"
         and .task == "ship-task" and .decision_key == "synthetic-dependency" and .mate == null
-        and .owner == "(main)" and .question == "Slack MCP tools are missing"))
+        and .owner == "(main)" and .question == "Slack MCP tools are missing"
+        and .reason_earlier == ["Options: A) wait. B) skip it."]))
       and (.decisions_open | any(.[]; .key == "status.mate.mate.race" and .source == "status"
-        and .task == "mate" and .decision_key == "race" and .mate == "mate" and .owner == "mate"))
+        and .task == "mate" and .decision_key == "race" and .mate == "mate" and .owner == "mate"
+        and (has("reason_earlier") | not)))
       and (.decisions_open | any(.[]; (.key | test("captain-hold-mirror|pending-reply")) ) | not)
       and (.gates | any(.[]; .id == "ship-task") | not)
   ' >/dev/null || fail "status questions did not reach decisions_open with routing fields: $json"
-  pass "blocked and needs-decision status questions reach decisions_open, reserved relay keys excluded"
+  pass "blocked and needs-decision status questions reach decisions_open with their earlier text, reserved relay keys excluded"
 }
 
 test_a_resolved_status_question_is_not_a_board_row() {
