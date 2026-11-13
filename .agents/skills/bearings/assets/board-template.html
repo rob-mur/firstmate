@@ -316,6 +316,14 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bb-pageframe { display: block; width: 100%; height: calc(100vh - 130px); min-height: 320px;
   border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); background: var(--white); }
+/* Full screen: the same page view, fixed over the whole window above the board
+   header, so the frame is never moved or reloaded and keeps its state. */
+.bb-pageview.is-max { position: fixed; inset: 0; z-index: 1000; display: flex; flex-direction: column;
+  padding: 6px 8px 8px; background: var(--surface-card); }
+.bb-pageview.is-max[hidden] { display: none; }
+.bb-pageview.is-max .bb-pagebar { padding-bottom: 6px; }
+.bb-pageview.is-max #bb-pageframes { flex: 1 1 auto; min-height: 0; }
+.bb-pageview.is-max .bb-pageframe { height: 100%; min-height: 0; }
 
 .bb-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--border-default); padding-top: 14px; }
 
@@ -389,6 +397,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   <div class="bb-pagebar">
     <button type="button" class="fm-btn fm-btn--sm" id="bb-page-back">Back to board</button>
     <span class="bb-pagebar__title" id="bb-page-title"></span>
+    <button type="button" class="fm-btn fm-btn--sm" id="bb-page-max" aria-pressed="false" title="Fill the window with this page (Esc to leave)">Full screen</button>
     <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-page-end">End this page</button>
   </div>
   <div id="bb-pageframes"></div>
@@ -1148,12 +1157,16 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
      board, which queues them on the board's own Lavish session, labelled with
      the page, so the router hands each answer to that page's agent. Ending a
      page ends that page alone. A new page never takes the screen by itself;
-     its tab shows a dot until opened. */
+     its tab shows a dot until opened. Full screen fixes the same page view
+     over the whole window by a class alone, so the frame is never moved,
+     re-created or reloaded; the same button or Esc leaves it, and Esc
+     pressed inside the page arrives as a message from its relay. */
   var tabsEl = document.getElementById("bb-tabs");
   var mainView = document.querySelector(".bb-main");
   var pageView = document.getElementById("bb-pageview");
   var frameHost = document.getElementById("bb-pageframes");
   var pageTitleEl = document.getElementById("bb-page-title");
+  var pageMaxBtn = document.getElementById("bb-page-max");
   var pageById = {};
   var endedHere = {};
   var shownPage = null;
@@ -1165,9 +1178,16 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     return !!p && typeof p.id === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(p.id) &&
       typeof p.title === "string" && p.title.length > 0 && p.href === "pages/" + p.id + "/page.html";
   }
+  function setPageMax(on) {
+    on = !!on && !!shownPage;
+    pageView.classList.toggle("is-max", on);
+    pageMaxBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    pageMaxBtn.textContent = on ? "Exit full screen" : "Full screen";
+  }
   function showPage(id) {
     if (id && !pageById[id]) id = null;
     shownPage = id;
+    if (!id) setPageMax(false);
     mainView.hidden = !!id;
     pageView.hidden = !id;
     boardTab.classList.toggle("is-active", !id);
@@ -1244,6 +1264,10 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     dropPage(p.id);
   }
   document.getElementById("bb-page-back").addEventListener("click", function () { showPage(null); });
+  pageMaxBtn.addEventListener("click", function () { setPageMax(!pageView.classList.contains("is-max")); });
+  window.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && pageView.classList.contains("is-max")) setPageMax(false);
+  });
   document.getElementById("bb-page-end").addEventListener("click", function () {
     if (shownPage && pageById[shownPage]) endPage(pageById[shownPage]);
   });
@@ -1262,6 +1286,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     if (d.type === "fm-board-page:queuePrompt") {
       var o = d.opts && typeof d.opts === "object" ? d.opts : {};
       queueForPage(p, typeof o.tag === "string" && o.tag ? o.tag : "prompt", d.prompt, o);
+    } else if (d.type === "fm-board-page:escape") {
+      if (p.id === shownPage) setPageMax(false);
     } else if (d.type === "fm-board-page:sendQueuedPrompts") {
       sendAll();
     } else if (d.type === "fm-board-page:endPage") {
