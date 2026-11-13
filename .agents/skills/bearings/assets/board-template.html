@@ -197,7 +197,7 @@ a { color: inherit; text-decoration: none; }
 .bb-ctx__row { display: grid; grid-template-columns: 78px minmax(0,1fr); gap: 8px; align-items: baseline; }
 .bb-ctx__k { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-faint); white-space: nowrap; }
-.bb-ctx__v { font-size: var(--fs-base); color: var(--text-muted); line-height: 1.4; min-width: 0; overflow-wrap: anywhere; }
+.bb-ctx__v { font-size: var(--fs-base); color: var(--text-muted); line-height: 1.4; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; display: block; overflow-wrap: anywhere; word-break: break-word; line-height: 1.35; }
 .bb-decision__link:hover { text-decoration: underline; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
@@ -489,6 +489,8 @@ __FM_BEARINGS_BOARD_DATA__
     }
     if (state) t.badge.classList.add("is-queued"); else t.badge.classList.remove("is-queued");
     if (state !== "queued" && ownQueued[t.id]) { delete ownQueued[t.id]; ownSave(); }
+    /* a sent priority is what firstmate now records */
+    if (state === "sent" && t.id === "board-priority" && queuedPriority) baselineKeys = queuedPriority.slice();
   }
   /* queue through Lavish, keeping the unsent prompt for a later restore */
   function queueAnswer(t, prompt, opts, ids) {
@@ -539,6 +541,17 @@ __FM_BEARINGS_BOARD_DATA__
     rankItems.push({ key: "task:" + u.id, title: u.name || u.id, repo: u.repo || null, underway: true, doing: u.doing || "" });
   });
   rankItems.forEach(function (c) { itemByKey[c.key] = c; });
+  /* The payload order is the recorded priority (board-priority.txt order),
+     so the order only needs sending when the captain's differs from it. */
+  var baselineKeys = rankItems.map(function (c) { return c.key; });
+  /* A stable element id per item key. Lavish anchors a queued answer by a
+     selector that stops at the first id, so an id keeps the anchor on its
+     own card after a rebuild reorders the deck. */
+  function stableId(prefix, key) {
+    return prefix + String(key).replace(/[^A-Za-z0-9-]/g, function (ch) {
+      return "_" + ch.charCodeAt(0).toString(16) + "_";
+    });
+  }
   var storedOrder = jsonLoad(ORDER_KEY, false);
   var orderKeys = [];
   (Array.isArray(storedOrder.keys) ? storedOrder.keys : []).forEach(function (k) {
@@ -619,6 +632,7 @@ __FM_BEARINGS_BOARD_DATA__
     });
 
     var form = document.createElement("form");
+    form.id = stableId("bb-card-", item.key);
     form.setAttribute("data-lavish-question", item.key);
     var target = makeTarget("card:" + item.key, form, card, form);
     var opts = el("div", "bb-opts");
@@ -766,6 +780,7 @@ __FM_BEARINGS_BOARD_DATA__
     orderKeys.splice(to, 0, key);
     orderPersist();
     renderOrder();
+    scheduleReorderSend();
   }
   function renderOrder() {
     while (orderList.children.length) orderList.removeChild(orderList.children[0]);
@@ -819,22 +834,38 @@ __FM_BEARINGS_BOARD_DATA__
   /* the durable priority: one annotation firstmate records and reads when it
      picks the next work, sent whenever the captain leaves the list */
   var priorityScope = el("div");
+  priorityScope.id = "bb-priority";
   priorityScope.setAttribute("data-lavish-question", "board-priority");
   document.getElementById("bb-order").appendChild(priorityScope);
   var priorityTarget = makeTarget("board-priority", priorityScope, el("span"), priorityScope);
+  var reorderTimer = null;
+  var queuedPriority = null;
+  function sameKeys(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+  function priorityQueued() { return priorityTarget.hidden.value === "queued"; }
   function sendPriority() {
+    if (reorderTimer !== null) { clearTimeout(reorderTimer); reorderTimer = null; }
     var ids = orderKeys.map(function (k) { return k.indexOf("task:") === 0 ? k.slice(5) : k; });
+    queuedPriority = orderKeys.slice();
     queueAnswer(priorityTarget, "Board priority, highest first: " + ids.join(", "),
       { tag: "priority", text: "board priority: " + ids.join(", "),
         data: { schema: "fm-bearings-priority.v1", keys: ids, order: orderKeys.slice() } });
   }
+  /* Send only a change: the recorded order is never re-submitted, and a
+     queued prompt is replaced so it always matches the list on screen. */
+  function sendPriorityIfChanged() {
+    if (priorityQueued() || !sameKeys(orderKeys, baselineKeys)) sendPriority();
+  }
+  function scheduleReorderSend() {
+    if (reorderTimer !== null) clearTimeout(reorderTimer);
+    reorderTimer = setTimeout(function () { reorderTimer = null; sendPriorityIfChanged(); }, 800);
+  }
   document.getElementById("bb-order-go").addEventListener("click", function () {
-    if (!cards.length) { orderPersist(); sendPriority(); return; }
+    if (!cards.length) { orderPersist(); sendPriorityIfChanged(); return; }
     orderConfirmed = true;
     orderPersist();
     applyOrder();
     showStep();
-    sendPriority();
+    sendPriorityIfChanged();
   });
   function openCard(key) {
     orderConfirmed = true;
@@ -842,7 +873,7 @@ __FM_BEARINGS_BOARD_DATA__
     applyOrder();
     showCard(cardKeys.indexOf(key));
     showStep();
-    sendPriority();
+    sendPriorityIfChanged();
   }
   reorderBtn.addEventListener("click", function () {
     if (anyQueued()) return;
@@ -851,17 +882,22 @@ __FM_BEARINGS_BOARD_DATA__
     renderOrder();
     showStep();
   });
-  /* adopt an order Lavish restored with the form when storage held none */
+  /* Adopt an order Lavish restored with the form when storage held none.
+     Surviving keys keep the restored order and new keys follow in payload
+     order, so a changed item set no longer resets the captain's order. */
   function adoptRestoredOrder() {
     var v;
     try { v = JSON.parse(orderHidden.value); } catch (e) { return; }
-    if (!v || !Array.isArray(v.keys) || JSON.stringify(v.keys) === JSON.stringify(orderKeys)) return;
+    if (!v || !Array.isArray(v.keys)) return;
     var keys = [];
     v.keys.forEach(function (k) { if (itemByKey[k] && keys.indexOf(k) < 0) keys.push(k); });
-    if (keys.length !== orderKeys.length) return;
+    var added = 0;
+    rankItems.forEach(function (c) { if (keys.indexOf(c.key) < 0) { keys.push(c.key); added++; } });
+    var confirm = v.confirmed === true && added === 0 && !orderConfirmed;
+    if (sameKeys(keys, orderKeys) && !confirm) return;
     orderKeys = keys;
-    if (v.confirmed === true) orderConfirmed = true;
-    orderSave();
+    if (confirm) orderConfirmed = true;
+    orderPersist();
     renderOrder();
     applyOrder();
   }
@@ -921,6 +957,9 @@ __FM_BEARINGS_BOARD_DATA__
       /* no record of this answer in this tab: queue the kept one again */
       queueAnswer(t, rec.prompt, rec.opts, rec.ids);
     });
+    /* a priority queued before a rebuild is queued again with the merged
+       order, so it never lists departed items */
+    if (first && priorityQueued()) sendPriority();
     /* drop kept answers for cards that left the board */
     var pruned = false;
     Object.keys(ownQueued).forEach(function (id) {
