@@ -113,8 +113,11 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- Records and inboxes of pages shown inside the bearings board under `state/pages/` (`bin/fm-board-page.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
+
+`.lavish/` holds the bearings board page, its data file, and the served files of each page shown inside it under `.lavish/pages/` (`bin/fm-bearings-board.sh` and `bin/fm-board-page.sh` own them).
 
 `projects/` holds local project clones.
 Firstmate reads these clones, but changes them only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
@@ -3194,6 +3197,7 @@ A long-polling external process is registered as a *source* through its adapter,
 
 Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; reply and poll attempts derive their host and port from that session and refuse missing or invalid session evidence before posting or consuming a staged worker reply.
 Open it once: every `lavish-axi <artifact>` run opens a new browser tab and takes the captain's focus, so show a revision by rewriting the artifact, which the open page reloads, or by a sibling data file the page polls when the captain may be typing on it ([`lavish-board.md`](../.agents/skills/bearings/references/lavish-board.md) owns that pattern for the board).
+A page that should live inside the open board rather than in a tab of its own registers through `bin/fm-board-page.sh` instead of opening an artifact.
 
 **Retry interrupted Lavish polls**
 
