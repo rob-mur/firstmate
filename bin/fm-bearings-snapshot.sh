@@ -48,7 +48,8 @@
 # secondmate question the parent status log shows (the wake drain's open
 # decisions) is read from the parent task itself, so it reaches the board even
 # when the home summary is invalid; it is skipped only when the home is valid
-# with no active work, or already lists the same key. A finished task whose last
+# with no active work, or already lists the same question under the same key or
+# as an open question of the child task that key names. A finished task whose last
 # event names a live review page becomes a source:"review-page" row. The
 # buckets are total and mutually exclusive, so every captain hold appears in
 # exactly one decision bucket and none can fall through both. An actively worked
@@ -616,12 +617,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                         | select(.id == $t.id and .provenance.summary_valid == true
                                  and .current.state == "no_active_work") ] | length) == 0)
          # The same decision already carried by the home own status log is not
-         # listed twice.
+         # listed twice: the parent row names it by the same key, or by the
+         # child task whose own log raised it (a relay keys it by that task).
          | (.hints.open_decisions // [])[]
          | select($t.kind != "secondmate"
                   or (.key as $k | [ ($root.secondmate_current.records // [])[]
                         | select(.id == $t.id) | .decisions_open[]?
-                        | select(.source == "status" and .key == $k) ] | length) == 0)
+                        | select(.source == "status" and (.key == $k or .id == $k)) ] | length) == 0)
          | status_question_row((if $t.kind == "secondmate" then $t.id else "(main)" end);
                                null; $t.id; ($t.backlog.title // $t.id)) ]
      + [ .tasks[]? | . as $t | review_page_row($t) ]
