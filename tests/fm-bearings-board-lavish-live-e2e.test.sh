@@ -179,3 +179,18 @@ kill "$listener" 2>/dev/null
 grep -qx reload "$events" \
   || fail "lavish-axi ${VERSION:-version-unknown} sent no reload even when the page changed, so the no-reload check proved nothing"
 pass "a board rebuild serves new data to the open page without lavish-axi ${VERSION:-version-unknown} reloading it"
+
+# THE STABLE LINK UNDER GUARD: Lavish names the session from the board's real
+# path, so the link the captain bookmarked survives the captain ending the
+# session, and `url` brings that same link back live without a rebuild.
+curl -fsS -X POST "$base/api/$key/end" >/dev/null 2>&1 \
+  || fail "could not end the guard board session as the captain a second time"
+url_err="$LAB/url.err"
+again=$(run_board url 2>"$url_err") \
+  || fail "the board url command refused a recoverable captain-ended session: $(cat "$url_err")"
+[ "$again" = "$url" ] \
+  || fail "lavish-axi ${VERSION:-version-unknown} gave the reopened board a different link ($again, was $url); the stable board link must be revisited"
+grep -qx 'reopened: yes' "$url_err" || fail "the board url command did not report reopening the ended session"
+lavish-axi 2>/dev/null | grep -F "$BOARD," | grep -q ',open,' \
+  || fail "the board url command printed a link while the session was still not live"
+pass "the board url command restores the same stable link against real lavish-axi after the captain ends the session"
