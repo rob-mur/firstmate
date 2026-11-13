@@ -421,6 +421,15 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 An available hold is therefore never in both Captain's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
 
+### Handed to a worker
+
+A decision whose answer or work has gone to a worker is no longer waiting on the captain, even while its hold stays open.
+The snapshot marks such a row `handed_at`, `handed_via`, `handed_task`, and `raised_at` from durable records only: a steer to a task the decision tracks that names the decision and does not tell the worker to wait for the captain, a `resolved` line for it, or a pending board reconcile request.
+The board payload then shows the row in the waiting group, saying which worker or firstmate has it, instead of as a Captain's Call card.
+A later `needs-decision` or `blocked` line from a task the decision tracks raises it again, so the card comes back when the worker needs the captain.
+The stored board priority only orders cards and never brings back a closed or handed decision.
+The open board catches each of these record changes through `bin/fm-board-refresh.sh --kick`, which a secondmate home forwards to its parent home's board.
+
 Decision presentation uses the full-text field documented in [`bin/fm-bearings-snapshot.sh`](../bin/fm-bearings-snapshot.sh), preserving the recorded question and options while compact summaries remain overview-only.
 Older secondmate summaries without that field fall back to the title and reason text they retained.
 

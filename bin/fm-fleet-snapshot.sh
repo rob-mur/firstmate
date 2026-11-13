@@ -95,7 +95,9 @@
 #     Generated captain-hold rows in decisions_open and queued carry the full
 #     question for presentation, plus uncut title_full and reason_full
 #     (queued rows: title_full and hold_reason_full); their overview summary,
-#     reason, title, and hold_reason fields stay bounded.
+#     reason, title, and hold_reason fields stay bounded. A decisions_open
+#     captain-hold row also carries hold_set and origin (null when unrecorded),
+#     so a reader can tell when the hold was raised and which task carries it.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
@@ -1040,7 +1042,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
              question:(.title + ": " + .hold_reason),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
-            hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
+            hold_age_days:(.hold_age_days // null),
+            hold_set:(.hold_set // null),
+            origin:([(.body_lines // [])[]
+                     | capture("^Captain hold origin:[[:space:]]*(?<v>[^[:space:]]+)")?
+                     | .v][0] // null),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             kind:((.kind // null) | if . == null then null else trunc(40) end),
