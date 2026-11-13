@@ -13,6 +13,7 @@
 # Usage:
 #   fm-bearings-board.sh build [--no-reopen] <data.json>
 #   fm-bearings-board.sh path
+#   fm-bearings-board.sh url
 #
 # build      Validate the payload, drop the Captain's Call cards whose subject
 #            already landed, give every surviving decision card the standard
@@ -44,6 +45,22 @@
 #            instead of reopening it, because reopening opens a browser tab
 #            nobody asked for.
 # path       Print the stable board path for this home.
+# url        Print the board's current Lavish session URL as the only stdout
+#            line, after making it reachable: the same serve sequence as build
+#            (prove the session live, reopen it if it ended, bind, arm, prove a
+#            listener) runs against the already-built board, without rebuilding
+#            it and with LAVISH_AXI_NO_OPEN=1 so no browser is ever opened.
+#            Prints `reopened: yes` on stderr when it had to reopen. Refuses
+#            when no board has been built in this home yet.
+#
+# THE URL IS STABLE BUT NOT ALWAYS SERVED. Lavish names a session by the first
+# 16 hex digits of sha256(realpath of the board file), so the stable board path
+# yields the same /session/<id> through rebuilds, Lavish server restarts, and
+# reopening after the captain ends the session; the host and port come from
+# the server's link host (its Tailscale MagicDNS name when bound) and
+# LAVISH_AXI_PORT. That bookmark only answers while the session is open: once
+# the captain ends the last session the server stops, and Lavish offers no
+# alias route that could reopen it. `url` is what brings the bookmark back.
 #
 # A LIVE SESSION IS PROVED, NEVER ASSUMED. `lavish-axi <file>` exits 0 even
 # when it refuses to reopen a session the captain ended from the browser,
@@ -510,7 +527,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data board board_data json tmp sid extracted effective owner version pre_reopen_owner pages reopen=1
+  local data board board_data json tmp extracted effective pages reopen=1
   if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   data=$1
@@ -575,7 +592,15 @@ command_build() {
   fi
   printf 'board: %s\n' "$board"
   printf 'data: %s\n' "$board_data"
+  serve_board "$board" "$reopen"
+}
 
+# Serve the board and keep its answer source listening: establish and prove the
+# Lavish session (reopening an ended one), then bind before arm, then prove a
+# live listener. Shared by build and url so a reopened board can never come
+# back without somewhere for its answers to go.
+serve_board() {  # <board> <reopen-0-or-1>
+  local board=$1 reopen=$2 sid owner version pre_reopen_owner
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
     || fail "cannot derive the board source id"
@@ -622,9 +647,41 @@ command_build() {
   fi
 }
 
+# The board URL as the server's own listing reports it for the canonical path.
+lavish_listed_url() {  # <canonical-board-path>
+  local listing
+  listing=$(lavish-axi 2>/dev/null) || return 1
+  printf '%s\n' "$listing" | awk -v path="$1" '
+    { line = $0; sub(/^[[:space:]]+/, "", line) }
+    index(line, path ",open,\"") == 1 {
+      rest = substr(line, length(path) + 8)
+      url = substr(rest, 1, index(rest, "\"") - 1)
+      if (url != "") { print url; found = 1; exit }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+command_url() {
+  local board out url
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  board=$(board_path)
+  [ -f "$board" ] || fail "no board has been built in this home yet: $board (run /bearings lavish first)"
+  # Asking for the link is the captain asking for the board, so an ended
+  # session is reopened here exactly as build would; no browser is ever opened.
+  out=$(LAVISH_AXI_NO_OPEN=1 serve_board "$board" 1) || exit 1
+  url=$(lavish_listed_url "$(board_realpath "$board")") \
+    || fail "the board is live but the Lavish listing carries no URL for it"
+  case "$out" in
+    *"session: reopened"*) printf 'reopened: yes\n' >&2 ;;
+  esac
+  printf '%s\n' "$url"
+}
+
 case "${1-}" in
   build) shift; command_build "$@" ;;
   path) board_path ;;
+  url) shift; command_url "$@" ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
