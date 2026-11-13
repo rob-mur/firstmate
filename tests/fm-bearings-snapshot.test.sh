@@ -3539,6 +3539,27 @@ test_secondmate_questions_from_the_parent_log_survive_an_invalid_home() {
   pass "secondmate questions from the parent status log reach decisions_open even with an unreadable home"
 }
 
+# Real shape: a secondmate child asks under its own key (board-review) and the
+# secondmate relays the same question to the parent log keyed by that child task.
+# It is one decision, so it is one row and one Captain's Call card.
+test_a_relayed_child_question_is_one_board_card() {
+  local home mate fakebin json cards
+  home=$(make_home relayed-child-question); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  printf 'needs-decision [key=board-review]: CPU fixes page live - approve or skip each fix\n' > "$mate/state/mate.status"
+  printf 'needs-decision [key=mate]: CPU fixes page live, listener armed - approve or skip each fix\n' > "$home/state/mate.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    [.decisions_open[] | select(.key | startswith("status.mate.")) | .key] == ["status.mate.mate.board-review"]
+  ' >/dev/null || fail "a relayed child question was not exactly one row: $json"
+  cards=$(printf '%s' "$json" | "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot - \
+    | jq -c '[.captains_call[] | select(.key | startswith("status.mate.")) | .key]')
+  [ "$cards" = '["status.mate.mate.board-review"]' ] \
+    || fail "a relayed child question was not exactly one card: $cards"
+  pass "a child question and its parent-log relay keyed by the child task are one row and one card"
+}
+
 # A finished task whose last event names a live review page is a card.
 test_a_ready_review_page_is_a_board_row() {
   local home fakebin json
@@ -3718,6 +3739,7 @@ fm_test_run \
   test_projection_and_toon_fail_closed \
   test_status_questions_reach_decisions_open_with_routing_fields \
   test_secondmate_questions_from_the_parent_log_survive_an_invalid_home \
+  test_a_relayed_child_question_is_one_board_card \
   test_a_ready_review_page_is_a_board_row \
   test_a_resolved_status_question_is_not_a_board_row \
   test_a_question_hold_in_a_hidden_bucket_still_reaches_the_board \
