@@ -248,8 +248,28 @@ test_a_refresh_leaves_a_card_alone_while_it_is_being_edited() {
   pass "a refresh leaves a card alone while it is being edited and updates it once it is not"
 }
 
+# A decision that leaves the payload no longer waits on the captain, so the
+# open page drops its card even while the captain is still in it: an answer
+# sent and waiting in the queue, focus inside it, or typed text.
+test_a_departed_card_leaves_the_board_even_while_it_is_busy() {
+  local home out run actions
+  for actions in "go,type:k1,submit:k1,focus:k1,run,poll" "go,type:k1,focus:k1,run,poll" "go,type:k1,blur,run,poll"; do
+    home=$(make_home "live-departed-$(printf '%s' "$actions" | cksum | cut -d' ' -f1)")
+    build_call_board "$home" '["k1","k2"]'
+    run=$(rebuild_command "$home" '.captains_call |= map(select(.key != "k1"))')
+    out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "$actions")
+    printf '%s' "$out" | jq -e '
+      (.cards | map(.key)) == ["k2"] and .order.list == ["k2"]
+        and (.sub | startswith("1 item "))
+        and .reloads == [] and .polls == 1
+    ' >/dev/null || fail "a departed card stayed on the board after $actions: $out"
+  done
+  pass "a departed card leaves the board even while it is queued, focused or filled in"
+}
+
 test_a_refresh_patches_changed_cards_without_reloading_or_touching_typed_text
 test_a_refresh_leaves_a_card_alone_while_it_is_being_edited
+test_a_departed_card_leaves_the_board_even_while_it_is_busy
 
 test_every_card_type_renders_its_links() {
   local home data out
