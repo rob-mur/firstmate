@@ -8,7 +8,7 @@
 // Prints one JSON document:
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text,action}],
-//     pages:[{page,text}],notes:[text]}],
+//     pages:[{page,text}],notes:[text],options:[{value,label,aside}]}],
 //     empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -157,6 +157,14 @@ const call = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
     .map((b) => ({ page: b.attributes["data-board-page"], text: b.textContent })),
   notes: card.findAll((n) => n.className.includes("bb-decision__link--note"))
     .map((n) => n.textContent),
+  // Each answer choice in render order, its full label, and whether it sits
+  // in the separate group apart from the decision's own options.
+  options: card.findAll((n) => n.className.split(/\s+/).includes("bb-opts"))
+    .flatMap((g) => g.children.map((lab) => ({
+      value: lab.children.find((c) => c.tagName === "input")?.value ?? "",
+      label: lab.findAll((c) => c.className.includes("bb-opt__label"))[0]?.textContent ?? "",
+      aside: g.className.includes("bb-opts--aside"),
+    }))),
 }));
 const waitingNode = byId.get("bb-waiting");
 const waiting = {

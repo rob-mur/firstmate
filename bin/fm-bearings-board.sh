@@ -67,6 +67,10 @@
 # THE RECONCILE CHOICE. Every decision card carries the standard `reconcile`
 # option, injected here so the guarantee does not depend on the composer's
 # memory, and the payload validator reserves that value across every card type.
+# The board labels it "Already settled? Re-check and close it" and shows it
+# apart from the decision's own choices. Because build always adds it, a
+# decision card may arrive with no options and no free-text answer (a decision
+# answered on its page shows only that page link).
 # The validator's reservation scope must equal the adapter's reconcile
 # classification scope, which is all card types because the captured payload
 # carries no card type. Its meaning, and the reason it can never reach the
@@ -111,7 +115,10 @@
 # becomes `{page: <id>, label}` and the board opens that page in place. A
 # `{page, label}` link naming a live page stays as it is. Any other Lavish-
 # origin url or page link becomes `{label, not_in_board: true}`, which the board
-# shows as a plain note; a link to the board's own session is dropped.
+# shows as a plain note; a link to the board's own session is dropped. A
+# session the listing no longer shows (an ended standalone page) resolves only
+# when a live page record names it in `replaces` (bin/fm-board-page.sh open
+# --replaces), which maps that old session URL to the registered page.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation keeps the same Lavish session URL and the same canonical
@@ -216,7 +223,7 @@ validate_payload() {  # <data.json>
       and repo_marker
       and (.title | nonempty_string)
       and (.options | type == "array")
-      and ((.options | length) > 0 or .allow_freeform == true)
+      and ((.options | length) > 0 or .allow_freeform == true or .type == "decision")
       and ([.options[]
         | type == "object"
           and (.value | slug(128))
@@ -289,7 +296,8 @@ live_pages_json() {
     jq -c 'select(type == "object" and .state == "live"
              and (.id | type == "string" and test("^[a-z0-9][a-z0-9-]{0,63}$"))
              and (.title | type == "string" and length > 0))
-           | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/page.html")}' "$f" 2>/dev/null
+           | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/page.html"),
+              replaces: ([.replaces // [] | arrays | .[] | strings])}' "$f" 2>/dev/null
   done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))'
 }
 
@@ -334,12 +342,13 @@ resolve_page_links() {  # <pages-json> <sessions-json>
           (.page as $p | if ($live | index([$p])) then . else label_of + {not_in_board: true} end)
         elif (.url | lavish) then
           ((.url | capture("/session/(?<s>[A-Za-z0-9]+)").s // null) as $sid
-           | ($sid | if . == null then null else $sessions[.] end) as $id
+           | ($sid | if . == null then null
+                     else ($sessions[.] // ([$pages[] | select(.replaces | index([$sid])) | .id][0])) end) as $id
            | if $id == "" then empty
              elif $id != null and ($live | index([$id])) then label_of + {page: $id}
              else label_of + {not_in_board: true} end)
         else . end;
-    . + {pages: $pages}
+    . + {pages: ($pages | map(del(.replaces)))}
     | .captains_call |= map(if has("links") then .links |= map(resolve) else . end)'
 }
 
@@ -473,7 +482,7 @@ effective_payload() {  # <data.json> <dest.json>
       | if .type == "decision"
         then .options += [{
           value: "reconcile",
-          label: "Reconcile",
+          label: "Already settled? Re-check and close it",
           hint: "Re-check the latest state, then close this with evidence or keep it open with a note"
         }]
         else . end

@@ -389,24 +389,27 @@ test_every_card_link_opens_in_annotate_mode() {
 
 # Register <id> as a live board page whose file is served from the home's page
 # folder, and print that file's real path.
-register_page() {  # <home> <id> <title>
-  local home=$1 dir="$1/.lavish/pages/$2"
-  mkdir -p "$dir" "$home/state/pages/$2"
-  printf '<p>%s</p>\n' "$3" > "$dir/page.html"
-  jq -n --arg id "$2" --arg title "$3" '{id:$id,title:$title,opened:"2026-08-26T00:00:00Z",state:"live"}' \
-    > "$home/state/pages/$2/page.json"
+register_page() {  # <home> <id> <title> [replaced-session-id...]
+  local home=$1 dir="$1/.lavish/pages/$2" id=$2 title=$3
+  shift 3
+  mkdir -p "$dir" "$home/state/pages/$id"
+  printf '<p>%s</p>\n' "$title" > "$dir/page.html"
+  jq -n --arg id "$id" --arg title "$title" '{id:$id,title:$title,opened:"2026-08-26T00:00:00Z",state:"live",
+    replaces:$ARGS.positional}' --args "$@" \
+    > "$home/state/pages/$id/page.json"
   printf '%s/page.html\n' "$(cd "$dir" && pwd -P)"
 }
 
 # Build a board whose one card carries the links <links-jq> builds, then render it.
-render_card_links() {  # <home> <links-jq>
-  local home=$1 data="$1/payload.json" links
+render_card_links() {  # <home> <links-jq> [options-jq]
+  local home=$1 data="$1/payload.json" links options
   links=$(jq -n -c "$2") || fail "the card links could not be built"
-  jq -n --argjson links "$links" '{
+  options=$(jq -n -c "${3:-[]}") || fail "the card options could not be built"
+  jq -n --argjson links "$links" --argjson options "$options" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
     captains_call:[{key:"mr-872", type:"decision", title:"MR 872", repo:"r", about:"a",
-      options:[], allow_freeform:true, pr_url:"https://example.test/o/r/merge_requests/872",
+      options:$options, allow_freeform:true, pr_url:"https://example.test/o/r/merge_requests/872",
       links:$links}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -475,6 +478,44 @@ test_an_unregistered_page_link_says_it_is_not_in_the_board() {
   ! grep -q '4387' "$home/.lavish/bearings-board.data.js" \
     || fail "the board data still carries a Lavish session url"
   pass "a card link to a page the board does not have says it is not in the board yet"
+}
+
+# A link to a standalone Lavish session that has since ended, so the server no
+# longer lists it, still opens in the board when a registered page records that
+# it replaces the session.
+test_an_ended_session_link_opens_the_page_that_replaces_it() {
+  local home out
+  home=$(make_home page-replaces)
+  register_page "$home" fos-round5 "Grilling round 5" 988b504d3271c0ea >/dev/null
+  : > "$home/lavish-sessions"
+  out=$(render_card_links "$home" '[
+    {url:"http://dev-1.tailf848b0.ts.net:4387/session/988b504d3271c0ea", label:"Lavish page"}]')
+  printf '%s' "$out" | jq -e '
+    .error == "" and .call[0].pages == [{page:"fos-round5", text:"Lavish page"}]
+      and .call[0].notes == []
+  ' >/dev/null || fail "an ended session link did not open the page that replaces it: $out"
+  ! grep -q 'replaces' "$home/.lavish/bearings-board.data.js" \
+    || fail "the board data carries the page registry replaces list"
+  pass "a link to an ended session opens the registered page that replaces it"
+}
+
+# A card offers every one of the decision's own options in full, and the
+# reconcile choice the build adds renders apart from them, after them.
+test_reconcile_renders_apart_from_the_full_options() {
+  local home out long options
+  home=$(make_home card-options)
+  long="Take the third route, which keeps the published contract unchanged and moves the fix into the aegis client, where every caller already reads the new field"
+  options=$(jq -nc --arg long "$long" '[
+    {value:"option-a", label:"Keep the current contract"},
+    {value:"option-b", label:"Change the contract now"},
+    {value:"option-c", label:$long}]')
+  out=$(render_card_links "$home" '[]' "$options")
+  printf '%s' "$out" | jq -e --arg long "$long" '
+    .error == "" and (.call[0].options | map(.value)) == ["option-a","option-b","option-c","reconcile"]
+      and (.call[0].options | map(.aside)) == [false,false,false,true]
+      and .call[0].options[2].label == $long
+  ' >/dev/null || fail "the card did not show its full options with reconcile apart: $out"
+  pass "a card shows every option in full and reconcile in its own group after them"
 }
 
 # Clicking a card's page button shows that page inside the board's own tab.
@@ -553,6 +594,8 @@ test_every_card_type_renders_its_links
 test_every_card_link_opens_in_annotate_mode
 test_a_registered_page_link_opens_in_the_board
 test_an_unregistered_page_link_says_it_is_not_in_the_board
+test_an_ended_session_link_opens_the_page_that_replaces_it
+test_reconcile_renders_apart_from_the_full_options
 test_a_card_page_button_shows_the_page_in_place
 test_full_screen_keeps_the_same_page_frame
 test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent
