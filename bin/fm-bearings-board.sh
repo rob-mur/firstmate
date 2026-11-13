@@ -148,6 +148,12 @@
 # `<script src="bearings-board.data.js"></script>` line. The data is written
 # as the compact JSON with every `<` escaped as the \u003c string escape, so a
 # payload string containing "</script>" stays inert.
+# The data file is written before the page file and always replaced whole, by
+# a rename of a checked file staged beside it, so a reader never sees it
+# missing or half written. A fetch already under way can still be cut short by
+# the rename, because Lavish streams a file by path, so the page treats a data
+# load that fails or breaks as a reason to wait and re-read, never as a dead
+# board (the template's waitForData).
 #
 # PAGES SHOWN IN PLACE. build adds `pages` to the board data: one
 # {id, title, href} row per live page registered through bin/fm-board-page.sh
