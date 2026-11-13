@@ -38,6 +38,8 @@ case "${1-}" in
     printf 'sessions[1]{file,status,url,pending_prompts}:\n'
     [ ! -s "$FM_HOME/lavish-open" ] \
       || printf '  %s,open,"http://127.0.0.1:4387/session/0123456789abcdef",0\n' "$(cat "$FM_HOME/lavish-open")"
+    # Other sessions a test says the server shows, one listing row per line.
+    [ ! -s "$FM_HOME/lavish-sessions" ] || cat "$FM_HOME/lavish-sessions"
     ;;
   poll)
     # The build's listening sample can land before this process resolves a
@@ -259,7 +261,7 @@ test_every_card_type_renders_its_links() {
     captains_call:[
       {key:"held-decision", type:"decision", title:"A held decision", repo:"r", about:"a",
        options:[], allow_freeform:true, pr_url:"https://example.test/o/r/pull/7",
-       links:[{url:"http://dev-1.tailf848b0.ts.net:4387/session/abc", label:"Review page"}]},
+       links:[{url:"https://example.test/o/r/issues/3", label:"Issue"}]},
       {key:"merge.some-task", type:"merge", title:"A merge", repo:"r", risk:"low",
        options:[{value:"merge",label:"Merge now"}], pr_url:"https://example.test/o/r/pull/9"},
       {key:"unheld-credential", type:"credential", title:"A credential", repo:"r",
@@ -270,17 +272,17 @@ test_every_card_type_renders_its_links() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     LAVISH_AXI_STATE_DIR="$home/lavish-state" \
-    "$BOARD" build "$data" >/dev/null 2>&1 || fail "the board did not build"
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   require_listener_reached_poll "$home"
   out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") \
     || fail "the built board could not be rendered"
   printf '%s' "$out" | jq -e '
     (.call | map({key, hrefs: [.links[].href]}) | sort_by(.key)) == [
       {key:"held-decision", hrefs:["https://example.test/o/r/pull/7",
-        "http://dev-1.tailf848b0.ts.net:4387/session/abc"]},
+        "https://example.test/o/r/issues/3"]},
       {key:"merge.some-task", hrefs:["https://example.test/o/r/pull/9"]},
       {key:"unheld-credential", hrefs:["https://example.test/console","https://example.test/mr/3"]}]
-    and (.call[] | select(.key == "held-decision") | .links[1].text) == "Review page - http://dev-1.tailf848b0.ts.net:4387/session/abc"
+    and (.call[] | select(.key == "held-decision") | .links[1].text) == "Issue - https://example.test/o/r/issues/3"
     and (.call[] | select(.key == "unheld-credential") | .links[1].text) == "Merge request - https://example.test/mr/3"
   ' >/dev/null || fail "a card type did not render its links: $out"
   pass "decision, merge, and credential cards each render their PR and extra links"
@@ -304,7 +306,7 @@ test_every_card_link_opens_in_annotate_mode() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     LAVISH_AXI_STATE_DIR="$home/lavish-state" \
-    "$BOARD" build "$data" >/dev/null 2>&1 || fail "the board did not build"
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   require_listener_reached_poll "$home"
   out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") \
     || fail "the built board could not be rendered"
@@ -314,9 +316,116 @@ test_every_card_link_opens_in_annotate_mode() {
   pass "every card link carries data-lavish-action so it opens in annotate mode"
 }
 
+# Register <id> as a live board page whose file is served from the home's page
+# folder, and print that file's real path.
+register_page() {  # <home> <id> <title>
+  local home=$1 dir="$1/.lavish/pages/$2"
+  mkdir -p "$dir" "$home/state/pages/$2"
+  printf '<p>%s</p>\n' "$3" > "$dir/page.html"
+  jq -n --arg id "$2" --arg title "$3" '{id:$id,title:$title,opened:"2026-08-26T00:00:00Z",state:"live"}' \
+    > "$home/state/pages/$2/page.json"
+  printf '%s/page.html\n' "$(cd "$dir" && pwd -P)"
+}
+
+# Build a board whose one card carries the links <links-jq> builds, then render it.
+render_card_links() {  # <home> <links-jq>
+  local home=$1 data="$1/payload.json" links
+  links=$(jq -n -c "$2") || fail "the card links could not be built"
+  jq -n --argjson links "$links" '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
+    captains_call:[{key:"mr-872", type:"decision", title:"MR 872", repo:"r", about:"a",
+      options:[], allow_freeform:true, pr_url:"https://example.test/o/r/merge_requests/872",
+      links:$links}]}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  require_listener_reached_poll "$home"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" \
+    || fail "the built board could not be rendered"
+}
+
+# A Lavish page link on a card opens that page inside the board when the page is
+# registered there, whether the page is served from the board's page folder or
+# still runs from its own standalone folder, and never links out to Lavish.
+test_a_registered_page_link_opens_in_the_board() {
+  local home understand review standalone out
+  home=$(make_home page-links)
+  understand=$(register_page "$home" understand-mr-872 "Understand MR 872")
+  review=$(register_page "$home" mr-review-mr-872 "Review MR 872")
+  standalone="$home/scratch/understand-mr-872/page.html"
+  mkdir -p "$(dirname "$standalone")" && : > "$standalone"
+  {
+    printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$understand"
+    printf '  %s,user-ended,"http://127.0.0.1:4387/session/bbbb2222",0,none\n' "$review"
+    printf '  %s,open,"http://127.0.0.1:4387/session/cccc3333",0,agent-listener\n' "$standalone"
+  } > "$home/lavish-sessions"
+  out=$(render_card_links "$home" '[
+    {url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"},
+    {url:"http://dev-1.tailf848b0.ts.net:4387/session/bbbb2222", label:"Review page"},
+    {url:"http://dev-1.tailf848b0.ts.net:4387/session/cccc3333", label:"Old understand page"},
+    {page:"mr-review-mr-872", label:"Review again"}]')
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.call | length) == 1
+      and (.call[0].links | map(.href)) == ["https://example.test/o/r/merge_requests/872"]
+      and .call[0].pages == [
+        {page:"understand-mr-872", text:"Understand page"},
+        {page:"mr-review-mr-872", text:"Review page"}]
+      and .call[0].notes == []
+  ' >/dev/null || fail "a registered page link did not become an in-place page button: $out"
+  ! grep -q '4387' "$home/.lavish/bearings-board.data.js" \
+    || fail "the board data still carries a Lavish session url"
+  pass "a card link to a registered page opens that page in the board, never a Lavish url"
+}
+
+# A Lavish page link whose page the board does not have says so in plain words.
+test_an_unregistered_page_link_says_it_is_not_in_the_board() {
+  local home out
+  home=$(make_home page-notes)
+  printf '  %s,open,"http://127.0.0.1:4387/session/dddd4444",0\n' "$home/elsewhere/understand-other/page.html" \
+    > "$home/lavish-sessions"
+  # Open the board first, so the server lists the board's own session.
+  render_card_links "$home" '[]' >/dev/null
+  out=$(render_card_links "$home" '[
+    {url:"http://dev-1.tailf848b0.ts.net:4387/session/dddd4444", label:"Understand page"},
+    {url:"http://dev-1.tailf848b0.ts.net:4387/session/eeee5555", label:"Review page"},
+    {url:"http://dev-1.tailf848b0.ts.net:4387/session/0123456789abcdef", label:"Board"},
+    {page:"understand-gone"}]')
+  printf '%s' "$out" | jq -e '
+    .error == "" and .call[0].pages == []
+      and (.call[0].links | map(.href)) == ["https://example.test/o/r/merge_requests/872"]
+      and .call[0].notes == [
+        "Understand page - not in the board yet",
+        "Review page - not in the board yet",
+        "Lavish page - not in the board yet"]
+  ' >/dev/null || fail "an unregistered page link was not shown as a plain note: $out"
+  ! grep -q '4387' "$home/.lavish/bearings-board.data.js" \
+    || fail "the board data still carries a Lavish session url"
+  pass "a card link to a page the board does not have says it is not in the board yet"
+}
+
+# Clicking a card's page button shows that page inside the board's own tab.
+test_a_card_page_button_shows_the_page_in_place() {
+  local home page out
+  home=$(make_home page-click)
+  page=$(register_page "$home" understand-mr-872 "Understand MR 872")
+  printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$page" > "$home/lavish-sessions"
+  render_card_links "$home" '[{url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"}]' >/dev/null
+  out=$(run_board "$home" "go,page:mr-872")
+  printf '%s' "$out" | jq -e '
+    .pageView.shown and .pageView.title == "Understand MR 872" and .opens == []
+  ' >/dev/null || fail "the page button did not show the page inside the board: $out"
+  pass "a card page button shows its page in place inside the board"
+}
+
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
 test_every_card_type_renders_its_links
 test_every_card_link_opens_in_annotate_mode
+test_a_registered_page_link_opens_in_the_board
+test_an_unregistered_page_link_says_it_is_not_in_the_board
+test_a_card_page_button_shows_the_page_in_place
 
 test_board_renders_only_the_captains_call() {
   local home out
