@@ -471,12 +471,12 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
   jq '.generated = "2026-08-19T01:00Z"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   # Lavish reloads the open page whenever the page file changes, so a rebuild
   # must leave that file exactly as it was: same file, same bytes.
-  page_before="$(ls -i "$board" | awk '{print $1}') $(cksum < "$board")"
+  page_before="$(stat -c %i "$board" 2>/dev/null || stat -f %i "$board") $(cksum < "$board")"
   out=$(run_board "$home" build "$data") || fail "the rebuild failed"
   assert_contains "$out" "already-armed: " "the rebuild re-armed an already registered source: $out"
   extract_payload "$board" | jq -e '.generated == "2026-08-19T01:00Z"' >/dev/null \
     || fail "the rebuild did not refresh the board payload in place"
-  [ "$(ls -i "$board" | awk '{print $1}') $(cksum < "$board")" = "$page_before" ] \
+  [ "$(stat -c %i "$board" 2>/dev/null || stat -f %i "$board") $(cksum < "$board")" = "$page_before" ] \
     || fail "the rebuild rewrote the page file, which reloads the captain's open page"
   records=$(find "$home/state/procevent" -name '*.source' | wc -l | tr -d ' ')
   [ "$records" = 1 ] || fail "rebuilding left $records source registrations instead of 1"
