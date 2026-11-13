@@ -377,6 +377,78 @@ test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording() {
 
 test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording
 
+priority_calls='[.calls[] | select(.data.schema == "fm-bearings-priority.v1") | .data.keys]'
+
+test_a_refresh_merges_the_restored_order_with_new_and_departed_decisions() {
+  local home out
+  home=$(make_home order-merge)
+  build_call_board "$home" '["k1","k2","k3"]'
+  NO_STORAGE=1 run_board "$home" "down:k1,go,load,send" >/dev/null
+  build_call_board "$home" '["k1","k2","k3","k4"]'
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e '.order.list == ["k2","k1","k3","k4"] and .order.stepShown' >/dev/null \
+    || fail "a new decision reset the restored order instead of joining its end: $out"
+  NO_STORAGE=1 run_board "$home" "load,down:k2,down:k2,go,send" >/dev/null
+  build_call_board "$home" '["k2","k3","k4"]'
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e '.order.list == ["k3","k2","k4"] and (.cards | map(.key)) == ["k3","k2","k4"]' >/dev/null \
+    || fail "a departed decision reset the order of the others: $out"
+  pass "a refresh keeps the restored order, adds new decisions at the end, and drops departed ones"
+}
+
+test_the_priority_is_sent_only_when_the_order_changes() {
+  local home out
+  home=$(make_home order-send)
+  build_call_board "$home" '["k1","k2","k3"]'
+  out=$(run_board "$home" "open:k2")
+  printf '%s' "$out" | jq -e "($priority_calls | length) == 0 and (.cards | map(.key)) == [\"k1\",\"k2\",\"k3\"]" >/dev/null \
+    || fail "opening a card with the order unchanged sent a priority: $out"
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(run_board "$home" "down:k1,open:k1")
+  printf '%s' "$out" | jq -e "$priority_calls == [[\"k2\",\"k1\",\"k3\"]]" >/dev/null \
+    || fail "opening a card after a reorder did not send the new order exactly once: $out"
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(run_board "$home" "down:k1,down:k1")
+  printf '%s' "$out" | jq -e "$priority_calls == [[\"k2\",\"k3\",\"k1\"]]" >/dev/null \
+    || fail "a reorder left on the list was not sent once after the pause: $out"
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(run_board "$home" "down:k1,up:k1,go")
+  printf '%s' "$out" | jq -e "($priority_calls | length) == 0" >/dev/null \
+    || fail "a reorder that ended on the recorded order still sent a priority: $out"
+  pass "the priority is sent once per change, after a pause on the list, and never for an unchanged order"
+}
+
+test_a_queued_priority_is_queued_again_with_the_order_after_a_rebuild() {
+  local home out
+  home=$(make_home order-requeue)
+  build_call_board "$home" '["k1","k2","k3"]'
+  NO_STORAGE=1 run_board "$home" "down:k1,go,load" >/dev/null
+  build_call_board "$home" '["k1","k2","k3","k4"]'
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e "$priority_calls == [[\"k2\",\"k1\",\"k3\",\"k4\"]] and (.queue | index(\"question:board-priority\")) != null" >/dev/null \
+    || fail "a priority queued before the rebuild was not queued again with the merged order: $out"
+  pass "a priority still queued at a rebuild is queued again with the merged order"
+}
+
+test_each_card_has_a_stable_id_so_its_queued_badge_stays_on_it() {
+  local home out
+  home=$(make_home card-ids)
+  build_call_board "$home" '["k1","status.mate.x_y"]'
+  NO_STORAGE=1 run_board "$home" "go,type,submit:status.mate.x_y,load" >/dev/null
+  build_call_board "$home" '["k0","k1","status.mate.x_y"]'
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e '
+    (.ids | length) == 3 and (.ids | unique | length) == 3 and all(.ids[]; test("^[A-Za-z][A-Za-z0-9_-]*$"))
+      and ([.cards[] | select(.queued) | .key] == ["status.mate.x_y"])
+  ' >/dev/null || fail "a queued badge moved off its card when the deck changed: $out"
+  pass "every card form has its own stable id, so a queued badge stays on its card after a rebuild"
+}
+
+test_a_refresh_merges_the_restored_order_with_new_and_departed_decisions
+test_the_priority_is_sent_only_when_the_order_changes
+test_a_queued_priority_is_queued_again_with_the_order_after_a_rebuild
+test_each_card_has_a_stable_id_so_its_queued_badge_stays_on_it
+
 test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question() {
   local home out data
   home=$(make_home waiting)

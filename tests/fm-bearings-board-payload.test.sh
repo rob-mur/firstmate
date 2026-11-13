@@ -404,7 +404,7 @@ test_a_task_status_question_becomes_a_card_and_a_wait_a_waiting_row() {
          title_full: "parked", reason_full: "waiting for the upstream release", summary: "waiting for the upstream release"}]' \
     "$TMP_ROOT/status-base.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
-  assert_equals "Slack MCP tools are missing" "$(jq -r '.captains_call[] | select(.key == "status.slack-scout.blocked.default") | .question' <<<"$p")" "a blocked task opens as a card with its blocker text"
+  assert_equals "Slack MCP tools are missing" "$(jq -r '.captains_call[] | select(.key == "status.slack-scout.blocked.default") | .question // .about // .title' <<<"$p")" "a blocked task opens as a card with its blocker text"
   assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "status.slack-scout.blocked.default") | (.options | length) > 0' <<<"$p")" "a blocked task card offers answer choices"
   assert_equals "option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos-rulings.default") | [.options[].value] | join(",")' <<<"$p")" "a secondmate status question is a card with real choices"
   assert_equals "status.mate.parked.default" "$(jq -r '[.waiting[] | select(.key | startswith("status."))] | map(.key) | join(",")' <<<"$p")" "a status wait goes to the waiting group"
@@ -506,6 +506,55 @@ test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question() {
   pass "a captain-parked hold waits while an open question remains a card"
 }
 
+test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids() {
+  local snap="$TMP_ROOT/heading.json" p long
+  long="PR 13 answer recorded and the worker told to update PR 13: drop what forge-ops already set up, choose the commit-stage lints and checks, and ask with a recommendation for each real choice; no merge. PR 14 adds the simplest-prompt option; its own tests pass."
+  write_snapshot "$TMP_ROOT/heading-base.json"
+  jq --arg long "$long" '.decisions_open += [
+        {id: "mate/fos", key: "status.mate.fos.default", verb: "needs-decision", source: "status", task: "fos", decision_key: "default", owner: "mate",
+         reason_full: ("corr=ab12cd34 corr=ef56 " + $long + " Question: wait or merge now? (a) wait for PR 13 (b) merge PR 14 now"), summary: "x",
+         twins: [{reason_full: "corr=0a1b2c captain hold fos: Should pdm ship a module, or only document it in the README?"}]},
+        {id: "hold-long", key: "hold-long", verb: "captain-hold", title: "Decide the rollout", owner: "(main)",
+         reason_full: ($long + " " + $long + " Should the rollout start on Monday?")},
+        {id: "mate/w", key: "status.mate.w.default", verb: "needs-decision", source: "status", task: "w", decision_key: "default", owner: "mate",
+         reason_full: "corr=deadbeef waiting for the upstream release", summary: "waiting"}]' \
+    "$TMP_ROOT/heading-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "0" "$(jq '[.. | strings | select(test("corr="))] | length' <<<"$p")" "no correlation token reaches any card or waiting row"
+  assert_equals "mate: wait or merge now?" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | .title' <<<"$p")" "a status card is titled by its asking sentence"
+  assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | (.about | contains("PR 14 adds the simplest-prompt option") and contains("only document it in the README"))' <<<"$p")" "the full text of the question and its folded twin stays in the body"
+  assert_equals "option-a,option-b,option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | [.options[].value] | join(",")' <<<"$p")" "the card keeps the lettered choices and the twin choices"
+  assert_equals "Should the rollout start on Monday?" "$(jq -r '.captains_call[] | select(.key == "hold-long") | .question' <<<"$p")" "a long hold reason gets its asking sentence as the heading"
+  assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "hold-long") | (.question | length) <= 120 and (.about | length) > 400' <<<"$p")" "the heading stays short while the body keeps the full reason"
+  assert_equals "waiting for the upstream release" "$(jq -r '.waiting[] | select(.key == "status.mate.w.default") | .reason' <<<"$p")" "a waiting row reads without its correlation token"
+  printf '%s\n' "$p" > "$TMP_ROOT/heading-payload.json"
+  validates "$TMP_ROOT/heading-payload.json" || fail "a payload with short headings did not satisfy the board validator"
+  pass "a card heading is one short asking sentence and the full text is the body"
+}
+
+test_default_choices_match_the_question_asked() {
+  local snap="$TMP_ROOT/fit.json" p
+  write_snapshot "$TMP_ROOT/fit-base.json"
+  jq '.decisions_open = [
+        {id: "alt", key: "alt", verb: "captain-hold", title: "Module", owner: "(main)", reason: "Issue 70 design is written up. Should pdm ship a home-manager module, or only document it in the README?"},
+        {id: "yn", key: "yn", verb: "captain-hold", title: "Merge", owner: "(main)", reason: "PR 13 is green and reviewed. Should I merge it?"},
+        {id: "open", key: "open", verb: "captain-hold", title: "Name", owner: "(main)", reason: "The flag needs a name before release. Which name do you want for it?"},
+        {id: "ab", key: "ab", verb: "captain-hold", title: "Order", owner: "(main)", reason: "Two PRs touch the same file. Question: which lands first? (a) PR 13 first (b) PR 14 first"},
+        {id: "plan", key: "plan", verb: "captain-hold", title: "Plan", owner: "(main)", reason: "Plan for the migration is ready for sign-off."}]' \
+    "$TMP_ROOT/fit-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  opts() { jq -r --arg k "$1" '.captains_call[] | select(.key == $k) | [.options[].label] | join("|")' <<<"$p"; }
+  assert_equals "Should pdm ship a home-manager module|Only document it in the README" "$(opts alt)" "an either-or question led by should offers its two alternatives, not yes and no"
+  assert_equals "Yes|No" "$(opts yn)" "a plain should question offers yes and no"
+  assert_equals "" "$(opts open)" "an open question offers no choices and takes a free-text answer"
+  assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "open") | .allow_freeform' <<<"$p")" "the open question card keeps its free-text box"
+  assert_equals "PR 13 first|PR 14 first" "$(opts ab)" "lettered sub-questions become one choice each"
+  assert_equals "Approve / go ahead|Decline" "$(opts plan)" "a sign-off request with no question offers approve and decline"
+  printf '%s\n' "$p" > "$TMP_ROOT/fit-payload.json"
+  validates "$TMP_ROOT/fit-payload.json" || fail "a payload with fitted choices did not satisfy the board validator"
+  pass "default choices match the question the card asks"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -526,4 +575,6 @@ fm_test_run \
   test_a_tailnet_review_page_link_and_a_review_card_get_choices \
   test_a_secondmate_status_question_is_titled_from_its_decision_not_its_home \
   test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice \
-  test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question
+  test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
+  test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids \
+  test_default_choices_match_the_question_asked
