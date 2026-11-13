@@ -3269,6 +3269,8 @@ PAGE_HOME="$TMP_ROOT/page-home"
 mkdir -p "$PAGE_HOME/state" "$PAGE_HOME/.lavish"
 : > "$PAGE_HOME/.lavish/bearings-board.html"
 page_env() { FM_HOME="$PAGE_HOME" FM_STATE_OVERRIDE="$PAGE_HOME/state" FM_BOARD_PAGE_REFRESH=true "$@"; }
+PAGE_DIR=$(page_env "$ROOT/bin/fm-board-page.sh" dir p1) || fail "could not make the test page folder"
+printf '<html></html>\n' > "$PAGE_DIR/page.html"
 page_env "$ROOT/bin/fm-board-page.sh" open p1 --title "Page one" >/dev/null || fail "could not register the test page"
 PAGE_ROW='"1","Page one: my answer\n\nContext data:\n{\n  \"schema\": \"fm-board-page.v1\",\n  \"page\": \"p1\",\n  \"tag\": \"answer\",\n  \"text\": \"my answer\",\n  \"data\": {\n    \"n\": 1\n  }\n}","iframe",page,"Page one: my answer"'
 BOARD_ROW='"2","Headline: yes\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-call\",\n  \"selection\": \"yes\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(1)",choice,"Headline: yes"'

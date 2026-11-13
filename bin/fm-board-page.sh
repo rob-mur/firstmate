@@ -2,6 +2,7 @@
 # fm-board-page.sh - show a page inside the open bearings board, in place.
 #
 # Usage:
+#   fm-board-page.sh dir <page-id>
 #   fm-board-page.sh open <page-id> --title <title>
 #   fm-board-page.sh wait <page-id> [--timeout-s <seconds>]
 #   fm-board-page.sh reply <page-id> <text>
@@ -16,18 +17,21 @@
 # skills that run from other repositories. A page registers here and nowhere
 # else; nothing writes the paths below by hand.
 #
-# open     Register the page and print the folder its files go in,
-#          $FM_HOME/.lavish/pages/<page-id>/, as the only stdout line. Write the
-#          page's entry file there as page.html, with
-#          `<script src="lavish-relay.js"></script>` before the page's own
-#          script; open copies that relay into the folder. The board lists the
-#          page and shows it in place on its next refresh, which open requests
-#          at once. Opening an already registered page keeps its folder and
-#          answers, sets the new title, and makes it live again.
+# dir      Print the folder the page's files go in,
+#          $FM_HOME/.lavish/pages/<page-id>/, as the only stdout line, and copy
+#          the page relay into it. Write the page's entry file there as
+#          page.html, with `<script src="lavish-relay.js"></script>` before the
+#          page's own script, then run open. dir registers nothing.
 #          <page-id> is a slug: lowercase letters, digits and dashes, starting
 #          with a letter or digit, at most 64 characters.
 #          Exit 3 when this home has no board ($FM_HOME/.lavish/bearings-board.html);
 #          the caller then runs its page standalone.
+# open     Register the page and ask the board to refresh, which lists it and
+#          shows it in place. Refused while the folder has no page.html, because
+#          the board loads each page frame once and never reloads it. Prints the
+#          folder like dir. Opening an already registered page keeps its folder
+#          and answers, sets the new title, and makes it live again. Exit 3 when
+#          this home has no board.
 # wait     Block until the page has something for its agent, then print
 #            page: <page-id>
 #            status: feedback | ended | timeout
@@ -123,6 +127,21 @@ set_state() {  # <page-id> <live|ended>
   write_json "$(record "$1")" '.state = $s' --arg s "$2"
 }
 
+page_dir() {  # <page-id> - make the served folder, install the relay, print the folder
+  local dir="$SERVED/$1"
+  [ -f "$BOARD" ] || die "no bearings board in this home; open the board first or run the page standalone" 3
+  [ -f "$RELAY" ] || die "the page relay is missing: $RELAY"
+  mkdir -p "$dir" || die "cannot create the page folder for $1"
+  cp -f "$RELAY" "$dir/lavish-relay.js" || die "cannot install the page relay for $1"
+  printf '%s\n' "$dir"
+}
+
+cmd_dir() {
+  need_id "${1-}"
+  [ $# -eq 1 ] || usage
+  page_dir "$1"
+}
+
 cmd_open() {
   local id=${1-} title='' dir
   need_id "$id"
@@ -134,11 +153,9 @@ cmd_open() {
     esac
   done
   [ -n "$title" ] || die "open needs --title"
-  [ -f "$BOARD" ] || die "no bearings board in this home; open the board first or run the page standalone" 3
-  [ -f "$RELAY" ] || die "the page relay is missing: $RELAY"
-  dir="$SERVED/$id"
-  mkdir -p "$dir" "$(inbox "$id")/handled" || die "cannot create the page folders for $id"
-  cp -f "$RELAY" "$dir/lavish-relay.js" || die "cannot install the page relay for $id"
+  dir=$(page_dir "$id") || exit
+  [ -f "$dir/page.html" ] || die "write $dir/page.html before open; the board loads a page frame once"
+  mkdir -p "$(inbox "$id")/handled" || die "cannot create the inbox for $id"
   # shellcheck disable=SC2016 # jq program text, not shell expansion.
   write_json "$(record "$id")" \
     '{id: $id, title: $title, opened: (.opened // $now), state: "live"}' \
@@ -310,6 +327,7 @@ cmd_routed() {
 }
 
 case "${1-}" in
+  dir)     shift; cmd_dir "$@" ;;
   open)    shift; cmd_open "$@" ;;
   wait)    shift; cmd_wait "$@" ;;
   reply)   shift; cmd_reply "$@" ;;
