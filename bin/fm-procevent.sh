@@ -204,6 +204,13 @@
 # binding-verified `reconcile-requests` intake, never the keyed-answer value.
 # External binding responses never enter either authority-bearing intake.
 #
+# Page prompts use one more seam of the same kind. A source whose adapter has a
+# `pages <result-file>` command may carry prompts addressed to a page shown
+# inside it rather than to the handler; whatever that command prints is piped
+# into `bin/fm-board-page.sh route`, which owns delivery to each page's agent
+# (its header owns the contract). It runs before publication so the adapter's
+# own `silent` can tell a result that carried only delivered page prompts.
+#
 # Feeding is deliberately independent of handling: it never acknowledges a result
 # and never suppresses a wake. Recording the captain's answer is transcription,
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
@@ -481,6 +488,18 @@ feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
   printf '%s\n' "$rows" \
     | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
         --source-id "$id" --source "the captured result $id sequence $seq" >/dev/null 2>&1
+}
+
+# Pass a captured result's page prompts to the one page router, best-effort and
+# silenced like the seams above (see the page-prompt note in the header).
+feed_page_prompts() {  # <adapter> <result-file>
+  local script rows
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  rows=$(FM_HOME="$FM_HOME" "$script" pages "$2" 2>/dev/null)
+  [ -n "$rows" ] || return 1
+  printf '%s\n' "$rows" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-board-page.sh" route >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>
@@ -1374,6 +1393,9 @@ EOF
 
   # Independent of publication and acknowledgement, so it runs once per capture
   # for every adapter and cannot change what the handler receives.
+  if [ "$extension_owner" -eq 0 ] && feed_page_prompts "$adapter" "$durable"; then
+    printf 'pages-fed: %s\n' "$id"
+  fi
   if [ "$extension_owner" -eq 0 ] \
     && feed_reconcile_requests "$adapter" "$id" "$durable"; then
     printf 'reconciles-fed: %s\n' "$id"
