@@ -307,6 +307,7 @@ validate_payload() {  # <data.json>
           and optional_string("hint")] | all)
       and (optional_string("about"))
       and (optional_string("question"))
+      and (optional_string("malformed"))
       and (optional_string("decide"))
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))

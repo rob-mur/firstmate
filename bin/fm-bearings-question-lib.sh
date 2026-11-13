@@ -2,7 +2,8 @@
 # Shared "is this a question or a wait, and what can the captain answer" rule.
 # Usage: . bin/fm-bearings-question-lib.sh; splice "$FM_BEARINGS_QUESTION_JQ_DEFS"
 # ahead of a jq program, then call `is_wait($row)`, `is_announcement($row)`,
-# `is_review($row)`, `default_options($row)` and `option_parse`.
+# `is_review($row)`, `default_options($row)`, `option_parse` and
+# `recover_options`.
 #
 # ONE OWNER for the board's question rules. The bearings snapshot decides which
 # non-live holds still reach the board as questions, and the board payload
@@ -54,6 +55,23 @@
 # A label that opens with a lowercase word followed by more words starts with a
 # capital letter; a single word such as a tool name keeps its case.
 #
+# option_parse_by($kind): option_parse limited to one kind - "number",
+# "letter" or "list" - so a reason holding a numbered list and a lettered one
+# yields either.
+#
+# option_refs: the option marks a reason refers to by name, whether or not it
+# lists them - a slash run "A/B/C" (numbers only from three, "1/2/3"), "A, B
+# or C", or "option 2" / "options A-C" / "options 1 and 3". Letter and number
+# runs must start at A or 1 and count up; "A/B test" is not a reference.
+#
+# recover_options($now; $before): on a card, adds each option its current
+# texts ($now) refer to but its choices lack, taken from the first listing of
+# that kind in $now, else in its earlier texts ($before, newest first). A
+# taken-over label starts with its mark ("A) ..."), and one from an earlier
+# text carries a hint saying so. When no text lists them, the card gains
+# `malformed`, a sentence naming the options it refers to but does not list,
+# and no button stands in for them.
+#
 # default_options($row): the choices a question card offers when no copy overlay
 # authors its own, read from the cleaned reason and tried in order -
 #   1. a review-ready row offers reviewed and later;
@@ -94,7 +112,7 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
       | if .aux == "" then "The worker " + (.v | third) + .rest
         else "The worker " + (.aux | sub("^\u0027ll$"; " will") | ltrimstr(" ")) + " " + .v + .rest end
     else . end;
-  def option_parse:
+  def option_parse_by($kind):
     . as $q
     | def cut_last: ([match("[.!?](?=[[:space:]]+[A-Z])").offset][0]) as $o | if $o == null then . else .[:($o + 1)] end;
       def run($ms):
@@ -129,11 +147,71 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
                  options: [ range(0; $items | length) as $i | {value: ("option-" + (($i + 1) | tostring)), label: $items[$i]} ]}
               else null end
           end;
-      ( from_marks(marks("\\((?<k>[0-9]{1,2})\\)"; "number"))
+      if $kind == "number" then
+        from_marks(marks("\\((?<k>[0-9]{1,2})\\)"; "number"))
         // from_marks(marks("(?<![^[:space:]:;,])(?<k>[0-9]{1,2})\\)"; "number"))
-        // from_marks(marks("(?<![[:alnum:]])\\((?<k>[A-Za-z])\\)"; "letter"))
+      elif $kind == "letter" then
+        from_marks(marks("(?<![[:alnum:]])\\((?<k>[A-Za-z])\\)"; "letter"))
         // from_marks(marks("(?<![^[:space:]:;,])(?<k>[A-Za-z])\\)"; "letter"))
-        // from_list );
+      else from_list end;
+  def option_parse: option_parse_by("number") // option_parse_by("letter") // option_parse_by("list");
+  def option_mark_value: "option-" + (if test("^[0-9]") then . else ascii_downcase end);
+  def option_refs:
+    . as $q
+    | def kind: if test("^[0-9]+$") then "number" else "letter" end;
+      def n: if kind == "number" then tonumber else (explode[0] - 64) end;
+      def run_ok: length >= 2 and (map(kind) | unique | length) == 1
+        and ([range(1; length + 1)] == map(n));
+      def spread:
+        if length == 2 and (.[0] | kind) == (.[1] | kind) and (.[0] | n) < (.[1] | n) then
+          (.[0] | kind) as $k | (.[0] | n) as $a | (.[1] | n) as $b
+          | [ range($a; $b + 1) | if $k == "number" then tostring else ([. + 64] | implode) end ]
+        else . end;
+      [ ( $q | match("(?<![[:alnum:]/])(?:[A-Z]|[1-9])(?:/(?:[A-Z]|[0-9]{1,2}))+(?![[:alnum:]/])(?![[:space:]]?test)"; "g")
+          | .string | split("/") | select(run_ok and ((.[0] | kind) == "letter" or length >= 3)) | .[] ),
+        ( $q | match("(?<![[:alnum:]])[A-Z](?:,[[:space:]]?[A-Z])*,? or [A-Z](?![[:alnum:]])"; "g")
+          | [ .string | scan("[A-Z]") ] | select(run_ok) | .[] ),
+        ( $q | match("(?<![[:alnum:]])[Oo]ptions? ((?:[A-Z]|[0-9]{1,2})(?:(?:,[[:space:]]?|,? and |,? or |[[:space:]]?-[[:space:]]?| to |/)(?:[A-Z]|[0-9]{1,2}))*)(?![[:alnum:]])"; "g")
+          | .captures[0].string as $s
+          | [ $s | scan("[A-Z]|[0-9]{1,2}") ]
+          | if ($s | test("-| to ")) then spread else . end | .[] ) ]
+      | unique_by([kind, n]);
+  def mark_list:
+    if length == 1 then "option " + .[0]
+    else "options " + (.[:-1] | join(", ")) + " and " + .[-1] end;
+  # A card whose text refers to options it does not carry ("A/B/C", "A, B or
+  # C", "option 2") takes each missing one from another listing of that kind:
+  # first the card'"'"'s own current texts, then its earlier texts newest first, the
+  # first that lists every missing one. An option taken over is labelled with
+  # its mark, and one taken from an earlier text says so in its hint. When no
+  # text lists them, the card keeps its choices and gains `malformed`, a
+  # sentence naming the options it refers to but does not list.
+  def recover_options($now; $before):
+    ([ $now[] | option_refs[] ] | unique_by([(if test("^[0-9]") then 0 else 1 end), (if test("^[0-9]") then tonumber else (explode[0]) end)])) as $refs
+    | [ .options[].value ] as $have
+    | [ $refs[] | select((option_mark_value | IN($have[])) | not) ] as $missing
+    | if ($missing | length) == 0 then .
+      else
+        reduce ("number", "letter") as $k (.;
+          [ $missing[] | select(test("^[0-9]") == ($k == "number")) ] as $m
+          | [ $m[] | option_mark_value ] as $mv
+          | if ($m | length) == 0 then .
+            else
+              def covers: select(. != null and ([.options[].value] as $vs | all($mv[]; IN($vs[]))));
+              ([ $now[] | option_parse_by($k) | covers ][0]) as $here
+              | (if $here == null then ([ $before[] | option_parse_by($k) | covers ][0]) else null end) as $there
+              | ($here // $there) as $src
+              | if $src == null then .unlisted = ((.unlisted // []) + $m)
+                else .options += [ $src.options[] | select(.value | IN($mv[]))
+                                   | .label = ((.value | ltrimstr("option-") | ascii_upcase) + ") " + .label)
+                                   | if $here == null then . + {hint: "from an earlier message on this question"} else . end ]
+                end
+            end)
+        | if has("unlisted") then
+            (.unlisted | mark_list) as $l
+            | del(.unlisted) + {malformed: ("This question refers to " + $l + ", which it does not list; answer in your own words.")}
+          else . end
+      end;
   def asks: test("\\?") or (option_parse != null);
   def is_wait($d):
     (($d.reason_full // $d.reason // "") | clean_reason) as $r
