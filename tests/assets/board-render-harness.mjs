@@ -1,4 +1,4 @@
-// Render a built bearings board's shipped inline script under a minimal DOM
+// Render a built bearings board's shipped script under a minimal DOM
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
@@ -102,7 +102,11 @@ let dataSource = "";
 try { dataSource = readFileSync(process.argv[2].replace(/\.html$/, ".data.js"), "utf8"); } catch { /* no data file */ }
 if (dataSource) new Function(dataSource)();
 
-const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
+// A built page loads its code from bearings-board.app.js beside it; the bare
+// template carries the same code inline.
+const script = html.includes("<script>")
+  ? html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"))
+  : readFileSync(process.argv[2].replace(/\.html$/, ".app.js"), "utf8");
 new Function(script)();
 
 const badgesOf = (row) =>
