@@ -496,6 +496,56 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
   pass "rebuild refreshes the board in place without double-arming"
 }
 
+# The page loads its data file by name while rebuilds replace it, so every
+# read during a rebuild must see a whole data file, never a missing or half
+# written one, and a rebuild must replace the file rather than write into it.
+test_rebuild_replaces_the_data_file_whole() {
+  local home data board board_data stop bad reader inode_before i leftovers
+  home=$(make_home atomic)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  board_data="$home/.lavish/bearings-board.data.js"
+  write_valid_payload "$data"
+  # Pad the payload so a write in place would be visible to a reader mid-way.
+  jq '.charted += [range(0; 400) | {id: "pad-\(.)", repo: "sample", title: ("padding row \(.) " * 4), reason: "", dispatchable: false}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  assert_present "$board_data" "the build did not write the data file"
+
+  stop="$home/stop-reader"
+  bad="$home/bad-reads"
+  : > "$bad"
+  (
+    local body
+    while [ ! -e "$stop" ]; do
+      if ! body=$(cat -- "$board_data" 2>/dev/null); then
+        echo "missing" >> "$bad"
+        continue
+      fi
+      case "$body" in
+        'window.FM_BEARINGS_BOARD_DATA = {'*'};') ;;
+        *) echo "partial:${#body}" >> "$bad" ;;
+      esac
+    done
+  ) &
+  reader=$!
+  for i in 1 2 3 4 5 6; do
+    inode_before=$(stat -c %i "$board_data" 2>/dev/null || stat -f %i "$board_data")
+    jq --arg g "2026-08-19T0$i:00Z" '.generated = $g' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    run_board "$home" build "$data" >/dev/null || { : > "$stop"; wait "$reader"; fail "rebuild $i failed"; }
+    [ "$(stat -c %i "$board_data" 2>/dev/null || stat -f %i "$board_data")" != "$inode_before" ] \
+      || { : > "$stop"; wait "$reader"; fail "rebuild $i wrote into the data file instead of replacing it whole"; }
+  done
+  : > "$stop"
+  wait "$reader"
+  [ ! -s "$bad" ] || fail "a reader saw the data file missing or half written during a rebuild: $(sort "$bad" | uniq -c | tr '\n' ' ')"
+  extract_payload "$board" | jq -e '.generated == "2026-08-19T06:00Z"' >/dev/null \
+    || fail "the last rebuild's payload is not the one the data file carries"
+  leftovers=$(find "$home/.lavish" -name '.board*' | wc -l | tr -d ' ')
+  [ "$leftovers" = 0 ] || fail "rebuilds left $leftovers staging files beside the board"
+  pass "a rebuild replaces the data file whole, so a reader never sees it missing or half written"
+}
+
 test_build_refuses_a_template_that_does_not_load_the_data() {
   local home data rc out
   home=$(make_home badslot)
@@ -972,6 +1022,7 @@ test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
+test_rebuild_replaces_the_data_file_whole
 test_build_refuses_a_template_that_does_not_load_the_data
 test_build_reopens_a_session_the_captain_ended
 test_rebuild_of_a_live_session_never_opens_another_tab
