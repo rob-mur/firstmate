@@ -190,6 +190,76 @@ test_install_writes_a_command_bound_to_this_home() {
   pass "install writes a command that runs the entry point for its own home"
 }
 
+# Run the relay that dir installs beside a page inside a simulated board frame
+# with the comma-separated <actions> (tests/assets/page-relay-harness.mjs).
+relay() {  # <actions>
+  local home dir
+  home=$(make_home "relay-$RANDOM-$RANDOM")
+  dir=$(in_home "$home" "$PAGE" dir relay-page) || fail "dir failed"
+  node "$ROOT/tests/assets/page-relay-harness.mjs" "$dir/lavish-relay.js" "$1" \
+    || fail "the page relay could not be exercised with: $1"
+}
+
+# Lavish's annotate mode cannot reach into a page shown in place, so the
+# page's relay annotates the page itself while the board says the mode is on
+# and passes each note up with the element it names.
+test_relay_annotates_page_elements_while_the_board_says_annotate_is_on() {
+  local out
+  command -v node >/dev/null 2>&1 || { printf 'ok - skip: node not found\n'; return; }
+  out=$(relay "click:second")
+  printf '%s' "$out" | jq -e '.posted == [] and .prevented == [] and .pageClicks == ["second"]' >/dev/null \
+    || fail "the relay took a click while annotate mode was off: $out"
+  out=$(relay "stranger:on,click:second")
+  printf '%s' "$out" | jq -e '.posted == [] and .pageClicks == ["second"]' >/dev/null \
+    || fail "a frame other than the board turned annotate mode on: $out"
+  out=$(relay "annotate:on,click:second,type:too vague,key:Enter")
+  printf '%s' "$out" | jq -e '
+    .posted == [{type:"fm-board-page:queuePrompt", prompt:"too vague", opts:{tag:"annotation",
+      text:"The second reason, with spacing.",
+      data:{selector:"main#understand > p:nth-of-type(2)", tag:"p", text:"The second reason, with spacing."}}}]
+      and .card == null and .prevented == ["second"] and .pageClicks == []
+  ' >/dev/null || fail "an annotated element did not reach the board with its identity: $out"
+  out=$(relay "annotate:on,click:answer,type:send it,key:ctrl+Enter")
+  printf '%s' "$out" | jq -e '
+    .posted == [
+      {type:"fm-board-page:queuePrompt", prompt:"send it", opts:{tag:"annotation", text:"Your answer goes here",
+        data:{selector:"div#answer-box", id:"answer-box", tag:"div", text:"Your answer goes here"}}},
+      {type:"fm-board-page:sendQueuedPrompts", prompt:"", opts:{}}]
+  ' >/dev/null || fail "Ctrl+Enter did not queue and send the note with the element id: $out"
+  out=$(relay "annotate:on,select:second,type:this part,queue")
+  printf '%s' "$out" | jq -e '
+    .posted[0].opts.data.selection == "The second reason, with spacing."
+      and .posted[0].opts.data.selector == "main#understand > p:nth-of-type(2)"
+      and .prevented == ["second"] and .pageClicks == []
+  ' >/dev/null || fail "a text selection was not annotated with its quote: $out"
+  pass "the relay annotates page elements while annotate is on and passes each note up with its element"
+}
+
+# The page keeps working in annotate mode, the card behaves like Lavish's, and
+# Ctrl/Cmd+I inside the page toggles the mode on the board.
+test_relay_annotate_mode_spares_controls_and_toggles_from_the_page() {
+  local out
+  command -v node >/dev/null 2>&1 || { printf 'ok - skip: node not found\n'; return; }
+  out=$(relay "annotate:on,click:submit,click:action,click:widget,ctrl-click:link")
+  printf '%s' "$out" | jq -e '
+    .posted == [] and .card == null and .prevented == [] and .pageClicks == ["submit","action","widget","link"]
+  ' >/dev/null || fail "annotate mode took a click from a control or a followed link: $out"
+  out=$(relay "annotate:on,click:first,type:kept,key:shift+Enter,key:Escape")
+  printf '%s' "$out" | jq -e '.posted == [] and .card == "The first reason."' >/dev/null \
+    || fail "Shift+Enter queued or Escape closed a card with a note in it: $out"
+  out=$(relay "annotate:on,click:first,key:Escape")
+  printf '%s' "$out" | jq -e '.card == null' >/dev/null || fail "Escape did not close an empty card: $out"
+  out=$(relay "annotate:on,click:first,type:dropped,annotate:off,click:first")
+  printf '%s' "$out" | jq -e '.posted == [] and .card == null and .pageClicks == ["first"]' >/dev/null \
+    || fail "turning annotate mode off did not close the card and give clicks back: $out"
+  out=$(relay "annotate:on,click:first,type:dropped,cancel")
+  printf '%s' "$out" | jq -e '.posted == [] and .card == null' >/dev/null || fail "Cancel did not drop the note: $out"
+  out=$(relay "hotkey")
+  printf '%s' "$out" | jq -e '.posted == [{type:"fm-board-page:toggleAnnotate", prompt:"", opts:{}}]' >/dev/null \
+    || fail "Ctrl+I inside the page did not ask the board to toggle annotate mode: $out"
+  pass "annotate mode spares controls and links, its card behaves like Lavish's, and Ctrl+I toggles it"
+}
+
 fm_test_run \
   test_open_registers_a_page_and_refreshes_the_board \
   test_open_without_a_board_exits_3 \
@@ -200,4 +270,6 @@ fm_test_run \
   test_wait_delivers_pending_actions_before_ended \
   test_app_ended_ends_every_live_page \
   test_reply_posts_through_lavish_reply_with_the_page_title \
-  test_install_writes_a_command_bound_to_this_home
+  test_install_writes_a_command_bound_to_this_home \
+  test_relay_annotates_page_elements_while_the_board_says_annotate_is_on \
+  test_relay_annotate_mode_spares_controls_and_toggles_from_the_page
