@@ -16,30 +16,67 @@ set -u
 # shellcheck source=tests/supervision-host-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
-test_park_exit_probe_uses_half_second_child_sleeps() {
-  local home host_pid
-  home=$(make_home park-cadence attended)
-  cat > "$home/fakebin/sleep" <<'SH'
+# Record the host's own direct sleep and awk children: each sleep is one arm
+# exit probe, and each awk is one POLL-cadence identity refresh pass.
+install_park_cadence_probes() {  # <home>
+  local home=$1 tool real
+  for tool in sleep awk; do
+    real=$(command -v "$tool") || fail "park-cadence: $tool is not installed"
+    cat > "$home/fakebin/$tool" <<SH
 #!/bin/bash
 pid=''
-if [ -f "$FM_HOME/probe-host" ]; then
-  IFS= read -r pid < "$FM_HOME/probe-host" || true
-  if [ "$PPID" = "$pid" ]; then
-    printf '%s\n' "$1" >> "$FM_HOME/park-sleeps"
+if [ -f "\$FM_HOME/probe-host" ]; then
+  IFS= read -r pid < "\$FM_HOME/probe-host" || true
+  if [ "\$PPID" = "\$pid" ]; then
+    printf '%s\n' "\${1-}" >> "\$FM_HOME/park-$tool"
   fi
 fi
-exec /bin/sleep "$@"
+exec "$real" "\$@"
 SH
-  chmod +x "$home/fakebin/sleep"
+    chmod +x "$home/fakebin/$tool"
+  done
+}
+
+ready_streamed() { grep -Eq '^watcher: (started|attached) ' "$1/host.out" 2>/dev/null; }
+
+test_park_probes_exit_each_second_and_refreshes_every_poll() {
+  local home host_pid refreshes probes
+  home=$(make_home park-cadence attended)
+  install_park_cadence_probes "$home"
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "park-cadence: no watcher started"
+  wait_until 100 ready_streamed "$home" || fail "park-cadence: the first status line never streamed: $(cat "$home/host.out")"
   host_pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
   [ -n "$host_pid" ] || fail "park-cadence: no recorded host"
   printf '%s\n' "$host_pid" > "$home/probe-host"
-  wait_until 100 test -s "$home/park-sleeps" || fail "park-cadence: no child sleep observed"
-  [ "$(sort -u "$home/park-sleeps")" = 0.5 ] || fail "park-cadence: exit probing did not use half-second sleeps"
+  sleep 7
+  rm -f "$home/probe-host"
+  [ "$(sort -u "$home/park-sleep")" = 1 ] || fail "park-cadence: exit probing did not use one-second sleeps: $(sort -u "$home/park-sleep")"
+  probes=$(wc -l < "$home/park-sleep" | tr -d ' ')
+  [ "$probes" -ge 4 ] || fail "park-cadence: only $probes exit probes in 7 seconds"
+  refreshes=$(wc -l < "$home/park-awk" 2>/dev/null | tr -d ' ')
+  { [ "${refreshes:-0}" -ge 1 ] && [ "$refreshes" -le 4 ]; } \
+    || fail "park-cadence: expected about one refresh pass every 3 seconds over 7 seconds, saw ${refreshes:-0}"
   stop_home_processes "$home"
-  pass "host: parked child-exit sampling uses ordinary half-second sleeps"
+  pass "host: a park probes arm exit each second and refreshes every 3-second poll by default"
+}
+
+# The cost of a slower poll must not reach readiness or close handling: both
+# still follow the one-second exit probe however long the poll is.
+test_long_poll_still_streams_readiness_and_hands_back_a_close_promptly() {
+  local home start
+  home=$(make_home long-poll attended)
+  FM_SUPERVISION_HOST_POLL=30 start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "long-poll: no watcher started"
+  wait_until 50 ready_streamed "$home" \
+    || fail "long-poll: the first status line waited for the 30-second poll: $(cat "$home/host.out")"
+  start=$SECONDS
+  append_status "$home" 'step one'
+  wait_until 150 handled_at_least "$home" 1 \
+    || fail "long-poll: the close waited for the 30-second poll: $(cat "$home/state/.supervision-host.log")"
+  [ $((SECONDS - start)) -lt 20 ] || fail "long-poll: the close took $((SECONDS - start)) seconds"
+  stop_home_processes "$home"
+  pass "host: a long poll still streams readiness and hands a close back within the exit probe"
 }
 
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
@@ -973,7 +1010,8 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
 }
 
 fm_test_run \
-  test_park_exit_probe_uses_half_second_child_sleeps \
+  test_park_probes_exit_each_second_and_refreshes_every_poll \
+  test_long_poll_still_streams_readiness_and_hands_back_a_close_promptly \
   test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main \
   test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue \
   test_engine_in_another_time_zone_handles_its_granted_rows \

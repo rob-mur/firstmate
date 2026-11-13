@@ -178,8 +178,23 @@ fm_procevent_owner_lease_seconds() {
   printf '%s\n' "$value"
 }
 
+# How often an attached public start refreshes the lease while its caller stays
+# attached: a quarter of the lease, so three refreshes can be lost before the
+# lease lapses, held between 1 and 30 seconds. An invalid lease setting, which
+# the runner guard refuses anyway, keeps the 1-second floor.
+FM_PROCEVENT_OWNER_KEEPALIVE_MAX_SECONDS=30
+
+fm_procevent_owner_keepalive_seconds() {
+  local lease interval
+  lease=$(fm_procevent_owner_lease_seconds) || lease=$FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS
+  interval=$((lease / 4))
+  [ "$interval" -ge 1 ] || interval=1
+  [ "$interval" -le "$FM_PROCEVENT_OWNER_KEEPALIVE_MAX_SECONDS" ] || interval=$FM_PROCEVENT_OWNER_KEEPALIVE_MAX_SECONDS
+  printf '%s\n' "$interval"
+}
+
 # Detection-interval semantics: docs/configuration.md, Process-to-event sources.
-FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS=15
+FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS=30
 FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS=1
 FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS=3600
 
