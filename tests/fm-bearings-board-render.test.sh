@@ -735,26 +735,36 @@ test_the_board_lists_every_decision_for_reordering_before_the_cards
 test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh
 test_the_order_survives_a_refresh_without_browser_storage
 
-test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording() {
+# A task under way is not a decision, so Captain's Call never lists it, even
+# alone on the board; a sent priority keeps its recorded rank after the
+# decisions so the stored ranking does not lose it.
+test_captains_call_lists_only_decisions_and_the_priority_keeps_task_ranks() {
   local home out
   home=$(make_home priority)
+  build_call_board "$home" '[]' '[]' \
+    '[{"repo":"r","name":"gcp-runner-cpu","id":"t0","state":"paused","doing":"-","kind":"ship"},
+      {"repo":"r","name":"Build it","id":"t1","state":"working","doing":"tests","kind":"ship"}]'
+  out=$(run_board "$home" "")
+  printf '%s' "$out" | jq -e '
+    .order.list == [] and (.order.stepShown | not) and .cards == [] and .rows == []
+  ' >/dev/null || fail "a task under way was listed in Captain's Call: $out"
+
   build_call_board "$home" '["k1","k2"]' '[]' \
     '[{"repo":"r","name":"Build it","id":"t1","state":"working","doing":"tests","kind":"ship"}]'
   out=$(run_board "$home" "")
   printf '%s' "$out" | jq -e '
-    .order.stepShown and .order.list == ["k1","k2","task:t1"]
-      and (.cards | map(.key)) == ["k1","k2"]
-  ' >/dev/null || fail "the list did not include the task under way: $out"
-  out=$(run_board "$home" "load,up:task:t1,go")
+    .order.stepShown and .order.list == ["k1","k2"] and (.cards | map(.key)) == ["k1","k2"]
+  ' >/dev/null || fail "Captain's Call listed something other than its decisions: $out"
+  out=$(run_board "$home" "load,down:k1,go")
   printf '%s' "$out" | jq -e '
-    .order.list == ["k1","task:t1","k2"] and (.cards | map(.key)) == ["k1","k2"]
+    .order.list == ["k2","k1"] and (.cards | map(.key)) == ["k2","k1"]
       and (.calls | map(select(.data.schema == "fm-bearings-priority.v1")) | length) == 1
-      and (.calls | map(select(.data.schema == "fm-bearings-priority.v1"))[0].data.keys) == ["k1","t1","k2"]
-  ' >/dev/null || fail "the priority was not sent with the chosen order: $out"
-  pass "the board ranks tasks and decisions together and sends the priority for recording"
+      and (.calls | map(select(.data.schema == "fm-bearings-priority.v1"))[0].data.keys) == ["k2","k1","t1"]
+  ' >/dev/null || fail "the priority was not sent with the chosen order and the task rank after it: $out"
+  pass "Captain's Call lists only decisions and a sent priority keeps the tasks under way ranked after them"
 }
 
-test_the_priority_list_ranks_tasks_and_decisions_and_is_sent_for_recording
+test_captains_call_lists_only_decisions_and_the_priority_keeps_task_ranks
 
 priority_calls='[.calls[] | select(.data.schema == "fm-bearings-priority.v1") | .data.keys]'
 
@@ -1078,48 +1088,42 @@ test_a_markup_change_rewrites_the_page() {
 
 # A tap on a touch screen reaches a native button as a click, so one click
 # path covers both; the rows are native buttons for Lavish's annotate mode.
-test_a_click_or_tap_on_an_underway_or_waiting_row_expands_it_in_place() {
-  local home out run base
+test_a_click_or_tap_on_a_waiting_row_expands_it_in_place() {
+  local home out run base waiting
   home=$(make_home expand)
   build_call_board "$home" '["k1"]' '[]' \
-    '[{"id":"t1","name":"Task one","repo":"r","state":"working","doing":"doing the thing","kind":"ship","pr_url":"https://example.com/o/r/pull/7"},
-      {"id":"t2","name":"Task two","repo":"r","state":"paused","doing":"-","kind":"ship"}]'
-  run=$(rebuild_command "$home" '.waiting = [{key:"w1", title:"Forge ops", reason:"Parked for the weekend", repo:"forge"}]')
+    '[{"id":"t1","name":"Task one","repo":"r","state":"working","doing":"doing the thing","kind":"ship"}]'
+  waiting='.waiting = [{key:"w1", title:"Forge ops", reason:"Parked for the weekend", repo:"forge", pr_url:"https://example.com/o/r/pull/7"},
+    {key:"w2", title:"Docs", reason:"Waiting on review", repo:"docs"}]'
+  run=$(rebuild_command "$home" "$waiting")
   FM_HARNESS_RUN="$run" run_board "$home" "run" >/dev/null
   base=$(run_board "$home" "")
   printf '%s' "$base" | jq -e '
-    (.rows | map(.key)) == ["task:t1","task:t2","waiting:w1"]
+    (.rows | map(.key)) == ["waiting:w1","waiting:w2"]
       and all(.rows[]; .expanded == "false" and .details == null)
-  ' >/dev/null || fail "the underway and waiting rows did not render as collapsed rows that can expand: $base"
+  ' >/dev/null || fail "the waiting rows did not render as collapsed rows that can expand: $base"
 
-  out=$(run_board "$home" "expand:task:t1,expand:waiting:w1")
+  out=$(run_board "$home" "expand:waiting:w1")
   printf '%s' "$out" | jq -e --argjson base "$base" '
-    (.rows | map({key, expanded})) == [{key:"task:t1",expanded:"true"},{key:"task:t2",expanded:"false"},{key:"waiting:w1",expanded:"true"}]
-      and (.rows[0].details | contains("working") and contains("t1") and contains("https://example.com/o/r/pull/7"))
-      and (.rows[2].details | contains("forge"))
-      and .order.list == $base.order.list and .calls == $base.calls
+    (.rows | map({key, expanded})) == [{key:"waiting:w1",expanded:"true"},{key:"waiting:w2",expanded:"false"}]
+      and (.rows[0].details | contains("forge") and contains("https://example.com/o/r/pull/7"))
+      and .calls == $base.calls
       and .reloads == [] and .opens == [] and .pageView == $base.pageView
-  ' >/dev/null || fail "a click did not expand the rows in place, or it moved or opened something: $out"
+  ' >/dev/null || fail "a click did not expand the row in place, or it moved or opened something: $out"
 
-  out=$(run_board "$home" "expand:task:t1,expand:task:t1")
+  out=$(run_board "$home" "expand:waiting:w1,expand:waiting:w1")
   printf '%s' "$out" | jq -e '.rows[0].expanded == "false" and .rows[0].details == null' >/dev/null \
     || fail "a second click did not collapse the row: $out"
 
-  out=$(run_board "$home" "up:task:t2,expand:task:t2")
+  run=$(rebuild_command "$home" "$waiting"' | .waiting[0].reason = "Parked until Monday"')
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "expand:waiting:w1,run,poll")
   printf '%s' "$out" | jq -e '
-    .order.list == ["k1","task:t2","task:t1"]
-      and (.rows[] | select(.key == "task:t2") | .expanded == "true")
-  ' >/dev/null || fail "move up stopped working beside the expanding row: $out"
-
-  run=$(rebuild_command "$home" '.underway[0].doing = "doing the next thing"')
-  out=$(FM_HARNESS_RUN="$run" run_board "$home" "expand:task:t1,run,poll")
-  printf '%s' "$out" | jq -e '
-    (.rows[] | select(.key == "task:t1") | .expanded == "true" and (.details != null))
+    (.rows[] | select(.key == "waiting:w1") | .expanded == "true" and (.details != null))
       and .reloads == []
   ' >/dev/null || fail "a live update collapsed an expanded row or reloaded the page: $out"
-  pass "a click or tap on an underway or waiting row expands it in place and a second one collapses it"
+  pass "a click or tap on a waiting row expands it in place and a second one collapses it"
 }
 
 test_new_board_code_reaches_the_open_page_only_while_the_reader_is_idle
 test_a_markup_change_rewrites_the_page
-test_a_click_or_tap_on_an_underway_or_waiting_row_expands_it_in_place
+test_a_click_or_tap_on_a_waiting_row_expands_it_in_place

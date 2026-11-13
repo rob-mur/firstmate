@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # fm-board-priority.sh - the captain's durable task priority from the bearings board.
 #
-# The board's step 1 list ranks every Captain's Call item and every task under
-# way. The board sends that ranking as a `priority` annotation (context schema
-# fm-bearings-priority.v1, `keys` highest first); firstmate records it here, and
+# The board's step 1 list ranks every Captain's Call decision. The board sends
+# that ranking, followed by the tasks under way in their recorded order, as a
+# `priority` annotation (context schema fm-bearings-priority.v1, `keys` highest
+# first); firstmate records it here, and
 # reads it back whenever it chooses which task to work on or which decision to
 # answer next. A task or card the ranking does not name sorts after the ranked
 # ones.
