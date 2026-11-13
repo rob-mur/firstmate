@@ -10,9 +10,9 @@
 # built, rebuilds the existing board through `bin/fm-bearings-board.sh build
 # --no-reopen`, so the open Lavish session shows the new fleet state at the same
 # URL and a refresh never opens a browser tab or revives a session the captain
-# ended. Inside Lavish the board's frame is sandboxed, so its own browser stores
-# do not survive the rebuild; Lavish's review-state restore and its queue carry
-# the captain's order and queued answers across it.
+# ended. A rebuild rewrites only the board's data file, and the open page patches
+# just the cards that changed, so a refresh never reloads the page or touches
+# what the captain is typing (bin/fm-bearings-board.sh owns how).
 #
 # --kick records a refresh request and starts this script detached, returning at
 # once; it is a no-op for a home that has not built a board. It is the hook for
