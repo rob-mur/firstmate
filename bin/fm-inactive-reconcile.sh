@@ -8,8 +8,9 @@
 #
 # This is an adjunct to the existing watcher poll loop and session-start path,
 # not a watcher, daemon, PR poll, or forge client of its own.
-# In a secondmate home every `scan` invocation, which is every watcher poll,
-# first runs the LEDGER-FIRST parent delivery: a direct child whose status
+# In a secondmate home every `scan` invocation first runs the LEDGER-FIRST
+# parent delivery (bin/fm-watch.sh starts a scan on every poll where a status
+# file changed, and at least once a minute): a direct child whose status
 # ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
 # so that line is published on the parent channel at once through
 # bin/fm-parent-channel-lib.sh from this unstamped payload:
@@ -566,7 +567,7 @@ report_child_ledger_locked() { # <id> <meta>
 
 # Every direct child's ledger, under its meta lock. File reads, plus a local
 # git reachability check for a ship done: with no delivery record yet, so it
-# runs on every poll in a secondmate home; a delivery failure is already queued as a
+# runs on every scan in a secondmate home; a delivery failure is already queued as a
 # notice and never fails the scan.
 ledger_pass() {
   local meta id lock
@@ -741,7 +742,7 @@ scan() {
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   if self=$(home_secondmate_id); then
-    # The ledger-first delivery is per poll, not per cadence.
+    # The ledger-first delivery is per scan, not per cadence.
     ledger_pass
   else
     marker_rc=$?

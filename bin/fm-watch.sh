@@ -336,7 +336,8 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 # The liveness beacon is touched once per cycle, immediately before the
 # terminal wait below (event_wait_or_sleep) as well as at the top of the next
 # one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
+# between touches, or up to the idle secondmate backoff below, which stays
+# under half this grace. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
 # transitively above) is the single owner of the max(300, poll+60)
 # derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
@@ -349,6 +350,37 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derive
 # fm_watcher_stall_bound (bin/fm-wake-lib.sh) owns the derivation, shared with
 # the arm that follows this watcher.
 WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
+# Idle secondmate backoff: in a secondmate home with no recorded direct report
+# and away mode off, each consecutive idle cycle doubles the terminal sleep from
+# POLL up to FM_IDLE_POLL_MAX seconds (default 60), never past half the beacon
+# grace above, so a quiet home stops polling at full rate.
+# The growth lives in this process only: every wake exits the watcher, so the
+# next one starts again at POLL, and any recorded window resets it at once.
+# Wake latency in such a home rises by at most the backed-off interval.
+# 0, or any value not above POLL, turns the backoff off.
+IDLE_POLL_MAX=${FM_IDLE_POLL_MAX:-60}
+case "$IDLE_POLL_MAX" in ''|*[!0-9]*) IDLE_POLL_MAX=60 ;; esac
+case "$POLL" in
+  ''|*[!0-9]*) IDLE_POLL_MAX=0 ;;
+  *)
+    [ "$IDLE_POLL_MAX" -le $((WATCHER_STALE_GRACE / 2)) ] || IDLE_POLL_MAX=$((WATCHER_STALE_GRACE / 2))
+    [ "$IDLE_POLL_MAX" -gt "$POLL" ] || IDLE_POLL_MAX=0
+    ;;
+esac
+IDLE_POLL_NOW=$POLL
+# Liveness-repair cadence for the two helper commands each cycle would
+# otherwise start: process-event reconcile and the inactive-outcome scan.
+# Both run on this process's first cycle and then once per
+# FM_WATCH_RECONCILE_SECS (default 60; 0 runs them every cycle).
+# The inactive-outcome scan also runs on any cycle where a status file changed
+# since its last run, so a child's terminal ledger line still reaches the parent
+# channel on the cycle that sees it.
+# Queued process-event results are still surfaced in-process every cycle.
+WATCH_RECONCILE_SECS=${FM_WATCH_RECONCILE_SECS:-60}
+case "$WATCH_RECONCILE_SECS" in ''|*[!0-9]*) WATCH_RECONCILE_SECS=60 ;; esac
+WATCH_PROCEVENT_AT=
+WATCH_INACTIVE_AT=
+WATCH_INACTIVE_STATUS_FP=
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
@@ -3024,26 +3056,116 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
+#
+# Unchanged-file skip: a status file the previous poll of this process found
+# already seen is skipped without recomputing its signature while the file, its
+# seen marker, and its owned-append ledger all keep the same stat facts.
+# The seen answer depends only on those three files' bytes and metadata, so an
+# unchanged stat key (type, size, nanosecond mtime and ctime, device:inode, mode,
+# owner) cannot hide a change; any differing fact falls through to the full
+# check.
+# Only regular files are cached, only a positive seen answer is remembered, and
+# the cache lives in this process alone, so every wake (which exits the watcher)
+# starts the next one with a full scan.
+# One stat process per poll covers every status file, which is what replaces
+# the signature's per-file processes.
+# Injected status readers (FM_STATUS_IDENTITY_READER, FM_STATUS_SIZE_READER)
+# disable the skip, as does a stat that cannot report.
+SCAN_SEEN_CACHE=
+
+scan_seen_stat_batch() {  # <path>... -> "<path>\t<key>" lines for regular files
+  [ -z "${FM_STATUS_IDENTITY_READER:-}" ] && [ -z "${FM_STATUS_SIZE_READER:-}" ] || return 1
+  [ "$#" -gt 0 ] || return 0
+  if [ "$_FM_UNAME" = Darwin ]; then
+    LC_ALL=C /usr/bin/stat -f '%N%t%HT:%z:%Fm:%Fc:%d:%i:%p:%u' -- "$@" 2>/dev/null
+  else
+    LC_ALL=C stat -c $'%n\t%F:%s:%.9Y:%.9Z:%d:%i:%f:%u' -- "$@" 2>/dev/null
+  fi
+  return 0
+}
+
+scan_seen_key_of() {  # <stat-batch> <path>: sets SCAN_SEEN_KEY, "-" when unreported
+  local rest
+  SCAN_SEEN_KEY=
+  case "$2" in *$'\t'*|*$'\n'*) return 1 ;; esac
+  case $'\n'"$1" in
+    *$'\n'"$2"$'\t'*)
+      rest=$'\n'"$1"; rest=${rest#*$'\n'"$2"$'\t'}
+      SCAN_SEEN_KEY=${rest%%$'\n'*}
+      ;;
+    *) SCAN_SEEN_KEY=- ;;
+  esac
+}
+
+scan_seen_status_key() {  # <stat-batch> <status> <marker> <ledger>: sets SCAN_SEEN_KEY
+  local s m
+  scan_seen_key_of "$1" "$2" || return 1
+  s=$SCAN_SEEN_KEY
+  case "$s" in 'regular file:'*|'Regular File:'*) ;; *) SCAN_SEEN_KEY=; return 1 ;; esac
+  scan_seen_key_of "$1" "$3" || return 1
+  m=$SCAN_SEEN_KEY
+  scan_seen_key_of "$1" "$4" || return 1
+  SCAN_SEEN_KEY="$s|$m|$SCAN_SEEN_KEY"
+}
+
+# scan_signals_into runs the scan in this shell so the unchanged-file skip
+# survives to the next poll, leaving the lines in SCAN_SIGNALS_OUT; scan_signals
+# prints the same lines.
 scan_signals() {
-  local f sig sf exclude
+  scan_signals_into || return
+  [ -z "$SCAN_SIGNALS_OUT" ] || printf '%s' "$SCAN_SIGNALS_OUT"
+}
+
+scan_signals_into() {
+  local f sig sf base exclude batch="" have_batch=0 key next_cache=""
+  local paths=()
+  SCAN_SIGNALS_OUT=
   # A remote mate's own parent channel is not a self-home task status log; the
   # home-shape-aware exclusion and its precedent live in
   # status_scan_parent_channel_exclude (fm-classify-lib.sh).
   exclude=$(status_scan_parent_channel_exclude "$STATE")
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    fm_basename_to base "$f"
+    paths+=("$f" "$STATE/.seen-${base//./_}" "$STATE/.${base%.status}.home-appends")
+  done
+  if [ "${#paths[@]}" -gt 0 ] && batch=$(scan_seen_stat_batch "${paths[@]}"); then
+    have_batch=1
+  fi
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ "$f" = "$exclude" ] && continue
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
     fi
-    sig=$(fm_wake_signal_sig "$f") || continue
-    [ -n "$sig" ] || continue
-    sf=$(fm_wake_signal_seen_path "$STATE" "$f")
+    fm_basename_to base "$f"
+    sf="$STATE/.seen-${base//./_}"
     case "$f" in
-      *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
-      *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
+      *.status)
+        key=
+        if [ "$have_batch" -eq 1 ] && [ ! -L "$f" ] \
+          && scan_seen_status_key "$batch" "$f" "$sf" "$STATE/.${base%.status}.home-appends"; then
+          key=$SCAN_SEEN_KEY
+          if scan_seen_key_of "$SCAN_SEEN_CACHE" "$f" && [ "$SCAN_SEEN_KEY" = "$key" ]; then
+            next_cache="${next_cache}${f}"$'\t'"${key}"$'\n'
+            continue
+          fi
+        fi
+        if fm_wake_signal_seen_current "$STATE" "$f"; then
+          [ -z "$key" ] || next_cache="${next_cache}${f}"$'\t'"${key}"$'\n'
+          continue
+        fi
+        sig=$(fm_wake_signal_sig "$f") || continue
+        [ -n "$sig" ] || continue
+        ;;
+      *)
+        sig=$(fm_wake_signal_sig "$f") || continue
+        [ -n "$sig" ] || continue
+        [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue
+        ;;
     esac
-    printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
+    SCAN_SIGNALS_OUT="${SCAN_SIGNALS_OUT}${sf}"$'\t'"${sig}"$'\t'"${f}"$'\n'
   done
+  SCAN_SEEN_CACHE=$next_cache
   return 0
 }
 
@@ -3388,6 +3510,27 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# Sets IDLE_POLL_NOW for this cycle's plain sleep under the idle secondmate
+# backoff that IDLE_POLL_MAX describes: POLL on the first idle cycle, then
+# double the previous sleep up to the cap; anything not idle resets it to POLL.
+idle_poll_advance() {  # <any-recorded-window 0|1>
+  local next
+  if [ "$IDLE_POLL_MAX" -le 0 ] || [ "$1" -ne 0 ] || afk_present \
+    || [ ! -f "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    IDLE_POLL_NOW=$POLL
+    IDLE_POLL_STREAK=0
+    return 0
+  fi
+  if [ "${IDLE_POLL_STREAK:-0}" -eq 0 ]; then
+    IDLE_POLL_NOW=$POLL
+  else
+    next=$((IDLE_POLL_NOW * 2))
+    [ "$next" -le "$IDLE_POLL_MAX" ] || next=$IDLE_POLL_MAX
+    IDLE_POLL_NOW=$next
+  fi
+  IDLE_POLL_STREAK=1
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr, rex), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -3400,9 +3543,10 @@ heartbeat_scan_finds_actionable() {
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
-  local w b session first_backend="" first_session="" rec rc
+  local w b session first_backend="" first_session="" rec rc any_window=0
   local windows=() t3_windows=()
   while IFS= read -r w; do
+    any_window=1
     b=$(window_backend "$w")
     fm_backend_has_push "$b" || continue
     # Secondmate endpoints are supervised via status writes, not pane/agent
@@ -3433,9 +3577,11 @@ event_wait_or_sleep() {
   fi
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    idle_poll_advance "$any_window"
+    sleep "$IDLE_POLL_NOW"
     return
   fi
+  IDLE_POLL_NOW=$POLL
 
   # Memoized capability probe (fm_backend_events_capable runs a heavy schema
   # read); re-probed only when the backend/session key changes.
@@ -3481,6 +3627,34 @@ event_wait_or_sleep() {
       _event_cap_fails=0
       ;;
   esac
+}
+
+# 0 when a cadence-gated helper last started at <started-at> (a $SECONDS value,
+# empty before its first run) is due again under WATCH_RECONCILE_SECS.
+watch_reconcile_due() {  # <started-at>
+  [ -n "$1" ] || return 0
+  [ "$WATCH_RECONCILE_SECS" -gt 0 ] || return 0
+  [ $((SECONDS - $1)) -ge "$WATCH_RECONCILE_SECS" ]
+}
+
+# Sets WATCH_STATUS_FP to one stat line per status file (size, nanosecond
+# mtime and ctime, inode), or a per-cycle unique value when stat cannot report,
+# so an unreadable fingerprint always reads as changed.
+watch_status_fingerprint() {
+  local f fp_files=()
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    fp_files+=("$f")
+  done
+  if [ "${#fp_files[@]}" -eq 0 ]; then
+    WATCH_STATUS_FP=none
+  elif [ "$_FM_UNAME" = Darwin ]; then
+    WATCH_STATUS_FP=$(LC_ALL=C /usr/bin/stat -L -f '%N:%z:%Fm:%Fc:%i' -- "${fp_files[@]}" 2>/dev/null) \
+      || WATCH_STATUS_FP="unknown:$SECONDS:$RANDOM"
+  else
+    WATCH_STATUS_FP=$(LC_ALL=C stat -L -c '%n:%s:%.9Y:%.9Z:%i' -- "${fp_files[@]}" 2>/dev/null) \
+      || WATCH_STATUS_FP="unknown:$SECONDS:$RANDOM"
+  fi
 }
 
 # --- Main entry: the runtime below runs only when this file is executed as a
@@ -3989,7 +4163,9 @@ while :; do
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
-  if [ -d "$STATE/procevent" ]; then
+  # Runs on the WATCH_RECONCILE_SECS cadence, not every cycle.
+  if [ -d "$STATE/procevent" ] && watch_reconcile_due "$WATCH_PROCEVENT_AT"; then
+    WATCH_PROCEVENT_AT=$SECONDS
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
@@ -4003,14 +4179,21 @@ while :; do
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
   # was created, so quiet cycles never wake firstmate or consume model tokens.
+  # It runs on the WATCH_RECONCILE_SECS cadence and whenever a status file
+  # changed since its last run.
   inactive_out=
-  if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
-    if [ -n "$inactive_out" ]; then
-      wake "check: inactive-outcome"
+  watch_status_fingerprint
+  if watch_reconcile_due "$WATCH_INACTIVE_AT" || [ "$WATCH_STATUS_FP" != "$WATCH_INACTIVE_STATUS_FP" ]; then
+    WATCH_INACTIVE_AT=$SECONDS
+    WATCH_INACTIVE_STATUS_FP=$WATCH_STATUS_FP
+    if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
+      if [ -n "$inactive_out" ]; then
+        wake "check: inactive-outcome"
+      fi
+    else
+      triage_log "inactive-outcome reconciliation unavailable"
     fi
-  else
-    triage_log "inactive-outcome reconciliation unavailable"
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
@@ -4223,10 +4406,12 @@ EOF
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
-  pending=$(scan_signals)
+  scan_signals_into
+  pending=${SCAN_SIGNALS_OUT%$'\n'}
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    scan_signals_into
+    pending=$(printf '%s\n%s' "$pending" "${SCAN_SIGNALS_OUT%$'\n'}")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see

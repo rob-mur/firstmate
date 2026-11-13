@@ -1010,6 +1010,46 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
   pass "the real watcher poll delivers a child's terminal ledger line to the parent channel"
 }
 
+# The watcher starts the inactive-outcome scan on a timer only once per
+# reconcile cadence, so a child's terminal line written between those runs must
+# still reach the parent on the next poll: a status change starts the scan.
+test_watcher_status_change_starts_ledger_delivery_between_cadence_runs() {
+  local pid i
+  make_world watcher-ledger-cadence; bind_secondmate local
+  # The child's record exists from the start; its terminal status line arrives
+  # later, already seen (marked before a same-inode rename), so it cannot wake
+  # the signal scan and only the inactive-outcome scan can deliver it.
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  rm -f "$MATE/state/child.turn-ended"
+  mkdir -p "$MATE/stage"
+  mv "$MATE/state/child.status" "$MATE/stage/child.status"
+  prime_seen "$MATE/state" "$MATE/stage/child.status"
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" FM_DATA_OVERRIDE="$MATE/data" \
+    FM_CONFIG_OVERRIDE="$MATE/config" FM_INACTIVE_RECONCILE_SECS=60 FM_WATCH_RECONCILE_SECS=3600 \
+    FM_IDLE_POLL_MAX=0 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" FM_FORGE_LOG="$WORLD/forge.log" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_FAKE_CREW_STATE='unknown' "$WATCH" > "$WORLD/mate-watch.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -e "$MATE/state/.last-watcher-beat" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 2
+  kill -0 "$pid" 2>/dev/null || fail "the idle mate watcher exited before the child wrote: $(cat "$WORLD/mate-watch.out")"
+  grep -q 'child-outcome-child' "$MAIN/state/mate.status" 2>/dev/null \
+    && fail "the child was reported before its terminal line existed"
+  mv "$MATE/stage/child.status" "$MATE/state/child.status"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    grep -q 'child-outcome-child-done' "$MAIN/state/mate.status" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  grep -q 'child-outcome-child-done' "$MAIN/state/mate.status" 2>/dev/null \
+    || fail "a status change between cadence runs did not deliver the child's ledger line: $(cat "$MAIN/state/mate.status" 2>/dev/null; cat "$WORLD/mate-watch.out")"
+  pass "a status change starts the inactive-outcome scan between its cadence runs"
+}
+
 # A stalled authoritative state read consumes only the aggregate scan budget.
 # The durable scan position lets the next invocation reach the following child.
 test_stalled_state_read_is_bounded_and_scan_progresses() {
@@ -1455,6 +1495,7 @@ test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
+test_watcher_status_change_starts_ledger_delivery_between_cadence_runs
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_stalled_liveness_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
