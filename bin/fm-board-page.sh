@@ -39,6 +39,15 @@
 #          first: {"key","page","tag","text","prompt","data"}, where tag, text
 #          and data are what the page passed to window.lavish.queuePrompt and
 #          prompt is the page's message with its data appended as Lavish would.
+#          A note the captain makes in Lavish's annotate mode on an element of
+#          the page arrives as an action with tag `annotation`: prompt is the
+#          note, text is the selected text or else the element's text, and data
+#          is {"selector","tag","text"} for the element (the selector built as
+#          Lavish builds it), plus "id" when the element has one and
+#          "selection" for a text selection. The relay takes these notes
+#          itself, because Lavish's annotate mode cannot reach into a page
+#          frame; it follows the board's mode, and Ctrl/Cmd+I in the page
+#          toggles it.
 #          Printed actions are moved to the page's handled folder, so each is
 #          delivered once. Actions already waiting are delivered before an
 #          ended status. Without --timeout-s it waits until one arrives.
