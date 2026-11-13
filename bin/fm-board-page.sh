@@ -42,6 +42,9 @@
 #          Printed actions are moved to the page's handled folder, so each is
 #          delivered once. Actions already waiting are delivered before an
 #          ended status. Without --timeout-s it waits until one arrives.
+#          While it waits it keeps the board's listener running, so a page
+#          action reaches its agent at once instead of on the next monitoring
+#          cycle.
 # reply    Post <text> to the board's Lavish chat, prefixed with the page title,
 #          through `lavish-axi reply`; it never opens a tab.
 # end      Mark the page ended; the board removes it on its next refresh, which
@@ -170,7 +173,7 @@ pending() {  # <page-id> - undelivered action files, oldest first
 }
 
 cmd_wait() {
-  local id=${1-} timeout='' deadline=0 files f
+  local id=${1-} timeout='' deadline=0 files f sid listened=0
   need_id "$id"
   shift
   while [ $# -gt 0 ]; do
@@ -182,7 +185,12 @@ cmd_wait() {
   case "$timeout" in ''|*[!0-9]*) [ -z "$timeout" ] || die "--timeout-s needs whole seconds" ;; esac
   [ -f "$(record "$id")" ] || die "no registered page: $id"
   [ -z "$timeout" ] || deadline=$(( $(date +%s) + timeout ))
+  sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$BOARD" 2>/dev/null) || sid=
   while :; do
+    if [ -n "$sid" ] && [ $(( $(date +%s) - listened )) -ge 5 ]; then
+      "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$sid" >/dev/null 2>&1 || true
+      listened=$(date +%s)
+    fi
     files=$(pending "$id")
     if [ -n "$files" ]; then
       printf 'page: %s\nstatus: feedback\n' "$id"
