@@ -18,7 +18,7 @@ Every question card carries real default answer choices derived from its questio
 A yes/no question gets yes and no, numbered sub-questions become one choice each, a plain two-way "A or B" question gets both sides, and any other question gets approve and decline.
 Authored overlay options still replace the derived ones.
 `bin/fm-bearings-question-lib.sh` owns that derivation and the question-versus-wait rule for the payload and the snapshot.
-URLs in a question lift into the card's links (https only, at most eight), each labelled by what it points at (`PR 837`, `MR 872`, `Understand page`, `Review page`), and the question text shows that label in place of the URL; everything else stays escaped text.
+URLs in a question lift into the card's links (https or a Lavish page, at most eight), each labelled by what it points at (`PR 837`, `MR 872`, `Understand page`, `Review page`), and the question text shows that label in place of the URL; everything else stays escaped text.
 
 Every question the wake drain lists as an open decision reaches the board without `--all-decisions`.
 That covers a needs-decision or blocked status on a task under way and on a secondmate's task, and a captain hold whose reason asks a question even when the snapshot buckets it as blocked or aged.
@@ -44,7 +44,7 @@ Decision cards otherwise arrive with those choices and a freeform box; the optio
 - The generator tells a wait from a question this way: a reason whose first sentence records that the captain parked, deferred, or paused it is a wait, otherwise a reason with a question mark is a question, a hold with an until date or a reason that parks, pauses, resumes, holds until, waits for or on, or says until or re-runs is a wait, and anything else is a question.
 - Each decision card leads with its hold reason as `question` and shows the task title as the subject line.
 - A status question is titled from its decision, never the bare home name, and a status question about a captain-held task in the same home merges into that one card with every choice kept.
-- Any card may carry `links`, one or more `{url, label}` pointers to the page the captain acts on, such as a Lavish page, a merge request, or a credential console. A link is https, or http only on the tailnet Lavish origin the board contract names; the validator refuses every other http link.
+- Any card may carry `links`, one or more `{url, label}` or `{page, label}` pointers to the page the captain acts on, such as a Lavish page, a board page id, a merge request, or a credential console. A link is https, or http only on the tailnet Lavish origin the board contract names; the validator refuses every other http link.
 - A hold whose subject has already landed is dropped by `build` when its task or PR appears among the payload's landed rows; for a published version put the artifact and numeric three-part version in the card's structured `subject`, and verify any subject without one of these identities against current reality before carding it.
 - Never author a `reconcile` option: `build` gives every decision card that standard choice and the generator refuses it.
 - The dispatch picker's key `dispatch.charted` comes from the template; a payload never authors it.
@@ -77,6 +77,7 @@ The board is the captain's one Lavish tab.
 Any other page - an understand page, an MR review page, or a page a skill from another repository builds - registers through `bin/fm-board-page.sh`, the one entry point whose header owns the page contract and paths, and shows inside the board instead of opening a tab.
 A skill from another repository finds it as the `fm-board-page` command that `bin/fm-board-page.sh install` writes, and runs its page standalone until that command exists.
 Each live page gets a tab in the board header; the captain opens it in place and returns with "Back to board" or the bearings header link.
+A card link to a Lavish page opens the matching registered page in place too, and a card whose page is not registered says it is not in the board yet; the board never links out to a Lavish session, and the `build` header owns how a link finds its page.
 "End this page" ends only that page; ending the board's Lavish session ends every page.
 One refresh policy covers the whole app: no frame ever reloads, and the board and each page poll their own data file and patch in place.
 A page's actions ride the board's Lavish session as rows tagged `page`, and the process-event runner routes them to that page's agent before publishing the result, so a board result holding only routed page actions raises no wake.

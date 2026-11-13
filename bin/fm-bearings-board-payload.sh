@@ -46,7 +46,8 @@
 #                      A link is labelled by what it points at - `PR <n>`, `MR <n>`,
 #                      `Issue <n>`, or for a Lavish page `Understand page`, `Review page`,
 #                      or `Report` from the words just before it (else `Lavish page`) -
-#                      and `question`/`about` show that label in place of the URL. Every
+#                      and `question`/`about` show that label in place of the URL. `build`
+#                      turns a Lavish page link into its in-place board page. Every
 #                      open captain hold is a row here (see --all-decisions above).
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
