@@ -94,12 +94,24 @@
 #
 # CAPTAIN'S CALL SHOWS EVERYTHING WAITING ON THE CAPTAIN, including items
 # firstmate never held. Any card (decision, merge, credential) MAY carry `links`,
-# up to 8 `{url, label}` pointers to the page the captain acts on. A link url is
-# https, or http only on the tailnet Lavish origin
+# up to 8 pointers to the page the captain acts on: `{url, label}` or
+# `{page, label}`, where page is a board page id (the slug bin/fm-board-page.sh
+# registers). A link url is https, or http only on the tailnet Lavish origin
 # http://dev-1.tailf848b0.ts.net:4387 (exact host and port, then `/`, `?`, `#`
 # or the end); every other http url refuses. A card whose key is not a captain-
 # held task id is kept, because hygiene only drops a decision card it can
 # positively show is landed or no longer an open captain call.
+#
+# A PAGE LINK OPENS IN PLACE, NEVER IN ANOTHER TAB. build rewrites every card
+# link to a Lavish page before writing the board data, so the board never links
+# out to a Lavish session. A Lavish-origin url resolves through the server's
+# session listing to the file that session shows; when that file sits in a live
+# registered page's folder ($FM_HOME/.lavish/pages/<id>/), or in a folder named
+# for a live registered page id (a page skill's standalone folder), the link
+# becomes `{page: <id>, label}` and the board opens that page in place. A
+# `{page, label}` link naming a live page stays as it is. Any other Lavish-
+# origin url or page link becomes `{label, not_in_board: true}`, which the board
+# shows as a plain note; a link to the board's own session is dropped.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation keeps the same Lavish session URL and the same canonical
@@ -178,6 +190,7 @@ validate_payload() {  # <data.json>
       type == "string"
       and (test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$")
         or test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#][^[:space:]]*)?$"));
+    def page_id: type == "string" and test("^[a-z0-9][a-z0-9-]{0,63}$");
     def optional_links:
       (has("links") | not)
       or (.links
@@ -185,8 +198,8 @@ validate_payload() {  # <data.json>
           and length <= 8
           and ([.[]
             | type == "object"
-              and ((keys - ["url", "label"]) | length == 0)
-              and (.url | link_url)
+              and ((((keys - ["url", "label"]) | length == 0) and (.url | link_url))
+                or (((keys - ["page", "label"]) | length == 0) and (.page | page_id)))
               and optional_string("label")] | all));
     def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
     def optional_subject:
@@ -278,6 +291,56 @@ live_pages_json() {
              and (.title | type == "string" and length > 0))
            | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/page.html")}' "$f" 2>/dev/null
   done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))'
+}
+
+# Every Lavish session the server lists, as {"<session-id>": "<page-id>"} for a
+# session showing a live registered page (its file in that page's served folder,
+# or in a folder named for that page id) or "" for the board's own session. A
+# session showing anything else is left out, and so is everything when the
+# listing cannot be read: a link nothing resolves becomes a note, never a link
+# out of the board. A row is `<file>,<status>,"<url>",<pending>`, optionally
+# followed by a `,<listener>` column.
+lavish_session_pages() {  # <pages-json>
+  local pages=$1 listing served board
+  command -v lavish-axi >/dev/null 2>&1 || { printf '{}\n'; return 0; }
+  listing=$(lavish-axi 2>/dev/null) || { printf '{}\n'; return 0; }
+  served=$(board_realpath "$FM_HOME/.lavish/pages" || printf '%s' "$FM_HOME/.lavish/pages")
+  board=$(board_realpath "$(board_path)" || board_path)
+  printf '%s\n' "$listing" \
+    | sed -n 's/^[[:space:]]*\(.*\),[A-Za-z-]*,"\(https\{0,1\}:[^"]*\)",[^"]*$/\1\t\2/p' \
+    | jq -R -s -c --argjson pages "$pages" --arg served "$served/" --arg board "$board" '
+        ([$pages[].id]) as $live
+        | [ split("\n")[] | select(length > 0) | split("\t")
+            | select(length == 2)
+            | (.[1] | capture("/session/(?<s>[A-Za-z0-9]+)").s // empty) as $sid
+            | .[0] as $file
+            | (if $file == $board then ""
+               elif ($file | startswith($served)) then ($file | ltrimstr($served) | split("/")[0])
+               else ($file | split("/") | .[-2] // "") end) as $id
+            | select($id == "" and $file == $board or ($live | index([$id])))
+            | {key: $sid, value: $id} ]
+        | from_entries'
+}
+
+# Rewrite every card link to a Lavish page as described under A PAGE LINK OPENS
+# IN PLACE in the header. Reads the effective payload on stdin.
+resolve_page_links() {  # <pages-json> <sessions-json>
+  jq -c --argjson pages "$1" --argjson sessions "$2" '
+    ([$pages[].id]) as $live
+    | def lavish: type == "string" and test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#]|$)");
+      def label_of: if (.label // "") != "" then {label} else {label: "Lavish page"} end;
+      def resolve:
+        if has("page") then
+          (.page as $p | if ($live | index([$p])) then . else label_of + {not_in_board: true} end)
+        elif (.url | lavish) then
+          ((.url | capture("/session/(?<s>[A-Za-z0-9]+)").s // null) as $sid
+           | ($sid | if . == null then null else $sessions[.] end) as $id
+           | if $id == "" then empty
+             elif $id != null and ($live | index([$id])) then label_of + {page: $id}
+             else label_of + {not_in_board: true} end)
+        else . end;
+    . + {pages: $pages}
+    | .captains_call |= map(if has("links") then .links |= map(resolve) else . end)'
 }
 
 # --- Lavish session liveness -------------------------------------------------
@@ -438,7 +501,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data board board_data json tmp sid extracted effective owner version pre_reopen_owner reopen=1
+  local data board board_data json tmp sid extracted effective owner version pre_reopen_owner pages reopen=1
   if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   data=$1
@@ -456,7 +519,15 @@ command_build() {
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
   fi
-  json=$(jq -c --argjson pages "$(live_pages_json)" '. + {pages: $pages}' "$effective") \
+  pages=$(live_pages_json)
+  # Only a card that links a Lavish page needs the server's session listing.
+  sessions='{}'
+  if jq -e '[.captains_call[]?.links[]?.url | strings
+             | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#]|$)")] | any' \
+      "$effective" >/dev/null 2>&1; then
+    sessions=$(lavish_session_pages "$pages")
+  fi
+  json=$(resolve_page_links "$pages" "$sessions" < "$effective") \
     || { rm -f -- "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
   # `<` never appears in JSON syntax outside strings, so escaping every
