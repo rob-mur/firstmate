@@ -610,7 +610,11 @@ test_default_choices_match_the_question_asked() {
         {id: "yn", key: "yn", verb: "captain-hold", title: "Merge", owner: "(main)", reason: "PR 13 is green and reviewed. Should I merge it?"},
         {id: "open", key: "open", verb: "captain-hold", title: "Name", owner: "(main)", reason: "The flag needs a name before release. Which name do you want for it?"},
         {id: "ab", key: "ab", verb: "captain-hold", title: "Order", owner: "(main)", reason: "Two PRs touch the same file. Question: which lands first? (a) PR 13 first (b) PR 14 first"},
-        {id: "plan", key: "plan", verb: "captain-hold", title: "Plan", owner: "(main)", reason: "Plan for the migration is ready for sign-off."}]' \
+        {id: "plan", key: "plan", verb: "captain-hold", title: "Plan", owner: "(main)", reason: "Plan for the migration is ready for sign-off."},
+        {id: "cd-872-874-dismiss", key: "cd-872-874-dismiss", verb: "captain-hold", title: "Dismiss stale reviews", owner: "(main)", reason: "Dismiss review 623 on PR 872 https://gitlab.example.com/grp/proj/-/merge_requests/872 and review 624 on PR 874 https://gitlab.example.com/grp/proj/-/merge_requests/874; the gate posted them before the fix landed."},
+        {id: "relogin", key: "relogin", verb: "captain-hold", title: "Codex login", owner: "(main)", reason: "The codex credential expired. Captain to log in again with codex login."},
+        {id: "rerun", key: "rerun", verb: "captain-hold", title: "Flaky CI", owner: "(main)", reason: "CI hit a runner timeout on PR 13. Please re-run the failed job."},
+        {id: "go", key: "go", verb: "captain-hold", title: "Release", owner: "(main)", reason: "Release 2.4 is staged; approve the publish to the registry."}]' \
     "$TMP_ROOT/fit-base.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   opts() { jq -r --arg k "$1" '.captains_call[] | select(.key == $k) | [.options[].label] | join("|")' <<<"$p"; }
@@ -620,9 +624,33 @@ test_default_choices_match_the_question_asked() {
   assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "open") | .allow_freeform' <<<"$p")" "the open question card keeps its free-text box"
   assert_equals "PR 13 first|PR 14 first" "$(opts ab)" "lettered sub-questions become one choice each"
   assert_equals "Approve / go ahead|Decline" "$(opts plan)" "a sign-off request with no question offers approve and decline"
+  assert_equals "Done|Not done (say why)" "$(opts cd-872-874-dismiss)" "a request to dismiss reviews offers done and not done, not approve"
+  assert_equals "done,not-done" "$(jq -r '.captains_call[] | select(.key == "cd-872-874-dismiss") | [.options[].value] | join(",")' <<<"$p")" "the action card answers record done or not-done, never approve"
+  assert_equals "Say why in the answer box|true" "$(jq -r '.captains_call[] | select(.key == "cd-872-874-dismiss") | "\(.options[1].hint)|\(.allow_freeform)"' <<<"$p")" "not done asks for the reason and the card keeps its answer box"
+  assert_equals "false" "$(jq -r '.captains_call[] | select(.key == "cd-872-874-dismiss") | has("close")' <<<"$p")" "an action card declares no close mode, so done is never a release"
+  assert_equals "Done|Not done (say why)" "$(opts relogin)" "a request that the captain log in offers done and not done"
+  assert_equals "Done|Not done (say why)" "$(opts rerun)" "a request to re-run a job offers done and not done"
+  assert_equals "Approve / go ahead|Decline" "$(opts go)" "an approval request keeps approve and decline"
   printf '%s\n' "$p" > "$TMP_ROOT/fit-payload.json"
   validates "$TMP_ROOT/fit-payload.json" || fail "a payload with fitted choices did not satisfy the board validator"
   pass "default choices match the question the card asks"
+}
+
+test_action_card_answers_reach_the_intake_as_the_captains_report() {
+  local result="$TMP_ROOT/action-answers.result" out
+  # What the board queues when the captain picks Done, or Not done with a reason.
+  cat > "$result" <<'EOF'
+session:
+  file: /board.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  "1","Captain's Call answer - Dismiss stale reviews: done\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"cd-872-874-dismiss\",\n  \"selection\": \"done\",\n  \"note\": \"\"\n}","form",choice,"Dismiss stale reviews -> done"
+  "2","Captain's Call answer - Codex login: not-done - no access from here\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"relogin\",\n  \"selection\": \"not-done\",\n  \"note\": \"no access from here\"\n}","form",choice,"Codex login -> not-done - no access from here"
+EOF
+  out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$result") || fail "the board answers could not be read"
+  assert_equals "$(printf 'cd-872-874-dismiss\tdone\tDismiss stale reviews -> done\nrelogin\tnot-done - no access from here\tCodex login -> not-done - no access from here')" "$out" \
+    "done and not done reach the keyed-answer intake as the captain's words, the reason kept, and no release mode"
+  pass "an action card's done or not-done answer reaches the intake as the captain's report, never a release"
 }
 
 test_a_card_whose_pr_merged_or_closed_leaves_the_board() {
@@ -1027,6 +1055,7 @@ fm_test_run \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
   test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids \
   test_default_choices_match_the_question_asked \
+  test_action_card_answers_reach_the_intake_as_the_captains_report \
   test_a_card_whose_pr_merged_or_closed_leaves_the_board \
   test_announcements_and_time_gates_are_not_calls_and_a_real_question_stays \
   test_page_live_lines_fold_their_links_into_the_mr_card \
