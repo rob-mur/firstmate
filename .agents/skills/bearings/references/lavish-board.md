@@ -13,7 +13,8 @@ The board opens on step 1, one priority list of every Captain's Call decision, w
 Repeated down presses on the top row walk the list: each brings up the next decision while the ones already passed over drop just below the top as a block in their original order, and a press after the last decision restores the original order.
 Clicking a decision row opens its card; "Start answering" deals the cards in the list's order.
 A task under way is not a decision, so the board never lists it unless it is blocked or needs a decision, in which case it is a question card; a sent priority carries the tasks under way after the decisions in their recorded order, so their stored rank survives.
-The "bearings" header on the page links back to the board.
+"Reorder" returns from the cards to the list at any time, including after answers are queued or sent.
+The "bearings" header returns to the board's home view in place from anywhere on the board - a shown page, full screen, or the cards - and to the priority list when there is one.
 The list's order survives a refresh and rebuild like a queued answer, and a row added since asks to be placed again.
 `bin/fm-bearings-board-payload.sh` already sorts cards and tasks by the stored priority, so a rebuilt board starts in the captain's order.
 Every question card carries real default answer choices derived from its question, and the standard reconcile choice stays secondary.
@@ -79,7 +80,7 @@ Rebuild by hand with the payload generator and `build` when you need the board c
 The board is the captain's one Lavish tab.
 Any other page - an understand page, an MR review page, or a page a skill from another repository builds - registers through `bin/fm-board-page.sh`, the one entry point whose header owns the page contract and paths, and shows inside the board instead of opening a tab.
 A skill from another repository finds it as the `fm-board-page` command that `bin/fm-board-page.sh install` writes, and runs its page standalone until that command exists.
-Each live page gets a tab in the board header; the captain opens it in place and returns with "Back to board" or the bearings header link.
+Each live page gets a tab in the board header; the captain opens it in place and returns with "Back to board" or the bearings header.
 "Full screen" fills the window with the open page without reloading it, and the same button or Esc leaves it.
 A card link to a Lavish page opens the matching registered page in place too, and a card whose page is not registered says it is not in the board yet; the board never links out to a Lavish session, and the `build` header owns how a link finds its page.
 "End this page" ends only that page; ending the board's Lavish session ends every page.
