@@ -360,6 +360,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 </style>
 </head>
 <body>
+<div id="bb-page-drafts" data-lavish-question="board-page-drafts" hidden></div>
 
 <header class="bb-nav">
   <div class="bb-nav__inner">
@@ -1377,7 +1378,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   window.addEventListener("message", function (ev) {
     var d = ev && ev.data;
     if (!d || typeof d !== "object" || ev.source !== window.parent) return;
-    if (d.type === "lavish:restoreReviewState") setTimeout(resync, 0);
+    if (d.type === "lavish:restoreReviewState") setTimeout(function () { resync(); restorePageDrafts(); }, 0);
     else if (d.type === "lavish:queuedAnchors" && Array.isArray(d.selectors)) onAnchors(d.selectors);
   });
 
@@ -1505,6 +1506,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     delete unsentPages[id];
     delete unqueuedForms[id];
     delete pageById[id];
+    if (pageDrafts[id]) { delete pageDrafts[id]; savePageDrafts(); }
     if (shownPage === id) showPage(null);
     tabsEl.hidden = !Object.keys(pageById).length;
   }
@@ -1557,6 +1559,118 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     annotateOn = !!d.enabled;
     Object.keys(pageById).forEach(function (k) { tellAnnotate(pageById[k].frame); });
   });
+  /* PAGE DRAFTS. A page's relay (lavish-relay.js) passes up the input of
+     every form the captain changed as a draft per question, and asks for the
+     page's drafts each time the page loads. The board keeps them in hidden
+     fields inside a data-lavish-question scope placed first in the board, so
+     Lavish's own review-state restore brings them back after Lavish reloads
+     the board or the captain reloads the tab, and in a browser store where
+     one is allowed. Restored drafts go back to every page. A page's queued
+     drafts are dropped once Lavish's queue no longer holds an answer from
+     it, and all its drafts go when the page leaves the board or turn a week
+     old. The fields hold JSON in chunks Lavish keeps whole, newest drafts
+     first, so a board over capacity loses only the oldest from that copy. */
+  var PAGE_DRAFTS_KEY = "fm-bearings-board.page-drafts.v1";
+  var PAGE_DRAFT_FIELDS = 20;
+  var PAGE_DRAFT_CHUNK = 2000;
+  var PAGE_DRAFT_MAX_AGE = 7 * 864e5;
+  var pageDrafts = {};
+  var pageDraftFields = [];
+  (function () {
+    var host = document.getElementById("bb-page-drafts");
+    for (var i = 0; i < PAGE_DRAFT_FIELDS; i++) {
+      var f = document.createElement("textarea");
+      f.name = "bb-page-drafts-" + i;
+      f.tabIndex = -1;
+      host.appendChild(f);
+      pageDraftFields.push(f);
+    }
+  })();
+  function hasOwn(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+  function cleanDraft(d) {
+    if (!d || typeof d !== "object" || !d.fields || typeof d.fields !== "object" || Array.isArray(d.fields)) return null;
+    var at = Number(d.at);
+    if (!isFinite(at) || at < Date.now() - PAGE_DRAFT_MAX_AGE) return null;
+    return { fields: d.fields, queued: !!d.queued, at: at };
+  }
+  /* newer wins; only pages on the board */
+  function mergePageDrafts(src) {
+    if (!src || typeof src !== "object") return;
+    Object.keys(src).forEach(function (id) {
+      var scopes = src[id];
+      if (!hasOwn(pageById, id) || !scopes || typeof scopes !== "object") return;
+      Object.keys(scopes).forEach(function (key) {
+        var d = cleanDraft(scopes[key]);
+        var have = pageDrafts[id] && pageDrafts[id][key];
+        if (!d || (have && have.at >= d.at)) return;
+        if (!pageDrafts[id]) pageDrafts[id] = {};
+        pageDrafts[id][key] = d;
+      });
+    });
+  }
+  /* ASCII only, so no chunk boundary splits a character */
+  function draftsText(o) {
+    return JSON.stringify(o).replace(/[\u007f-￿]/g, function (c) {
+      return "\\u" + ("000" + c.charCodeAt(0).toString(16)).slice(-4);
+    });
+  }
+  function savePageDrafts() {
+    Object.keys(pageDrafts).forEach(function (id) { if (!Object.keys(pageDrafts[id]).length) delete pageDrafts[id]; });
+    jsonStore(PAGE_DRAFTS_KEY, pageDrafts);
+    var list = [];
+    Object.keys(pageDrafts).forEach(function (id) {
+      Object.keys(pageDrafts[id]).forEach(function (key) { list.push({ id: id, key: key, d: pageDrafts[id][key] }); });
+    });
+    list.sort(function (a, b) { return b.d.at - a.d.at; });
+    var keep = {}, text = "";
+    list.forEach(function (e) {
+      if (!keep[e.id]) keep[e.id] = {};
+      keep[e.id][e.key] = e.d;
+      var t = draftsText(keep);
+      if (t.length > PAGE_DRAFT_FIELDS * PAGE_DRAFT_CHUNK) delete keep[e.id][e.key];
+      else text = t;
+    });
+    var moved = false;
+    pageDraftFields.forEach(function (f, i) {
+      var v = text.slice(i * PAGE_DRAFT_CHUNK, (i + 1) * PAGE_DRAFT_CHUNK);
+      if (f.value !== v) { f.value = v; moved = true; }
+    });
+    /* Lavish saves review state on input events */
+    if (moved) {
+      try { pageDraftFields[0].dispatchEvent(new Event("input", { bubbles: true })); } catch (e) { /* no events */ }
+    }
+  }
+  function pushPageDrafts(p) {
+    try {
+      if (p.frame.contentWindow) p.frame.contentWindow.postMessage({ type: "fm-board-page:drafts", drafts: pageDrafts[p.id] || {} }, "*");
+    } catch (e) { /* a frame still loading asks for them itself */ }
+  }
+  function restorePageDrafts() {
+    var text = pageDraftFields.map(function (f) { return f.value; }).join("");
+    try { if (text) mergePageDrafts(JSON.parse(text)); } catch (e) { /* a copy Lavish cut short */ }
+    savePageDrafts();
+    Object.keys(pageById).forEach(function (k) { pushPageDrafts(pageById[k]); });
+  }
+  function keepPageDraft(p, scope, draft) {
+    if (typeof scope !== "string" || !scope || scope.length > 300) return;
+    var d = draft === null ? null : cleanDraft(draft);
+    if (!d && draft !== null) return;
+    if (d) {
+      if (!pageDrafts[p.id]) pageDrafts[p.id] = {};
+      pageDrafts[p.id][scope] = d;
+    } else if (pageDrafts[p.id]) delete pageDrafts[p.id][scope];
+    savePageDrafts();
+  }
+  /* Lavish's queue holds no answer from the page: what it queued was sent */
+  function pageSent(p, wasHeld) {
+    var mine = pageDrafts[p.id], dropped = false;
+    if (mine) Object.keys(mine).forEach(function (key) { if (mine[key].queued) { delete mine[key]; dropped = true; } });
+    if (dropped) savePageDrafts();
+    if (dropped || wasHeld) {
+      try { if (p.frame.contentWindow) p.frame.contentWindow.postMessage({ type: "fm-board-page:sent" }, "*"); } catch (e) { /* gone */ }
+    }
+  }
+
   /* A page answer Lavish cannot take shows an error under the page bar with
      a button that queues the same answer again, never a silent drop. Like a
      card's answer, a page answer counts as queued only once Lavish's queue
@@ -1606,11 +1720,13 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     pageUnsent.classList.toggle("is-visible", held || forms);
   }
   function pagesInQueue(inQueue) {
+    var was = unsentPages;
     unsentPages = {};
     Object.keys(pageById).forEach(function (k) {
       var p = pageById[k];
       var held = inQueue.indexOf(p.frame) >= 0;
       if (held) { unsentPages[k] = true; stopPageWait(k); }
+      else pageSent(p, !!was[k]);
       markUnsent(k);
     });
     showUnsent();
@@ -1701,12 +1817,18 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       if (d.count > 0) unqueuedForms[p.id] = true; else delete unqueuedForms[p.id];
       markUnsent(p.id);
       showUnsent();
+    } else if (d.type === "fm-board-page:draft") {
+      keepPageDraft(p, d.scope, d.draft);
+    } else if (d.type === "fm-board-page:draftsWanted") {
+      pushPageDrafts(p);
     } else if (d.type === "fm-board-page:toggleAnnotate") {
       /* Lavish toggles on its own hotkey pressed in this board */
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "i", ctrlKey: true, metaKey: false, bubbles: true, cancelable: true }));
     }
   });
   syncPages(data.pages);
+  mergePageDrafts(jsonLoad(PAGE_DRAFTS_KEY, false));
+  savePageDrafts();
 
   function applyData(next) {
     var pinned = false;
@@ -1784,6 +1906,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     var act = document.activeElement;
     if (act && act !== document.body) return false;
     if (dragKey !== null || shownPage !== null || reorderTimer !== null) return false;
+    /* a page's unsent input lives in its frame, which a reload would cut off */
+    if (Object.keys(pageDrafts).length || Object.keys(unsentPages).length || Object.keys(unqueuedForms).length) return false;
     var ids = Object.keys(targets);
     if (ids.some(function (id) { return targets[id].hidden.value === "queued"; })) return false;
     /* an answer already sent leaves its picks behind; they are not work */
