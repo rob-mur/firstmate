@@ -81,7 +81,7 @@ The board is the captain's one Lavish tab.
 Any other page - an understand page, an MR review page, or a page a skill from another repository builds - registers through `bin/fm-board-page.sh`, the one entry point whose header owns the page contract and paths, and shows inside the board instead of opening a tab.
 A skill from another repository finds it as the `fm-board-page` command that `bin/fm-board-page.sh install` writes, and runs its page standalone until that command exists.
 Each live page gets a tab in the board header; the captain opens it in place and returns with "Back to board" or the bearings header.
-"Full screen" fills the window with the open page without reloading it, and the same button or Esc leaves it.
+"Full screen" fills the window below the board header with the open page without reloading it, and the same button or Esc leaves it.
 A card link to a Lavish page opens the matching registered page in place too, and a card whose page is not registered says it is not in the board yet; the board never links out to a Lavish session, and the `build` header owns how a link finds its page.
 A decision answered on a page the board does not have shows its question, says its choices are on that page, and takes a free-text answer, so it is still answered from the board; the `build` header owns that fallback.
 "End this page" ends only that page; ending the board's Lavish session ends every page.
