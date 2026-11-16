@@ -22,6 +22,18 @@
 # (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
 # never ambiguous.
 #
+# --include-mrs lists the captain's open GitLab MRs that no task records, as
+# open_mrs{key,repo,title,url,state,updated} with one state line each (merge state,
+# CI, approvals, unresolved threads, last activity). It makes one read-only
+# `glab api merge_requests?scope=created_by_me&state=opened` call against the host
+# in FM_BEARINGS_GITLAB_HOST or glab's configured host, plus bounded detail and
+# approvals reads for the first FM_BEARINGS_MR_DETAIL_MAX uncovered MRs, each call
+# bounded by FM_BEARINGS_MR_TIMEOUT seconds; at most FM_BEARINGS_MRS rows are kept.
+# An MR is covered only when its exact URL or full reference (group/project!iid)
+# appears in this home's task meta, backlog or snapshot - never by a fuzzy match. A
+# missing glab, no host, no auth, a failure or a timeout leaves open_mrs out, sets
+# the mrs: line to `unavailable (...)`, logs one stderr line, and exits 0.
+#
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability.
 # Contributions project cached coverage and required actors from fm-contributions.sh;
@@ -135,6 +147,10 @@ FM_BEARINGS_UNHEALTHY=${FM_BEARINGS_UNHEALTHY:-20}
 FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
+FM_BEARINGS_MRS=${FM_BEARINGS_MRS:-20}
+FM_BEARINGS_MR_DETAIL_MAX=${FM_BEARINGS_MR_DETAIL_MAX:-10}
+FM_BEARINGS_MR_TIMEOUT=${FM_BEARINGS_MR_TIMEOUT:-10}
+case "$FM_BEARINGS_MR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_MR_TIMEOUT=10 ;; esac
 case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
 validate_bound() {  # <name> <value>
   case "$2" in ''|*[!0-9]*|0) echo "fm-bearings-snapshot: $1 must be a positive integer" >&2; exit 2 ;; esac
@@ -150,10 +166,12 @@ validate_bound FM_BEARINGS_RECORDED_PRS "$FM_BEARINGS_RECORDED_PRS"
 validate_bound FM_BEARINGS_UNHEALTHY "$FM_BEARINGS_UNHEALTHY"
 validate_bound FM_BEARINGS_PR_REPOS "$FM_BEARINGS_PR_REPOS"
 validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
+validate_bound FM_BEARINGS_MRS "$FM_BEARINGS_MRS"
+validate_bound FM_BEARINGS_MR_DETAIL_MAX "$FM_BEARINGS_MR_DETAIL_MAX"
 
 usage() {
   cat <<'EOF'
-usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
+usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--include-mrs] [--fields <list>]
                                [--all-in-flight] [--all-decisions]
                                [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
@@ -193,13 +211,20 @@ Opt-in surfaces: --fields bodies|paths|actions|endpoints|gate-text
   (gate-text adds untruncated gates{title_full,reason_full}), --all-in-flight,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
-  --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
+  --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs),
+  --include-mrs (adds open_mrs{key,repo,title,url,state,updated}: the captain's open
+  GitLab MRs no task records by URL or full reference; the mrs: line says whether
+  they were checked or unavailable).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
+--include-mrs bounds: FM_BEARINGS_GITLAB_HOST (default: glab's configured host),
+  FM_BEARINGS_MR_TIMEOUT seconds per glab call (10), FM_BEARINGS_MR_DETAIL_MAX MRs
+  read in detail (10), FM_BEARINGS_MRS rows kept (20).
 EOF
 }
 
 FORMAT=toon
 INCLUDE_PRS=0
+INCLUDE_MRS=0
 ALL_REPORTS=0
 ALL_QUEUED=0
 ALL_IN_FLIGHT=0
@@ -214,6 +239,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
     --include-prs) INCLUDE_PRS=1 ;;
+    --include-mrs) INCLUDE_MRS=1 ;;
     --all-reports) ALL_REPORTS=1 ;;
     --all-queued) ALL_QUEUED=1 ;;
     --all-in-flight) ALL_IN_FLIGHT=1 ;;
@@ -1051,6 +1077,108 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
               end ) as $u
           | if $u == null then . else . + {pr_url: $u} end
         end)')
+
+# --- optional live GitLab MR listing ----------------------------------------
+# Under --include-mrs only: the captain's open GitLab MRs that no task records.
+# One bounded list call against the configured host, then one bounded detail and
+# approvals call per uncovered MR (at most FM_BEARINGS_MR_DETAIL_MAX of them, run
+# in parallel). Read-only. An MR is covered when its exact web_url or full
+# reference (group/project!iid), not followed by another digit, appears anywhere
+# in the canonical snapshot (task meta pr=, backlog lines and notes, secondmate
+# records) or in the projected model; there is no fuzzy match. A missing glab, no
+# host, or a failed or timed-out call leaves open_mrs out, says so on the mrs
+# line, and writes one line to stderr; it never fails the snapshot.
+MR_STATUS='not_requested (run: /bearings include MRs)'
+OPEN_MRS=null
+if [ "$INCLUDE_MRS" = 1 ]; then
+  mr_unavailable() { MR_STATUS="unavailable ($1)"; echo "fm-bearings-snapshot: GitLab MRs unavailable ($1)" >&2; }
+  glab_bounded() { fm_run_timed "$FM_BEARINGS_MR_TIMEOUT" env GLAB_NO_PROMPT=1 GLAB_CHECK_UPDATE=false glab "$@" </dev/null; }
+  if ! command -v glab >/dev/null 2>&1; then
+    mr_unavailable "glab not found"
+  else
+    mr_host=${FM_BEARINGS_GITLAB_HOST:-}
+    [ -n "$mr_host" ] || mr_host=$(glab_bounded config get host 2>/dev/null | head -n 1) || mr_host=""
+    mr_host=$(printf '%s' "$mr_host" | tr -d '[:space:]')
+    case "$mr_host" in *[!A-Za-z0-9.:-]*) mr_host="" ;; esac
+    if [ -z "$mr_host" ]; then
+      mr_unavailable "no GitLab host configured"
+    elif ! mr_list=$(glab_bounded api --hostname "$mr_host" \
+        "merge_requests?scope=created_by_me&state=opened&per_page=100" 2>/dev/null) \
+      || ! printf '%s' "$mr_list" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      mr_unavailable "glab api failed or timed out on $mr_host"
+    else
+      mr_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-mrs.XXXXXX")
+      printf '%s\n%s\n' "$SNAP" "$MODEL" > "$mr_tmp/known"
+      # Uncovered MRs, newest activity first.
+      mr_uncovered=$(printf '%s' "$mr_list" | jq -c --rawfile known "$mr_tmp/known" '
+        def recorded($s): ($s | length) > 0 and
+          any($known | indices($s)[]; ($known[(. + ($s | length)):(. + ($s | length) + 1)] | test("^[0-9]") | not));
+        [ .[] | select(type == "object" and (.iid | type) == "number" and (.project_id | type) == "number"
+                       and ((.web_url // "") | startswith("https://")))
+          | select((recorded(.web_url) or recorded(.references.full // "")) | not) ]
+        | sort_by(.updated_at // "") | reverse')
+      mr_total=$(printf '%s' "$mr_uncovered" | jq 'length')
+      i=0
+      while IFS=$'\t' read -r pid iid; do
+        [ -n "$pid" ] || continue
+        i=$((i + 1))
+        [ "$i" -le "$FM_BEARINGS_MR_DETAIL_MAX" ] || break
+        ( glab_bounded api --hostname "$mr_host" "projects/$pid/merge_requests/$iid" > "$mr_tmp/d-$pid-$iid" 2>/dev/null || rm -f "$mr_tmp/d-$pid-$iid" ) &
+        ( glab_bounded api --hostname "$mr_host" "projects/$pid/merge_requests/$iid/approvals" > "$mr_tmp/a-$pid-$iid" 2>/dev/null || rm -f "$mr_tmp/a-$pid-$iid" ) &
+      done <<EOF
+$(printf '%s' "$mr_uncovered" | jq -r '.[] | "\(.project_id)\t\(.iid)"')
+EOF
+      wait
+      mr_details=$(for f in "$mr_tmp"/d-* "$mr_tmp"/a-*; do
+          [ -f "$f" ] || continue
+          jq -c --arg k "${f##*/}" 'select(type == "object") | {key:$k, value:.}' "$f" 2>/dev/null
+        done | jq -s 'from_entries')
+      [ -n "$mr_details" ] || mr_details='{}'
+      OPEN_MRS=$(printf '%s' "$mr_uncovered" | jq -c --argjson det "$mr_details" --argjson cap "$FM_BEARINGS_MRS" '
+        def merge_state:
+          if .draft == true or .detailed_merge_status == "draft_status" then "draft"
+          elif .has_conflicts == true or .detailed_merge_status == "conflict" then "has conflicts"
+          else ({mergeable:"mergeable", discussions_not_resolved:"threads open", ci_must_pass:"waiting on CI",
+                 ci_still_running:"waiting on CI", not_approved:"needs approval", need_rebase:"needs rebase",
+                 checking:"checking", unchecked:"checking", blocked_status:"blocked by another MR",
+                 not_open:"not open"}[.detailed_merge_status // ""]
+                // ((.detailed_merge_status // "merge state unknown") | gsub("_"; " "))) end;
+        def ci($d):
+          if $d == null then "CI unknown"
+          elif $d.head_pipeline == null then "no CI run"
+          else ({success:"CI passing", failed:"CI failing", canceled:"CI canceled", skipped:"CI skipped",
+                 manual:"CI waiting on a manual job", running:"CI running", pending:"CI pending",
+                 created:"CI pending", preparing:"CI pending", waiting_for_resource:"CI pending"}[$d.head_pipeline.status // ""]
+                // ("CI " + ($d.head_pipeline.status // "unknown"))) end;
+        def approvals($a):
+          if $a == null then "approvals unknown"
+          else ($a.approved_by // [] | length) as $n | "\($n) approval" + (if $n == 1 then "" else "s" end) end;
+        [ .[:$cap][] | "\(.project_id)-\(.iid)" as $id
+          | {key:("mr-" + $id),
+             repo:((.web_url | split("/-/")[0] | split("/") | last) // "-"),
+             title:((.title // "") | if . == "" then "MR !\(.iid)" else . end),
+             url:.web_url,
+             state:([merge_state, ci($det["d-" + $id]), approvals($det["a-" + $id]),
+                     (if .blocking_discussions_resolved == false then "threads open" else "threads resolved" end),
+                     "last activity " + ((.updated_at // "unknown") | .[0:10])]
+                    | reduce .[] as $p ([]; if index([$p]) then . else . + [$p] end) | join(", ")),
+             updated:(.updated_at // "")} ]')
+      rm -rf "$mr_tmp"
+      mr_shown=$(printf '%s' "$OPEN_MRS" | jq 'length')
+      MR_STATUS="checked ($mr_host, $mr_shown open MR(s) no task covers)"
+      if [ "$mr_total" -gt "$mr_shown" ]; then
+        MR_STATUS="checked ($mr_host, showing $mr_shown of $mr_total open MR(s) no task covers)"
+      fi
+    fi
+  fi
+fi
+MODEL=$(printf '%s' "$MODEL" | jq --arg mrs "$MR_STATUS" --argjson open_mrs "$OPEN_MRS" \
+  --argjson include_mrs "$INCLUDE_MRS" --argjson cap "$FM_BEARINGS_MRS" '
+  .omitted as $om
+  | del(.omitted) + {mrs:$mrs}
+  + (if $open_mrs == null then {} else {open_mrs:$open_mrs} end)
+  + {omitted: ($om + (if $include_mrs == 1 then [] else [{surface:"captain'"'"'s open GitLab MRs", reveal:"--include-mrs"}] end))}') \
+  || { echo "fm-bearings-snapshot: MR projection failed" >&2; exit 1; }
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"
