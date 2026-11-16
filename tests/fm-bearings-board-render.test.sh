@@ -689,6 +689,39 @@ test_the_board_lists_every_decision_for_reordering_before_the_cards() {
   pass "the board opens on one reorderable list and deals the cards in the chosen order"
 }
 
+# Pressing down on whichever decision is on top walks the list: the passed-over
+# decisions shunt down together as a block, so the first one never flips back.
+# Each sequence runs in one page on a fresh board, since a reload keeps only
+# the order.
+walk_board() {  # <name> <actions>
+  local home
+  home=$(make_home "reorder-walk-$1")
+  build_call_board "$home" '["k1","k2","k3","k4"]'
+  run_board "$home" "$2"
+}
+
+test_repeated_down_on_the_top_decision_walks_the_list() {
+  local out
+  out=$(walk_board one "down:k1")
+  printf '%s' "$out" | jq -e '.order.list == ["k2","k1","k3","k4"]' >/dev/null \
+    || fail "one press on the top decision did not move it down one: $out"
+  out=$(walk_board two "down:k1,down:k2")
+  printf '%s' "$out" | jq -e '.order.list == ["k3","k1","k2","k4"]' >/dev/null \
+    || fail "a second top press flipped the pair back instead of bringing up the next decision: $out"
+  out=$(walk_board three "down:k1,down:k2,down:k3")
+  printf '%s' "$out" | jq -e '.order.list == ["k4","k1","k2","k3"]' >/dev/null \
+    || fail "a third top press did not bring up the last decision: $out"
+  out=$(walk_board wrap "down:k1,down:k2,down:k3,down:k4,down:k1,go")
+  printf '%s' "$out" | jq -e '
+    .order.list == ["k2","k1","k3","k4"] and (.cards | map(.key)) == ["k2","k1","k3","k4"]
+      and ([.calls[] | select(.data.schema == "fm-bearings-priority.v1") | .data.keys] | last) == ["k2","k1","k3","k4"]
+  ' >/dev/null || fail "a full walk did not wrap to the original order and start over: $out"
+  out=$(walk_board reset "down:k1,down:k3,down:k2")
+  printf '%s' "$out" | jq -e '.order.list == ["k1","k2","k4","k3"]' >/dev/null \
+    || fail "a move lower in the list did not start a new walk from the top: $out"
+  pass "repeated down presses on the top decision walk the list, shunting the passed ones down as a block"
+}
+
 test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh() {
   local home out
   home=$(make_home reorder-answers)
@@ -732,6 +765,7 @@ test_the_order_survives_a_refresh_without_browser_storage() {
 }
 
 test_the_board_lists_every_decision_for_reordering_before_the_cards
+test_repeated_down_on_the_top_decision_walks_the_list
 test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh
 test_the_order_survives_a_refresh_without_browser_storage
 
