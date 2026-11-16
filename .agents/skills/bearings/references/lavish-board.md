@@ -52,6 +52,7 @@ Decision cards otherwise arrive with those choices and a freeform box; the optio
 - Every decision and credential card must state its decision: a `question`, `decide`, or title that asks with a `?` (an in-person action card with `done` and `not-done` options may be imperative), plus its own options or a free-text answer.
   Merge cards and cards answered on their Lavish page are exempt.
   `build` refuses any other card by key and names the missing field, so fix it through the hold reason or a `--copy` overlay rather than shipping a card with no question (`bin/fm-bearings-board.sh` header, EVERY CARD STATES ITS DECISION).
+  The generator gives the cards it makes itself, contribution and review-page cards, a question of their own, so only authored text can be refused.
 - Never author a `reconcile` option: `build` gives every decision card that standard choice and the generator refuses it.
 - The dispatch picker's key `dispatch.charted` comes from the template; a payload never authors it.
 
