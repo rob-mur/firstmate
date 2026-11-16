@@ -11,7 +11,8 @@
 #
 # It builds a board with one card and one in-place page in a scratch home with
 # a stubbed lavish-axi, opens the built file directly, and never touches a Lavish
-# server. It spends no model tokens, so it runs wherever node and a Chrome are
+# server. A second board starts with two cards and is rebuilt to one while
+# open, the way the agent refreshes it after the captain sends an answer. It spends no model tokens, so it runs wherever node and a Chrome are
 # installed and reports a capability skip elsewhere.
 set -u
 
@@ -80,9 +81,12 @@ jq -n '{schema:"fm-bearings-board.v1", home:"browser-home", generated:"2026-08-2
     options:[], allow_freeform:true, pr_url:"https://example.test/o/r/merge_requests/872",
     links:[{url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"}]}]}' \
   > "$home/payload.json"
-PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-  FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
-  "$BOARD" build "$home/payload.json" >/dev/null || fail "the board did not build"
+build_board() {  # [build options] <payload>
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$@" >/dev/null
+}
+build_board "$home/payload.json" || fail "the board did not build"
 [ -f "$home/.lavish/bearings-board.html" ] || fail "the board page was not built"
 
 click_board() {  # <name> <steps>
@@ -119,3 +123,32 @@ printf '%s' "$out" | jq -e '
     and .reloads == 0 and .tabs == 1
 ' >/dev/null || fail "a real header click did not return from a full-screen page to the board home: $out"
 pass "a real header click returns from a full-screen page to the board home"
+
+# After the captain answers a decision and sends it, the agent rebuilds the
+# board without the answered card. When that leaves one decision, the header
+# still brings up the priority list, from the cards and from a shown page,
+# without reloading the board.
+jq '.captains_call += [{key:"mr-873", type:"decision", title:"MR 873", question:"Merge MR 873?", repo:"r", about:"b",
+  options:[], allow_freeform:true, pr_url:"https://example.test/o/r/merge_requests/873"}]' \
+  "$home/payload.json" > "$home/payload-two.json"
+{
+  printf '#!/usr/bin/env bash\n'
+  declare -p home fakebin BOARD
+  declare -f build_board
+  echo "build_board --no-reopen \"\$home/payload.json\""
+} > "$TMP_ROOT/rebuild.sh"
+chmod +x "$TMP_ROOT/rebuild.sh"
+export BOARD_REBUILD="$TMP_ROOT/rebuild.sh"
+for from in cards page; do
+  build_board "$home/payload-two.json" || fail "the two-decision board did not build"
+  if [ "$from" = cards ]; then steps="go,view,rebuild,view,home,view"; else steps="go,view,rebuild,page,view,home,view"; fi
+  out=$(click_board "after-send-$from" "$steps")
+  printf '%s' "$out" | jq -e --arg from "$from" '
+    .views[0].deck and .views[0].cards == 2
+      and .views[1].cards == 1
+      and (if $from == "page" then .views[1].page else .views[1].deck end)
+      and .views[2].main and (.views[2].page | not) and .views[2].list and (.views[2].deck | not)
+      and .views[2].focus == "" and .reloads == 0 and .tabs == 1
+  ' >/dev/null || fail "a real header click after a send left one decision did not show the priority list (from the $from): $out"
+  pass "a real header click after a send left one decision shows the priority list (from the $from)"
+done
