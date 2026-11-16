@@ -325,6 +325,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   border: 2px solid var(--gold-500); border-radius: var(--radius-sm);
   background: var(--gold-100); color: var(--navy-700); font-size: var(--fs-xs); font-weight: 700; }
 .bb-page-unsent.is-visible { display: flex; }
+.bb-page-unsent .fm-btn[hidden] { display: none; }
 .bb-main[hidden], .bb-pageview[hidden], .bb-pageframe[hidden] { display: none; }
 .bb-pageview { max-width: none; margin: 0; padding: 10px 16px 0; }
 .bb-pagebar { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; }
@@ -1447,6 +1448,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     if (p.tab.parentNode) p.tab.parentNode.removeChild(p.tab);
     stopPageWait(id);
     delete unsentPages[id];
+    delete unqueuedForms[id];
     delete pageById[id];
     if (shownPage === id) showPage(null);
     tabsEl.hidden = !Object.keys(pageById).length;
@@ -1524,6 +1526,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   pageUnsent.appendChild(pageSend);
   var pageWaits = {};
   var unsentPages = {};
+  // Pages whose relay reports a changed form it could not queue (lavish-relay.js).
+  var unqueuedForms = {};
   function showPageError(p, msg, retry) {
     pageRetryFn = retry;
     pageErrorText.textContent = "An answer from " + p.title + " " + msg + ". Press Queue again to resend it.";
@@ -1532,10 +1536,19 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   function stopPageWait(id) {
     if (pageWaits[id]) { clearTimeout(pageWaits[id]); delete pageWaits[id]; }
   }
+  function markUnsent(k) {
+    pageById[k].tab.classList.toggle("is-unsent", !!(unsentPages[k] || unqueuedForms[k]));
+  }
   function showUnsent() {
-    var p = shownPage && unsentPages[shownPage] ? pageById[shownPage] : null;
-    pageUnsentText.textContent = p ? "An answer from " + p.title + " is queued but not sent yet." : "";
-    pageUnsent.classList.toggle("is-visible", !!p);
+    var p = shownPage ? pageById[shownPage] : null;
+    var held = !!(p && unsentPages[shownPage]);
+    var forms = !!(p && unqueuedForms[shownPage]);
+    var text = [];
+    if (forms) text.push("A form in " + p.title + " has changes that are not queued. Use the page's own button to queue them.");
+    if (held) text.push("An answer from " + p.title + " is queued but not sent yet.");
+    pageUnsentText.textContent = text.join(" ");
+    pageSend.hidden = !held;
+    pageUnsent.classList.toggle("is-visible", held || forms);
   }
   function pagesInQueue(inQueue) {
     unsentPages = {};
@@ -1543,7 +1556,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       var p = pageById[k];
       var held = inQueue.indexOf(p.frame) >= 0;
       if (held) { unsentPages[k] = true; stopPageWait(k); }
-      p.tab.classList.toggle("is-unsent", held);
+      markUnsent(k);
     });
     showUnsent();
   }
@@ -1629,6 +1642,10 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       sendAll();
     } else if (d.type === "fm-board-page:endPage") {
       endPage(p);
+    } else if (d.type === "fm-board-page:formsUnsent") {
+      if (d.count > 0) unqueuedForms[p.id] = true; else delete unqueuedForms[p.id];
+      markUnsent(p.id);
+      showUnsent();
     } else if (d.type === "fm-board-page:toggleAnnotate") {
       /* Lavish toggles on its own hotkey pressed in this board */
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "i", ctrlKey: true, metaKey: false, bubbles: true, cancelable: true }));

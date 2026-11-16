@@ -10,11 +10,18 @@
  * Lavish's annotate mode cannot reach into this frame either, so while the
  * board says annotate is on, this file takes the clicks itself and passes each
  * note up as an annotation action for the page's agent.
+ * A form the captain changed is queued through the page's own submit handler
+ * before anything is sent, so answers are never left behind in the page.
  * bin/fm-board-page.sh's header owns the contract.
  */
 (function () {
   'use strict';
   if (window.lavish || window.parent === window) return;
+  function tell(msg) {
+    try {
+      window.parent.postMessage(msg, '*');
+    } catch (e) { /* a board that is gone has nothing to receive */ }
+  }
   function post(type, prompt, opts) {
     var o = opts || {};
     var keep = {};
@@ -28,15 +35,160 @@
       var q = o.element.closest('[data-lavish-question]');
       if (q) keep.queueKey = 'question:' + q.getAttribute('data-lavish-question');
     }
-    try {
-      window.parent.postMessage({ type: type, prompt: prompt == null ? '' : String(prompt), opts: keep }, '*');
-    } catch (e) { /* a board that is gone has nothing to receive */ }
+    tell({ type: type, prompt: prompt == null ? '' : String(prompt), opts: keep });
   }
   window.lavish = {
-    queuePrompt: function (prompt, opts) { post('fm-board-page:queuePrompt', prompt, opts); },
-    sendQueuedPrompts: function () { post('fm-board-page:sendQueuedPrompts', ''); },
-    endSession: function () { post('fm-board-page:endPage', ''); }
+    queuePrompt: function (prompt, opts) {
+      formQueued(opts && opts.element);
+      post('fm-board-page:queuePrompt', prompt, opts);
+    },
+    sendQueuedPrompts: function () {
+      if (autoSubmitting) return;
+      flushForms();
+      post('fm-board-page:sendQueuedPrompts', '');
+    },
+    endSession: function () {
+      if (autoSubmitting) return;
+      flushForms();
+      post('fm-board-page:endPage', '');
+    }
   };
+
+  /* CHANGED FORMS. A page form queues its answers only from its own submit
+     button, while a note and Lavish's Send go straight through, so a captain
+     who answered a form and then sent would lose every answer. A form the
+     captain changes is therefore queued by firing a submit event at it, which
+     runs the page's own handler and so queues under the page's own tag and
+     queueKey, replacing any earlier answer. A dispatched submit event never
+     submits the form, so this cannot reload the page. It happens before the
+     relay passes on any send or end, when the captain has stopped changing
+     the form for FLUSH_MS, when the pointer leaves the page, and when the page
+     loses focus, so the answers are queued before Lavish's own Send, which
+     sits outside the page, can be pressed. Any send or end the handler asks
+     for while the relay runs it is dropped: only the captain sends. A form
+     counts as queued when its handler calls queuePrompt while the submit
+     event runs, or later with an element inside the form; a changed form
+     that is not queued within GRACE_MS of its submit is flagged, in the page
+     and to the board, until it is queued or reset. */
+  var FLUSH_MS = 1000;
+  var GRACE_MS = 500;
+  var forms = [];
+  var autoSubmitting = false;
+  var submitting = null;
+  var flushTimer = null;
+  var warnBox = null;
+  var toldUnsent = 0;
+  function formRecord(form, add) {
+    for (var i = 0; i < forms.length; i++) if (forms[i].form === form) return forms[i];
+    if (!add) return null;
+    var rec = { form: form, dirty: false, pending: false, unsent: false, grace: null };
+    forms.push(rec);
+    return rec;
+  }
+  function showUnsentForms() {
+    var n = 0;
+    forms.forEach(function (rec) { if (rec.unsent) n++; });
+    if (n || warnBox) {
+      ensureUi();
+      if (!warnBox) {
+        warnBox = document.createElement('div');
+        warnBox.className = 'unsent';
+        warnBox.setAttribute('role', 'status');
+        root.appendChild(warnBox);
+      }
+      warnBox.textContent = n ? 'Changes in ' + (n === 1 ? 'a form' : n + ' forms') +
+        ' on this page are not queued for the agent. Use the form\'s own button to queue them.' : '';
+      warnBox.hidden = !n;
+    }
+    if (n !== toldUnsent) {
+      toldUnsent = n;
+      tell({ type: 'fm-board-page:formsUnsent', count: n });
+    }
+  }
+  /* dirty: changed since the page last queued it; pending: the relay fired
+     its submit and waits for the queue; unsent: flagged as not queued */
+  function settle(rec) {
+    if (rec.grace) { clearTimeout(rec.grace); rec.grace = null; }
+    rec.dirty = false;
+    rec.pending = false;
+    rec.unsent = false;
+  }
+  function formQueued(el) {
+    var changed = false;
+    forms.forEach(function (rec) {
+      var hit = rec.form === submitting || (!!el && el.nodeType === 1 && rec.form.contains(el));
+      if (!hit || !(rec.dirty || rec.pending || rec.unsent)) return;
+      settle(rec);
+      changed = true;
+    });
+    if (changed) showUnsentForms();
+  }
+  function submitEvent(form) {
+    var button = form.querySelector ? form.querySelector('button[type=submit],input[type=submit],button:not([type])') : null;
+    if (typeof SubmitEvent === 'function') {
+      try {
+        return new SubmitEvent('submit', { bubbles: true, cancelable: true, submitter: button });
+      } catch (e) { /* a submitter the browser will not take */ }
+    }
+    return new Event('submit', { bubbles: true, cancelable: true });
+  }
+  function flushForms() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    forms.slice().forEach(function (rec) {
+      if (!rec.dirty) return;
+      rec.dirty = false;
+      var form = rec.form;
+      if (!document.documentElement.contains(form)) { settle(rec); return; }
+      if (form.checkValidity && !form.checkValidity()) { rec.unsent = true; return; }
+      rec.pending = true;
+      autoSubmitting = true;
+      try {
+        form.dispatchEvent(submitEvent(form));
+      } catch (e) { /* the page's handler failed; the form stays unqueued */ }
+      autoSubmitting = false;
+      if (submitting === form) submitting = null;
+      if (!rec.pending) return;
+      /* a handler may wait before it queues */
+      rec.grace = setTimeout(function () {
+        rec.grace = null;
+        if (!rec.pending) return;
+        rec.pending = false;
+        rec.unsent = true;
+        showUnsentForms();
+      }, GRACE_MS);
+    });
+    showUnsentForms();
+  }
+  function formChanged(ev) {
+    var t = ev.target;
+    if (inUi(ev) || !t || !t.form || t.form.nodeType !== 1) return;
+    var rec = formRecord(t.form, true);
+    rec.dirty = true;
+    rec.pending = false;
+    if (rec.grace) { clearTimeout(rec.grace); rec.grace = null; }
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = setTimeout(flushForms, FLUSH_MS);
+  }
+  document.addEventListener('input', formChanged, true);
+  document.addEventListener('change', formChanged, true);
+  document.addEventListener('reset', function (ev) {
+    var rec = formRecord(ev.target, false);
+    if (rec) { settle(rec); showUnsentForms(); }
+  }, true);
+  /* a submit, the captain's or the relay's, attributes the queuePrompt its
+     handler makes to that form */
+  document.addEventListener('submit', function (ev) {
+    var form = ev.target;
+    submitting = form;
+    setTimeout(function () { if (submitting === form) submitting = null; }, 0);
+  }, true);
+  document.addEventListener('mouseout', function (ev) {
+    if (!ev.relatedTarget) flushForms();
+  }, true);
+  window.addEventListener('blur', function () { flushForms(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') flushForms();
+  });
   /* Keys typed in the page stay in its frame, so pass Esc up for the board to
      leave full screen; a page that handles Esc itself prevents the default. */
   window.addEventListener('keydown', function (ev) {
@@ -108,7 +260,10 @@
       'border-radius:8px;padding:8px;font:13px system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.4)}' +
       '.card p{margin:0 0 6px;opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.card textarea{box-sizing:border-box;width:100%;min-height:64px;font:inherit;resize:vertical}' +
-      '.card div{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}';
+      '.card div{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}' +
+      '.unsent{position:fixed;left:8px;right:8px;bottom:8px;pointer-events:auto;background:#1e1f24;color:#f2f2f2;' +
+      'border:1px solid #f4c95d;border-radius:8px;padding:8px 12px;font:13px system-ui,sans-serif}' +
+      '.unsent[hidden]{display:none}';
     root.appendChild(style);
     mark = document.createElement('div');
     mark.className = 'mark';
@@ -138,7 +293,7 @@
     if (el.id) data.id = el.id;
     if (quote) data.selection = quote;
     post('fm-board-page:queuePrompt', note, { tag: 'annotation', text: said, data: data });
-    if (send) post('fm-board-page:sendQueuedPrompts', '');
+    if (send) window.lavish.sendQueuedPrompts();
   }
   function openCard(el, quote) {
     closeCard();
