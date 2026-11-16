@@ -104,7 +104,7 @@
 # (a decision answered on its page shows only that page link).
 #
 # EVERY CARD STATES ITS DECISION. After the hygiene drop above and before the
-# board is touched, build refuses any Captain's Call card that does not say
+# board is touched, build checks that each Captain's Call card says
 # what the captain is deciding: a card needs a prompt that asks - its
 # `question` or `decide` carries a `?`, or its title does - and a way to answer
 # it, at least one option of its own besides the injected reconcile choice or a
@@ -120,10 +120,13 @@
 # prompt and a way to answer. The booleans `free_text`, `no_link`,
 # `options_inferred` and `from_status` are optional. Exempt are a merge card (its type is the
 # question) and a page-backed card, one carrying `off_board` or with no options
-# and a Lavish page link, whose decision is on that page. Each refused card is
-# named on stderr as an `undecided-card: <key>: missing <field> (<why>)` line
-# and the final refusal repeats them, so the payload can be fixed; a refused
-# card is never rendered and never silently dropped.
+# and a Lavish page link, whose decision is on that page. A card that fails is
+# flagged, never refused and never silently dropped: it is named on stderr as
+# an `undecided-card: <key>: missing <field> (<why>)` line plus one summary
+# line, it still renders, and it carries that `missing ...` text as `problem`,
+# which the board shows on the card as needing a fix, so the payload can be
+# fixed while every other card still builds. `problem` is the build's own: an
+# authored one is cleared.
 #
 # The validator's reservation scope must equal the adapter's reconcile
 # classification scope, which is all card types because the captured payload
@@ -362,6 +365,7 @@ validate_payload() {  # <data.json>
       and (optional_string("about"))
       and (optional_string("question"))
       and (optional_string("malformed"))
+      and (optional_string("problem"))
       and (optional_string("decide"))
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))
@@ -472,6 +476,16 @@ undecided_cards() {  # <data.json>
     | select(length > 0)
     | "\($key): missing \(join(", "))"
   ' "$1"
+}
+
+# Put each undecided card's `<key>: <missing fields>` line on that card as its
+# `problem`, which the board shows on the card, and clear any other `problem`:
+# the flag is the build's own, never authored.
+flag_undecided() {  # <undecided-lines>  (payload on stdin)
+  jq -c --arg lines "$1" '
+    ( [ $lines | split("\n")[] | select(length > 0) | index(": ") as $i
+        | {key: .[:$i], value: .[($i + 2):]} ] | from_entries ) as $why
+    | .captains_call |= map(if $why[.key] != null then .problem = $why[.key] else del(.problem) end)'
 }
 
 # Every live page registered through bin/fm-board-page.sh, oldest first, as the
@@ -759,9 +773,12 @@ command_build() {
   undecided=$(undecided_cards "$effective") \
     || { rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot check the Captain's Call cards: $data"; }
   if [ -n "$undecided" ]; then
-    rm -f -- "$effective"; rm -rf -- "$stage"
     printf '%s\n' "$undecided" | sed 's/^/undecided-card: /' >&2
-    fail "refusing Captain's Call cards with no explicit decision - $(printf '%s' "$undecided" | paste -sd ';' - | sed 's/;/; /g'): $data"
+    printf 'fm-bearings-board: flagged Captain'"'"'s Call cards with no explicit decision - %s: %s\n' \
+      "$(printf '%s' "$undecided" | paste -sd ';' - | sed 's/;/; /g')" "$data" >&2
+  fi
+  if ! json=$(flag_undecided "$undecided" < "$effective") || ! printf '%s\n' "$json" > "$effective"; then
+    rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot flag the Captain's Call cards: $data"
   fi
   # Only a card that links a Lavish page needs the server's session listing.
   sessions='{}'
