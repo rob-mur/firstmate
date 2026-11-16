@@ -49,7 +49,8 @@
 #                      snapshot row's `pr_url`), and a
 #                      derived default choices (bin/fm-bearings-question-lib.sh: the
 #                      reason's own numbered, lettered or listed options in full, a two-way
-#                      or, yes/no, else approve/decline; an authored overlay `options` still
+#                      or, yes/no, done/not done for an action the captain performs, else
+#                      approve/decline; an authored overlay `options` still
 #                      wins) with reconcile secondary. Options the text refers to but does
 #                      not list ("A/B/C") come from its other listing or its `reason_earlier`
 #                      lines; when none lists them the card carries `malformed`, a sentence
