@@ -319,6 +319,12 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 .bb-tab.is-active { color: var(--white); background: var(--navy-600); border-color: var(--ink-900); }
 .bb-tab.is-new::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px;
   border-radius: 999px; background: var(--rust-500); vertical-align: 1px; }
+.bb-tab.is-unsent::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px;
+  border-radius: 999px; background: var(--gold-500); vertical-align: 1px; }
+.bb-page-unsent { display: none; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; padding: 8px 12px;
+  border: 2px solid var(--gold-500); border-radius: var(--radius-sm);
+  background: var(--gold-100); color: var(--navy-700); font-size: var(--fs-xs); font-weight: 700; }
+.bb-page-unsent.is-visible { display: flex; }
 .bb-main[hidden], .bb-pageview[hidden], .bb-pageframe[hidden] { display: none; }
 .bb-pageview { max-width: none; margin: 0; padding: 10px 16px 0; }
 .bb-pagebar { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; }
@@ -414,6 +420,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-page-end">End this page</button>
   </div>
   <div class="bb-submit-error" id="bb-page-error" role="alert"></div>
+  <div class="bb-page-unsent" id="bb-page-unsent" role="status"></div>
   <div id="bb-pageframes"></div>
 </section>
 
@@ -1252,6 +1259,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       try { var n = document.querySelector(sel); if (n) inQueue.push(n); } catch (e) { /* bad selector */ }
     });
     lastAnchorEls = inQueue;
+    pagesInQueue(inQueue);
     Object.keys(targets).forEach(function (id) {
       var t = targets[id];
       var state = t.hidden.value;
@@ -1402,12 +1410,15 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       if (k === id) p.tab.classList.remove("is-new");
     });
     pageTitleEl.textContent = id ? pageById[id].title : "";
+    showUnsent();
   }
   function dropPage(id) {
     var p = pageById[id];
     if (!p) return;
     if (p.frame.parentNode) p.frame.parentNode.removeChild(p.frame);
     if (p.tab.parentNode) p.tab.parentNode.removeChild(p.tab);
+    stopPageWait(id);
+    delete unsentPages[id];
     delete pageById[id];
     if (shownPage === id) showPage(null);
     tabsEl.hidden = !Object.keys(pageById).length;
@@ -1462,7 +1473,12 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     Object.keys(pageById).forEach(function (k) { tellAnnotate(pageById[k].frame); });
   });
   /* A page answer Lavish cannot take shows an error under the page bar with
-     a button that queues the same answer again, never a silent drop. */
+     a button that queues the same answer again, never a silent drop. Like a
+     card's answer, a page answer counts as queued only once Lavish's queue
+     report lists the page's frame (onAnchors); no report within CONFIRM_MS
+     shows the same error. While the frame holds an answer Lavish has not
+     sent, the page view says so with a button that sends the queue, and the
+     page's tab carries a mark, so an answer is never left unsent unseen. */
   var pageError = document.getElementById("bb-page-error");
   var pageErrorText = el("span", "bb-submit-error__text");
   var pageRetry = el("button", "fm-btn fm-btn--sm", "Queue again");
@@ -1471,6 +1487,46 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   pageRetry.addEventListener("click", function () { if (pageRetryFn) pageRetryFn(); });
   pageError.appendChild(pageErrorText);
   pageError.appendChild(pageRetry);
+  var pageUnsent = document.getElementById("bb-page-unsent");
+  var pageUnsentText = el("span", "bb-page-unsent__text");
+  var pageSend = el("button", "fm-btn fm-btn--sm fm-btn--gold", "Send to agent");
+  pageSend.type = "button";
+  pageSend.addEventListener("click", function () { sendAll(); });
+  pageUnsent.appendChild(pageUnsentText);
+  pageUnsent.appendChild(pageSend);
+  var pageWaits = {};
+  var unsentPages = {};
+  function showPageError(p, msg, retry) {
+    pageRetryFn = retry;
+    pageErrorText.textContent = "An answer from " + p.title + " " + msg + ". Press Queue again to resend it.";
+    pageError.classList.add("is-visible");
+  }
+  function stopPageWait(id) {
+    if (pageWaits[id]) { clearTimeout(pageWaits[id]); delete pageWaits[id]; }
+  }
+  function showUnsent() {
+    var p = shownPage && unsentPages[shownPage] ? pageById[shownPage] : null;
+    pageUnsentText.textContent = p ? "An answer from " + p.title + " is queued but not sent yet." : "";
+    pageUnsent.classList.toggle("is-visible", !!p);
+  }
+  function pagesInQueue(inQueue) {
+    unsentPages = {};
+    Object.keys(pageById).forEach(function (k) {
+      var p = pageById[k];
+      var held = inQueue.indexOf(p.frame) >= 0;
+      if (held) { unsentPages[k] = true; stopPageWait(k); }
+      p.tab.classList.toggle("is-unsent", held);
+    });
+    showUnsent();
+  }
+  function awaitPageQueued(p, retry) {
+    stopPageWait(p.id);
+    if (lastAnchorEls && lastAnchorEls.indexOf(p.frame) >= 0) return;
+    pageWaits[p.id] = setTimeout(function () {
+      delete pageWaits[p.id];
+      if (pageById[p.id] === p) showPageError(p, "may not be queued: Lavish did not confirm it", retry);
+    }, CONFIRM_MS);
+  }
   function queueForPage(p, tag, prompt, opts, retry) {
     var lavish = window.lavish, why = "";
     var o = opts && typeof opts === "object" ? opts : {};
@@ -1487,14 +1543,14 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
         });
       } catch (e) { why = "Lavish refused it (" + (e && e.message ? e.message : String(e)) + ")"; }
     }
+    var again = retry || function () { queueForPage(p, tag, prompt, opts); };
     if (!why) {
       pageRetryFn = null;
       pageError.classList.remove("is-visible");
+      awaitPageQueued(p, again);
       return true;
     }
-    pageRetryFn = retry || function () { queueForPage(p, tag, prompt, opts); };
-    pageErrorText.textContent = "An answer from " + p.title + " was not queued: " + why + ". Press Queue again to resend it.";
-    pageError.classList.add("is-visible");
+    showPageError(p, "was not queued: " + why, again);
     return false;
   }
   function sendAll() {
