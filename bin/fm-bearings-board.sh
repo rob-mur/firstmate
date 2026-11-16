@@ -147,6 +147,12 @@
 # session the listing no longer shows (an ended standalone page) resolves only
 # when a live page record names it in `replaces` (bin/fm-board-page.sh open
 # --replaces), which maps that old session URL to the registered page.
+# A decision card MAY carry `off_board`, an object of `question`, `about`,
+# `freeform_hint`, `malformed` (strings) and `allow_freeform` (boolean): what
+# the card shows when the page it is answered on is not in the board. When a
+# card link resolves to a board page, build drops `off_board` so the page
+# answers it; otherwise build merges those fields into the card, so the
+# question still reaches the captain and the answer the asking home.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation keeps the same Lavish session URL and the same canonical
@@ -322,6 +328,13 @@ validate_payload() {  # <data.json>
           and (.recommend_value as $recommend
             | ([.options[].value] | index($recommend) != null))))
       and ([.options[].value] | index("reconcile") == null)
+      and ((has("off_board") | not)
+        or (.off_board
+          | type == "object"
+            and ((keys - ["question", "about", "freeform_hint", "malformed", "allow_freeform"]) | length == 0)
+            and optional_string("question") and optional_string("about")
+            and optional_string("freeform_hint") and optional_string("malformed")
+            and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))))
       and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
       type == "object" and repo_marker and name_marker and (.id | nonempty_string)
@@ -426,7 +439,11 @@ resolve_page_links() {  # <pages-json> <sessions-json>
              else label_of + {not_in_board: true} end)
         else . end;
     . + {pages: ($pages | map(del(.replaces)))}
-    | .captains_call |= map(if has("links") then .links |= map(resolve) else . end)'
+    | .captains_call |= map(
+        (if has("links") then .links |= map(resolve) else . end)
+        | if has("off_board") then
+            (if any((.links // [])[]; has("page")) then . else . + .off_board end) | del(.off_board)
+          else . end)'
 }
 
 # --- Lavish session liveness -------------------------------------------------

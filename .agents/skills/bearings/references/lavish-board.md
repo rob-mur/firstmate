@@ -83,6 +83,7 @@ A skill from another repository finds it as the `fm-board-page` command that `bi
 Each live page gets a tab in the board header; the captain opens it in place and returns with "Back to board" or the bearings header.
 "Full screen" fills the window with the open page without reloading it, and the same button or Esc leaves it.
 A card link to a Lavish page opens the matching registered page in place too, and a card whose page is not registered says it is not in the board yet; the board never links out to a Lavish session, and the `build` header owns how a link finds its page.
+A decision answered on a page the board does not have shows its question, says its choices are on that page, and takes a free-text answer, so it is still answered from the board; the `build` header owns that fallback.
 "End this page" ends only that page; ending the board's Lavish session ends every page.
 One refresh policy covers the whole app: no frame ever reloads, and the board and each page poll their own data file and patch in place.
 A page's actions ride the board's Lavish session as rows tagged `page`, and the process-event runner routes them to that page's agent before publishing the result, so a board result holding only routed page actions raises no wake.
