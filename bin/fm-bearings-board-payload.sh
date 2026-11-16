@@ -20,8 +20,10 @@
 # Stale rows never reach Captain's Call:
 #   - a hold deferred to a later date (hold_until after today, or fleet bucket
 #     `dated`), from any home, is charted with `until <date>: <reason>` instead;
-#   - a card whose every PR/MR (recorded, named in its reason, or its snapshot
-#     pr_url) merged or closed is dropped, as is a contribution card whose PR did;
+#   - a merge-ask card (is_merge_ask in bin/fm-bearings-question-lib.sh) whose
+#     every PR/MR (recorded, named in its reason, or its snapshot pr_url) merged
+#     or closed is dropped, as is a contribution card whose PR did; any other
+#     question stays, since a merged link does not answer it;
 #     a review card (is_review in bin/fm-bearings-question-lib.sh) is also
 #     dropped once the captain approved every open one (fm_pr_viewer_approved in
 #     bin/fm-pr-lib.sh), because the review it asked for is given. Landed artifacts count as
@@ -405,7 +407,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | ($d.owner // "(main)") as $o
       | ($id | round_of) as $r
       | $id != "" and any($known[]; .o == $o and .r.b == $r.b and .r.n > $r.n);
-    ( [ $held[] | select((pr_finished(row_urls(.); is_review(.)) or superseded(.)) | not) ] ) as $held
+    ( [ $held[] | select(((is_merge_ask(.) and pr_finished(row_urls(.); is_review(.))) or superseded(.)) | not) ] ) as $held
   # A status decision row (source "status") carries the asking task or home as its
   # title; the card title says what the question is instead.
   | def short_text_n($n):

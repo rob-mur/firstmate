@@ -799,12 +799,57 @@ test_a_card_whose_pr_merged_or_closed_leaves_the_board() {
         {task: "ext", url: "https://github.com/acme/ext/pull/11", kind: "pr", reason: "checks green; merge approval needed"}]' \
     "$TMP_ROOT/live-pr-base.json" > "$snap"
   p=$(FORGE_DIR="$fd" FM_BEARINGS_BOARD_PR_TIMEOUT=1 "$GEN" --snapshot "$snap") || fail "the generator failed"
-  assert_equals "old-row,op,slow,lk" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
-    "a card whose PR or MR merged or closed leaves, and an open, slow or unreadable one stays"
+  assert_equals "alpha-fix,old-row,op,slow,lk" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "a merge ask whose PR or MR merged or closed leaves, and an open, slow or unreadable one or a non-merge question stays"
   p=$(FORGE_DIR="$fd" FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$snap") || fail "the generator failed with the check off"
   assert_equals "alpha-fix,old-row,gl,fj,op,slow,lk,contribution.ext" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
     "with the live check off every card stays"
   pass "the board drops cards whose PR or MR merged or closed and keeps a card when the lookup fails"
+}
+
+# A merged PR settles a question only when the question was whether to merge
+# it. A hold or status question asked after the merge (apply the plan, delete
+# old jobs) stays, even when every PR it links or inherits merged.
+test_a_question_after_a_merge_stays_and_a_stale_merge_ask_leaves() {
+  local snap="$TMP_ROOT/post-merge.json" fd="$TMP_ROOT/forge-post-merge" p
+  fresh_homes post-merge
+  mkdir -p "$fd"
+  for n in 13 18 19 65 68; do printf 'state=MERGED\nmerged=true\n' > "$fd/github-acme-run-$n"; done
+  write_snapshot "$TMP_ROOT/post-merge-base.json"
+  jq '.decisions_open = [
+        {id: "apply-plan", key: "apply-plan", verb: "captain-hold", title: "Approve the pinned plan", owner: "(main)",
+         reason: "Should the worker apply the lock-fix plan? PR 68 is merged but not yet applied to the cluster.",
+         pr_url: "https://github.com/acme/run/pull/68",
+         choices: {options: [{value: "a", label: "Apply the pinned plan"}, {value: "c", label: "Do not apply yet"}],
+                   links: [{target: "https://github.com/acme/run/pull/68", label: "PR 68"}], free_text: true, no_link: false}},
+        {id: "old-jobs", key: "old-jobs", verb: "captain-hold", title: "Bulk-delete old runner Jobs", owner: "(main)",
+         reason: "About 850 old Jobs predate the new dispatcher. Delete them in bulk? (a) yes, delete them (b) no, leave them.",
+         pr_url: "https://github.com/acme/run/pull/65",
+         choices: {options: [{value: "a", label: "Yes, delete them"}, {value: "b", label: "No, leave them"}],
+                   links: [], free_text: true, no_link: true}},
+        {id: "runner/plan", key: "status.runner.plan", verb: "needs-decision", source: "status", task: "runner", decision_key: "plan", owner: "(main)",
+         title: "runner", reason: "Pinned plan changes only the ConfigMap, exactly the PR 68 diff. Apply exactly the saved pinned plan?",
+         pr_url: "https://github.com/acme/run/pull/68"},
+        {id: "merge-run", key: "merge-run", verb: "captain-hold", title: "Merge the runner PRs", owner: "(main)",
+         reason: "Merge these green PRs in order: first PR 19 https://github.com/acme/run/pull/19, then PR 18 https://github.com/acme/run/pull/18?",
+         choices: {options: [{value: "both", label: "Merge 19 and 18"}, {value: "none", label: "Merge none for now"}],
+                   links: [], free_text: false, no_link: false}},
+        {id: "order-run", key: "order-run", verb: "captain-hold", title: "Runner PR order", owner: "(main)",
+         reason: "Two runner PRs are green. Which order?", pr_url: "https://github.com/acme/run/pull/13",
+         choices: {options: [{value: "a", label: "Merge 13 first"}, {value: "b", label: "Merge 18 first"}],
+                   links: [], free_text: false, no_link: false}},
+        {id: "runner/merge", key: "status.runner.merge", verb: "needs-decision", source: "status", task: "runner", decision_key: "merge", owner: "(main)",
+         title: "runner", reason: "checks green; merge https://github.com/acme/run/pull/65 now?"}]' \
+    "$TMP_ROOT/post-merge-base.json" > "$snap"
+  p=$(FORGE_DIR="$fd" "$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "apply-plan,old-jobs,status.runner.plan" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "a question asked after its PR merged left the board, or a stale merge ask stayed"
+  assert_equals "Apply the pinned plan|Do not apply yet" \
+    "$(jq -r '.captains_call[] | select(.key == "apply-plan") | [.options[].label] | join("|")' <<<"$p")" \
+    "a post-merge hold lost its recorded choices"
+  printf '%s\n' "$p" > "$TMP_ROOT/post-merge-payload.json"
+  validates "$TMP_ROOT/post-merge-payload.json" || fail "a payload with post-merge questions did not satisfy the board validator"
+  pass "a question asked after a merge stays on the board, and only a merge ask whose PRs all merged leaves"
 }
 
 test_announcements_and_time_gates_are_not_calls_and_a_real_question_stays() {
@@ -1268,6 +1313,7 @@ fm_test_run \
   test_default_choices_match_the_question_asked \
   test_action_card_answers_reach_the_intake_as_the_captains_report \
   test_a_card_whose_pr_merged_or_closed_leaves_the_board \
+  test_a_question_after_a_merge_stays_and_a_stale_merge_ask_leaves \
   test_announcements_and_time_gates_are_not_calls_and_a_real_question_stays \
   test_page_live_lines_fold_their_links_into_the_mr_card \
   test_a_secondmate_dated_hold_is_charted_with_its_date \
