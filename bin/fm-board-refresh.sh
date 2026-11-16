@@ -25,6 +25,13 @@
 # task inbox (bin/fm-send.sh), each task cleanup (bin/fm-teardown.sh), and each
 # main wake drain (bin/fm-wake-drain.sh).
 #
+# A board is built only by its own home's code. When $FM_HOME carries its own
+# bin/fm-board-refresh.sh and that is not this file, this script runs that one
+# in its place, before anything else. A kick forwarded from a secondmate on
+# another release, or any caller from another code root, therefore never
+# rewrites the board page with another template: Lavish reloads the board, and
+# every page frame in it, each time that page file changes.
+#
 # Requests are never dropped, only coalesced:
 #   - each request marks state/.board-refresh.pending; a mkdir lock under state/
 #     lets one refresher run at a time, and it keeps rebuilding until no request
@@ -73,6 +80,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+if [ -x "$FM_HOME/bin/fm-board-refresh.sh" ] && [ ! "$FM_HOME/bin/fm-board-refresh.sh" -ef "${BASH_SOURCE[0]}" ]; then
+  exec "$FM_HOME/bin/fm-board-refresh.sh" "$@"
+fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 BOARD="$FM_HOME/.lavish/bearings-board.html"
 LOCK="$STATE/.board-refresh.lock"

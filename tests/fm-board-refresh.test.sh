@@ -595,6 +595,52 @@ test_new_board_code_is_installed_with_an_unchanged_fleet() {
   pass "new board code is installed on the next refresh even when the fleet has not moved"
 }
 
+# A home that carries its own Firstmate code, as the main home does, has its
+# board built by that code alone. Another code root that asks for a refresh,
+# such as a secondmate on an older or newer release forwarding its kick, must
+# not rewrite the board page with its own template: Lavish reloads the whole
+# board, and every page frame in it, whenever that file changes.
+make_code_home() {  # <name>
+  local home
+  home=$(make_home "$1")
+  cp -R "$ROOT/bin" "$home/bin"
+  mkdir -p "$home/.agents/skills"
+  cp -R "$ROOT/.agents/skills/bearings" "$home/.agents/skills/bearings"
+  awk '{ print } $0 == "<body>" { print "<!-- this home'"'"'s own board code -->" }' \
+    "$ROOT/.agents/skills/bearings/assets/board-template.html" > "$home/template.tmp"
+  mv "$home/template.tmp" "$home/.agents/skills/bearings/assets/board-template.html"
+  printf '%s\n' "$home"
+}
+
+test_a_home_board_is_built_by_its_own_code_whoever_asks() {
+  local parent mate
+  parent=$(make_code_home code-parent)
+  in_home "$parent" "$parent/bin/fm-bearings-board-payload.sh" > "$parent/payload.json" || fail "payload failed"
+  in_home "$parent" "$parent/bin/fm-bearings-board.sh" build "$parent/payload.json" >/dev/null \
+    || fail "the board did not build"
+  grep -q "this home's own board code" "$parent/.lavish/bearings-board.html" \
+    || fail "the fixture board does not carry its home's own markup"
+  in_home "$parent" "$parent/bin/fm-board-refresh.sh" || fail "baseline refresh failed"
+  cp "$parent/.lavish/bearings-board.html" "$parent/page-before.html"
+  cp "$parent/.lavish/bearings-board.app.js" "$parent/app-before.js"
+  mate=$(make_mate_home code-mate "$parent")
+  add_task "$parent" t1
+  in_home "$mate" "$REFRESH" --kick || fail "the secondmate kick failed"
+  await_rebuilds "$parent" 2 || fail "a secondmate kick did not refresh the parent board"
+  grep -q 't1' "$parent/.lavish/bearings-board.data.js" || fail "the forwarded refresh did not read the fleet"
+  cmp -s "$parent/page-before.html" "$parent/.lavish/bearings-board.html" \
+    || fail "a kick from another code root rewrote the board page, which reloads every page in it"
+  cmp -s "$parent/app-before.js" "$parent/.lavish/bearings-board.app.js" \
+    || fail "a kick from another code root replaced the board code"
+  add_task "$parent" t2
+  in_home "$parent" "$REFRESH" --force || fail "a direct refresh from another code root failed"
+  await_rebuilds "$parent" 3 || fail "a direct refresh from another code root did not refresh the board"
+  grep -q 't2' "$parent/.lavish/bearings-board.data.js" || fail "the direct refresh did not read the fleet"
+  cmp -s "$parent/page-before.html" "$parent/.lavish/bearings-board.html" \
+    || fail "a refresh run from another code root rewrote the board page"
+  pass "a home's board is built by its own code, whichever code root asks for the refresh"
+}
+
 fm_test_run \
   test_a_home_without_a_board_is_left_alone \
   test_the_board_is_rebuilt_only_when_fleet_state_changes \
@@ -616,4 +662,5 @@ fm_test_run \
   test_an_answered_hold_ranked_first_never_returns_as_a_card \
   test_a_done_task_ranked_first_never_renders_as_a_card \
   test_a_secondmate_change_refreshes_the_parent_board \
-  test_new_board_code_is_installed_with_an_unchanged_fleet
+  test_new_board_code_is_installed_with_an_unchanged_fleet \
+  test_a_home_board_is_built_by_its_own_code_whoever_asks
