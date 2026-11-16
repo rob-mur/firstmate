@@ -1171,7 +1171,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     });
   }
   function showStep() {
-    var ordering = !orderConfirmed && orderKeys.length > 1;
+    var ordering = !orderConfirmed && orderKeys.length > 0;
     orderPanel.hidden = !ordering;
     callWrap.hidden = ordering;
     reorderBtn.hidden = orderKeys.length < 2;
@@ -1610,14 +1610,15 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   });
   /* The brand returns to the board's home view from anywhere in place: it
      leaves a shown page (and full screen) and goes back to the priority list
-     when there is one. It is a native button, so Lavish annotate mode lets it
-     act, and it never loads a page into this frame. A click leaves focus on the
-     button, which would keep the reader from ever counting as idle, so it lets
-     go of focus. */
+     whenever a decision is waiting, even a single one - a send the agent
+     answers by refreshing the board often leaves just one. It is a native
+     button, so Lavish annotate mode lets it act, and it never loads a page
+     into this frame. A click leaves focus on the button, which would keep
+     the reader from ever counting as idle, so it lets go of focus. */
   function goHome() {
     try { document.getElementById("bb-brand").blur(); } catch (e) { /* no focus to drop */ }
     showPage(null);
-    if (orderKeys.length > 1) backToList();
+    if (orderKeys.length) backToList();
     try { window.scrollTo(0, 0); } catch (e) { /* no scrolling */ }
   }
   document.getElementById("bb-brand").addEventListener("click", goHome);
