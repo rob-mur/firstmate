@@ -319,7 +319,8 @@
 #     already removed it). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
+#     walking the worktree's file tree), or via /proc/<pid>/cwd when the lsof
+#     on PATH is BusyBox's option-ignoring applet, and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
@@ -2408,15 +2409,57 @@ conclude_task_no_mistakes_run() {  # <worktree>
   return 1
 }
 
+# 0 when the lsof on PATH is BusyBox's applet. That applet ignores every
+# option, prints its own `pid<TAB>exe<TAB>fd<TAB>target` table of open fds and
+# never reports a working directory, so its output can answer no cwd question
+# (observed 2026-11-16: a Nix autobin shim resolving lsof to busybox made every
+# teardown refuse on the unparseable table).
+lsof_is_busybox() {
+  local path resolved
+  path=$(command -v lsof 2>/dev/null) || return 1
+  resolved=$(readlink -f -- "$path" 2>/dev/null) || resolved=$path
+  case "${resolved##*/}" in busybox|busybox.*) return 0 ;; esac
+  return 1
+}
+
+# The /proc form of the cwd scan, used when lsof is BusyBox's: prints each pid
+# whose cwd link resolves to $1 or under it. A process that exits mid-scan or
+# belongs to another user (unreadable link, and unsignalable by this script
+# anyway) is skipped, as an unprivileged lsof would; an unreadable proc root or
+# any other readlink error fails the scan.
+pids_with_cwd_under_proc() {  # <canonical-dir>
+  perl -e '
+    my ($root, $dir, @skip) = @ARGV;
+    my %skip = map { $_ => 1 } grep { length } @skip;
+    opendir(my $d, $root) or exit 2;
+    for my $pid (readdir $d) {
+      next unless $pid =~ /\A[0-9]+\z/;
+      next if $skip{$pid};
+      my $cwd = readlink("$root/$pid/cwd");
+      if (!defined $cwd) {
+        next if $!{ENOENT} || $!{ESRCH} || $!{EACCES} || $!{EPERM};
+        exit 3;
+      }
+      print "$pid\n" if $cwd eq $dir || index($cwd, "$dir/") == 0;
+    }
+  ' "${FM_PROC_ROOT_OVERRIDE:-/proc}" "$1" "$$" "${BASHPID:-}"
+}
+
 # Fix 2 (see script header): pids of every process whose CURRENT WORKING
 # DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
 # -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output when
-# nothing matches; failure means the scan could not establish a safe result.
+# documents as slow), or the /proc equivalent when lsof is BusyBox's. Never
+# $$ (this script's own pid). Empty output when nothing matches; failure
+# means the scan could not establish a safe result.
 pids_with_cwd_under() {  # <dir>
   local dir=$1 out pid path line
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   dir=$(cd "$dir" && pwd -P) || return 1
+  if lsof_is_busybox; then
+    pids_with_cwd_under_proc "$dir" && return 0
+    echo "teardown: lsof on PATH is BusyBox's, which cannot report working directories, and the ${FM_PROC_ROOT_OVERRIDE:-/proc} scan failed" >&2
+    return 1
+  fi
   out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
