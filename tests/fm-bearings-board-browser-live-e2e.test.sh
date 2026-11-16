@@ -129,7 +129,7 @@ pass "a real header click returns from a full-screen page to the board home"
 # still brings up the priority list, from the cards and from a shown page,
 # without reloading the board.
 jq '.captains_call += [{key:"mr-873", type:"decision", title:"MR 873", question:"Merge MR 873?", repo:"r", about:"b",
-  options:[], allow_freeform:true, pr_url:"https://example.test/o/r/merge_requests/873"}]' \
+  options:[], allow_freeform:true, free_text:true, pr_url:"https://example.test/o/r/merge_requests/873"}]' \
   "$home/payload.json" > "$home/payload-two.json"
 {
   printf '#!/usr/bin/env bash\n'
