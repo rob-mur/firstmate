@@ -5556,6 +5556,97 @@ EOF
   pass "an erroring lsof scan refuses teardown and preserves the task"
 }
 
+# fakebin/lsof as BusyBox's applet: a symlink resolving to a binary named
+# busybox that ignores every option and prints its own fd table, exiting 0 -
+# the shape a Nix autobin shim gave teardown on 2026-11-16.
+add_busybox_lsof() {
+  local case_dir=$1
+  mkdir -p "$case_dir/busybox-bin"
+  cat > "$case_dir/busybox-bin/busybox" <<'SH'
+#!/usr/bin/env bash
+printf '1\t/sbin/init\t0\t/dev/null\n1\t/sbin/init\t3\tsocket:[10232]\n'
+SH
+  chmod +x "$case_dir/busybox-bin/busybox"
+  ln -sf "$case_dir/busybox-bin/busybox" "$case_dir/fakebin/lsof"
+}
+
+test_busybox_lsof_reaps_leaked_process_from_proc() {
+  local case_dir rc pid
+  if [ ! -d /proc/self ]; then
+    pass "busybox lsof reap via /proc (skipped: no /proc on this host)"
+    return 0
+  fi
+  case_dir=$(make_case busybox-lsof-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  add_busybox_lsof "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "busybox-lsof-reap: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "busybox-lsof-reap: leaked worktree process survived teardown"
+  fi
+  expect_code 0 "$rc" "busybox-lsof-reap: teardown should succeed with a busybox lsof"
+  assert_grep "reaping leaked worktree process(es) for task-x1: $pid" "$case_dir/stderr" \
+    "busybox-lsof-reap: teardown did not reap the leaked process found through /proc"
+  pass "a busybox lsof falls back to /proc and reaps a leaked worktree process"
+}
+
+test_busybox_lsof_with_no_process_under_worktree_proceeds() {
+  local case_dir rc
+  case_dir=$(make_case busybox-lsof-clean)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  add_busybox_lsof "$case_dir"
+  mkdir -p "$case_dir/fake-proc/424242" "$case_dir/elsewhere"
+  ln -s "$case_dir/elsewhere" "$case_dir/fake-proc/424242/cwd"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "busybox-lsof-clean: teardown should succeed when no process is under the worktree"
+  if grep -q "REFUSED\|reaping leaked" "$case_dir/stderr"; then
+    fail "busybox-lsof-clean: teardown refused or reaped with no process under the worktree"
+  fi
+  assert_absent "$case_dir/state/task-x1.meta" "busybox-lsof-clean: teardown left task metadata"
+  pass "a busybox lsof with no process under the worktree proceeds with cleanup"
+}
+
+test_busybox_lsof_unreadable_proc_refuses() {
+  local case_dir rc
+  case_dir=$(make_case busybox-lsof-no-proc)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  add_busybox_lsof "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "busybox-lsof-no-proc: teardown should refuse"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1" "$case_dir/stderr" \
+    "busybox-lsof-no-proc: teardown did not explain the refusal"
+  assert_grep "lsof on PATH is BusyBox's" "$case_dir/stderr" \
+    "busybox-lsof-no-proc: teardown did not name the busybox lsof"
+  assert_present "$case_dir/wt" "busybox-lsof-no-proc: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "busybox-lsof-no-proc: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "busybox-lsof-no-proc: teardown returned the worktree"
+  pass "a busybox lsof with an unreadable /proc refuses teardown and preserves the task"
+}
+
 test_reused_pid_identity_is_not_force_killed() {
   local case_dir rc pid
   case_dir=$(make_case reused-pid-identity)
@@ -6787,6 +6878,9 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
+test_busybox_lsof_reaps_leaked_process_from_proc
+test_busybox_lsof_with_no_process_under_worktree_proceeds
+test_busybox_lsof_unreadable_proc_refuses
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
