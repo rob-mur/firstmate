@@ -93,7 +93,9 @@
 # (return-catchup) gate row naming the blockers left to clear or the reason the
 # catch-up was retained. Reporting is not ordinary captain work, so the gate never
 # suppresses the digest; an ACTIVE away window still refuses, because the right
-# answer there is to run the return first. bin/fm-afk-return.sh owns the gate.
+# answer to a chat bearings read there is to run the return first. The board
+# build passes --during-away to read through an active away window instead,
+# because the captain reads the board while away. bin/fm-afk-return.sh owns the gate.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
@@ -119,6 +121,7 @@
 #   --all-recorded-prs include every locally recorded PR
 #   --all-unhealthy  include every unhealthy endpoint
 #   --all-pr-repos   query every discovered repository under --include-prs
+#   --during-away    build during an active away window instead of refusing (board)
 #   -h,--help        usage
 #
 # Output contract: `fm-bearings.v1`. No locks or reports; the underlying snapshot's
@@ -178,12 +181,14 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--include-mrs] [--field
                                [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
                                [--all-recorded-prs] [--all-unhealthy]
-                               [--all-pr-repos]
+                               [--all-pr-repos] [--during-away]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default collection performs bounded concurrent remote-ledger reads for registered
 remote homes under one shared snapshot budget and may refresh the parent-side cache.
 --include-prs additionally performs live GitHub discovery and checks.
+An active away window refuses (exit 3) unless --during-away is given, which the
+board build passes so the captain can read the board while away.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
@@ -238,6 +243,7 @@ ALL_LANDED=0
 ALL_RECORDED_PRS=0
 ALL_UNHEALTHY=0
 ALL_PR_REPOS=0
+DURING_AWAY=0
 FIELDS=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -253,6 +259,7 @@ while [ $# -gt 0 ]; do
     --all-recorded-prs) ALL_RECORDED_PRS=1 ;;
     --all-unhealthy) ALL_UNHEALTHY=1 ;;
     --all-pr-repos) ALL_PR_REPOS=1 ;;
+    --during-away) DURING_AWAY=1 ;;
     --fields) shift; FIELDS=${1:-} ;;
     --fields=*) FIELDS=${1#--fields=} ;;
     -h|--help) usage; exit 0 ;;
@@ -264,8 +271,10 @@ done
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
 # The shared read-only away-return owner is consulted, not obeyed. An active
-# away window still refuses here: the correct answer to a bearings request then
-# is to run the return first. Return CATCH-UP is different - the captain is
+# away window still refuses a chat read: the correct answer to a bearings
+# request then is to run the return first. --during-away (the board build)
+# reads through it, because the captain uses the board instead of chat while
+# away and a refusal would freeze it. Return CATCH-UP is different - the captain is
 # back and asking for the picture, so the catch-up posture is reported as
 # content (a Charted Next gate row) and collection continues. bin/fm-afk-return.sh
 # owns both the gate format and the branch distinction; bearings reproduces
@@ -273,7 +282,9 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 RETURN_CATCHUP=null
 GUARD_RC=0
 GUARD_ERR=$("$SCRIPT_DIR/fm-afk-return.sh" guard 2>&1 >/dev/null) || GUARD_RC=$?
-if [ "$GUARD_RC" -ne 0 ] && [ "$GUARD_RC" -ne 4 ]; then
+if [ "$GUARD_RC" -eq 3 ] && [ "$DURING_AWAY" = 1 ]; then
+  GUARD_RC=0
+elif [ "$GUARD_RC" -ne 0 ] && [ "$GUARD_RC" -ne 4 ]; then
   [ -z "$GUARD_ERR" ] || printf '%s\n' "$GUARD_ERR" >&2
   exit "$GUARD_RC"
 fi
