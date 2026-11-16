@@ -286,6 +286,48 @@ test_an_unheld_captain_contribution_becomes_a_link_card() {
   pass "a captain contribution with no hold becomes a link card the validator accepts"
 }
 
+# The build refuses a card that does not state its decision. The generator's
+# own cards - a pending contribution and a ready review page - must always pass,
+# while an authored hold whose reason is not a question is still refused.
+# lavish-axi is a stub that fails, so the build stops after the check and
+# never reaches a real Lavish server.
+build_checks() {  # <payload>
+  local home="$TMP_ROOT/build-home" stub="$TMP_ROOT/no-lavish"
+  mkdir -p "$home/state" "$home/data" "$stub"
+  printf '#!/bin/sh\nexit 1\n' > "$stub/lavish-axi"
+  chmod +x "$stub/lavish-axi"
+  PATH="$stub:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" "$BOARD" build --no-reopen "$1" 2>&1 || true
+}
+
+test_the_generators_own_cards_pass_the_build_decision_check() {
+  local snap p out
+  snap="$TMP_ROOT/snap-own-cards.json"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.decisions_open = [
+        {id: "rv", key: "review.rv", verb: "review-ready", source: "review-page", task: "rv",
+         title: "Understand request",
+         reason: "report ready; understand board live at http://dev-1.tailf848b0.ts.net:4387/session/5e96b7b8f3b4f9db",
+         owner: "(main)"}]
+      | .contributions.captain = [
+        {task: "gamma-ship", url: "https://github.com/acme/gamma/pull/12", kind: "pr",
+         reason: "checks green; merge approval needed"}]' "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "review.rv,contribution.gamma-ship" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "the snapshot did not produce the review and contribution cards"
+  printf '%s\n' "$p" > "$TMP_ROOT/own-cards.json"
+  out=$(build_checks "$TMP_ROOT/own-cards.json")
+  assert_not_contains "$out" "undecided-card" "the build refused a card the generator made itself: $out"
+  assert_contains "$out" "board: " "the build did not get past the decision check: $out"
+
+  # An authored hold whose reason is a statement is still refused by key.
+  "$GEN" --snapshot "$TMP_ROOT/snap.json" > "$TMP_ROOT/authored.json" || fail "the generator failed"
+  out=$(build_checks "$TMP_ROOT/authored.json")
+  assert_contains "$out" "undecided-card: alpha-fix: missing question" \
+    "an authored hold with no question was not refused: $out"
+  pass "a pending contribution and a review page build cleanly, and an authored non-question hold is still refused"
+}
+
 test_cards_carry_links_and_a_non_held_credential_card_survives() {
   local snap copy p
   snap="$TMP_ROOT/snap.json"
@@ -1087,6 +1129,7 @@ fm_test_run \
   test_copy_overlay_refines_cards_and_keeps_the_payload_valid \
   test_copy_overlay_cannot_change_the_payload_shape \
   test_an_unheld_captain_contribution_becomes_a_link_card \
+  test_the_generators_own_cards_pass_the_build_decision_check \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
   test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
   test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably \

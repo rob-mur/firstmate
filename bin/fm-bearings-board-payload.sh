@@ -73,6 +73,11 @@
 #                      text without the options and without any sentence that only
 #                      repeats the question. An option the reason marks recommended
 #                      ("(a, recommended) ...") is the card's `recommend_value`.
+#                      A review-page row whose question and title do not ask gets the
+#                      question "Have you reviewed this page?", because the generator
+#                      makes that card itself and `build` refuses a card that states
+#                      no decision; a hold or status card keeps its own text, so one
+#                      that does not ask is refused until its reason or overlay asks.
 #                      Every reason shown has its `corr=<hex>`
 #                      tokens removed (clean_reason in bin/fm-bearings-question-lib.sh).
 #                      A reason answered on its Lavish page (a tailnet page link plus
@@ -95,7 +100,8 @@
 #                      choices into `options`, so no answer choice is lost.
 #   contributions.captain
 #                   -> captains_call: one link-only `decision` card (key
-#                      `contribution.<task>`, `pr_url` the contribution's page) for
+#                      `contribution.<task>`, `pr_url` the contribution's page, and
+#                      a fixed question with a free-text answer) for
 #                      each row waiting on the captain with no hold of its own, so
 #                      Captain's Call also shows what firstmate never held. A row
 #                      whose hold already has a card, or whose PR a card already
@@ -585,6 +591,13 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                    | map(nz(null) | select(. != null) | clean_reason | option_parse | .recommend? // empty)
                    | .[0] end ) as $rec
           | if $rec != null and any(.options[]; .value == $rec) then .recommend_value = $rec else . end
+          # The generator makes a review-page card itself, so it always asks: when
+          # neither its heading nor its title asks, it asks whether the captain
+          # has reviewed the page (fm-bearings-board.sh build refuses a card
+          # that states no decision).
+          | if ($d.verb // "") == "review-ready"
+               and (((.question // "") + " " + (.title // "")) | contains("?") | not)
+            then .question = "Have you reviewed this page?" else . end
           # A decision answered on its Lavish page shows only the link to that
           # page: no recap, no choices, and a title that names what the page is
           # about rather than the sentence pointing at it.
@@ -640,6 +653,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
             title: ((.url | repo_of_url | nz("")) as $r
                     | (if $r == "" then $c.task else $r + " #" + ($c.url | split("/") | last) end)),
             about: ($c.reason | nz("waiting on the captain")),
+            # The generator makes this card itself, so it always asks (fm-bearings-board.sh build
+            # refuses a card that states no decision).
+            question: "What should happen with this contribution?",
             pr_url: .url,
             options: [], allow_freeform: true,
             freeform_hint: "answer in your own words (say later to defer)" }
