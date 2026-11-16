@@ -49,6 +49,9 @@ Decision cards otherwise arrive with those choices and a freeform box; the optio
 - A status question is titled from its decision, never the bare home name, and a status question about a captain-held task in the same home merges into that one card with every choice kept.
 - Any card may carry `links`, one or more `{url, label}` or `{page, label}` pointers to the page the captain acts on, such as a Lavish page, a board page id, a merge request, or a credential console. A link is https, or http only on the tailnet Lavish origin the board contract names; the validator refuses every other http link.
 - A hold whose subject has already landed is dropped by `build` when its task or PR appears among the payload's landed rows; for a published version put the artifact and numeric three-part version in the card's structured `subject`, and verify any subject without one of these identities against current reality before carding it.
+- Every decision and credential card must state its decision: a `question`, `decide`, or title that asks with a `?` (an in-person action card with `done` and `not-done` options may be imperative), plus its own options or a free-text answer.
+  Merge cards and cards answered on their Lavish page are exempt.
+  `build` refuses any other card by key and names the missing field, so fix it through the hold reason or a `--copy` overlay rather than shipping a card with no question (`bin/fm-bearings-board.sh` header, EVERY CARD STATES ITS DECISION).
 - Never author a `reconcile` option: `build` gives every decision card that standard choice and the generator refuses it.
 - The dispatch picker's key `dispatch.charted` comes from the template; a payload never authors it.
 
