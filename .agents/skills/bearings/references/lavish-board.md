@@ -53,7 +53,9 @@ Decision cards otherwise arrive with those choices and a freeform box; the optio
 - Every decision and credential card must state its decision: a `question`, `decide`, or title that asks with a `?` (an in-person action card with `done` and `not-done` options may be imperative), plus its own options or a free-text answer.
   Merge cards and cards answered on their Lavish page are exempt.
   `build` refuses any other card by key and names the missing field, so fix it through the hold reason or a `--copy` overlay rather than shipping a card with no question (`bin/fm-bearings-board.sh` header, EVERY CARD STATES ITS DECISION).
+  A held decision card also needs its recorded option values (or a declared free-text answer) and a link (or a declared `--no-link`), recorded on the hold through `bin/fm-captain-hold.sh hold`; a hold that names a live board page, or a page registered with `bin/fm-board-page.sh open --task`, gets that page link automatically and opens it in place.
   The generator gives the cards it makes itself, contribution and review-page cards, a question of their own, so only authored text can be refused.
+- Every Captain's Call card and waiting row expands in place to its recorded context - task, full reason, the captain's recorded answers with their dates, task notes, and report - built only from structured backlog and hold data (`bin/fm-bearings-board-payload.sh` header, Mapping).
 - Never author a `reconcile` option: `build` gives every decision card that standard choice and the generator refuses it.
 - The dispatch picker's key `dispatch.charted` comes from the template; a payload never authors it.
 
