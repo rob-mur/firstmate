@@ -1070,10 +1070,24 @@ test_build_refuses_a_nondecision_reconcile_value() {
 }
 
 # A Captain's Call card must state its decision: a question the captain is
-# asked and the choices that answer it. A card missing either is refused by
-# name, never rendered and never dropped.
-test_build_refuses_a_card_with_no_explicit_decision() {
-  local home data rc out
+# asked and the choices that answer it. A card missing either is built flagged:
+# named on stderr and carrying `problem`, which the board shows on that card,
+# while every other card builds unflagged. One bad card never stops the board.
+expect_flagged_build() {  # <home> <data> <key> <field> <what>
+  local out rc
+  set +e; out=$(run_board "$1" build "$2" 2>&1); rc=$?; set -e
+  [ "$rc" -eq 0 ] || fail "$5: one card that does not state its decision stopped the whole board: $out"
+  assert_contains "$out" "undecided-card: $3: missing $4" "$5: stderr did not name the card and its missing field: $out"
+  assert_contains "$out" "flagged Captain's Call cards with no explicit decision" "$5: the build did not report the flag: $out"
+  extract_payload "$1/.lavish/bearings-board.html" | jq -e --arg k "$3" --arg f "missing $4" '
+    ([.captains_call[] | select(.key == $k) | .problem | strings | startswith($f)] == [true])
+    and ([.captains_call[] | select(.key != $k) | has("problem")] | all | not)
+    and ([.captains_call[] | select(.key != $k)] | length) > 0
+  ' >/dev/null || fail "$5: the board did not flag that card alone: $(extract_payload "$1/.lavish/bearings-board.html" | jq -c '[.captains_call[] | {key, problem}]')"
+}
+
+test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest() {
+  local home data
   home=$(make_home no-explicit-decision)
   data="$home/payload.json"
 
@@ -1083,45 +1097,39 @@ test_build_refuses_a_card_with_no_explicit_decision() {
     "title":"fos PR 20 merge status","about":"Merged upstream.",
     "options":[{"value":"approve","label":"Approve"},{"value":"decline","label":"Decline"}]}]' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
-  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a card with no question was built"
-  assert_contains "$out" "fos-pr20-merge-status" "the no-question refusal did not name the card: $out"
-  assert_contains "$out" "question" "the no-question refusal did not name the missing field: $out"
-  assert_absent "$home/.lavish/bearings-board.html" "a card with no question still produced a board"
+  expect_flagged_build "$home" "$data" fos-pr20-merge-status question "a card with no question"
 
   # A prompt that is a statement, not a question.
   write_valid_payload "$data"
   jq '.captains_call += [{"key":"runner-image-pr63-waive","type":"decision","repo":"runner",
     "title":"Runner image PR 63","question":"The image check is red on PR 63.",
-    "options":[{"value":"approve","label":"Approve"},{"value":"decline","label":"Decline"}]}]' \
+    "options":[{"value":"approve","label":"Approve"},{"value":"decline","label":"Decline"}],
+    "links":[{"url":"https://github.com/example/runner/pull/63","label":"PR 63"}]}]' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
-  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a card whose prompt is not a question was built"
-  assert_contains "$out" "runner-image-pr63-waive" "the statement refusal did not name the card: $out"
-  assert_contains "$out" "question" "the statement refusal did not name the missing field: $out"
+  expect_flagged_build "$home" "$data" runner-image-pr63-waive question "a card whose prompt is not a question"
 
   # An empty question over a free-text box: a box alone does not say what to decide.
   write_valid_payload "$data"
   jq '.captains_call += [{"key":"mr872-approve","type":"decision","repo":"cd",
-    "title":"MR 872","question":"","options":[],"allow_freeform":true}]' \
+    "title":"MR 872","question":"","options":[],"allow_freeform":true,"free_text":true,"no_link":true}]' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
-  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a card with an empty question was built"
-  assert_contains "$out" "mr872-approve" "the empty-card refusal did not name the card: $out"
-  assert_contains "$out" "question" "the empty-card refusal did not name the question: $out"
+  expect_flagged_build "$home" "$data" mr872-approve question "a card with an empty question"
 
   # A real question with no options and no free-text answer: nothing answers it.
   write_valid_payload "$data"
   jq '.captains_call[0].options = [] | .captains_call[0].allow_freeform = false' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
-  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a question card with no way to answer it was built"
-  assert_contains "$out" "sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice" \
-    "the no-options refusal did not name the card: $out"
-  assert_contains "$out" "options" "the no-options refusal did not name the missing field: $out"
+  expect_flagged_build "$home" "$data" \
+    sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice options \
+    "a question card with no way to answer it"
 
-  assert_absent "$home/.lavish/bearings-board.html" "a refused card still produced a board"
-  pass "build refuses a Captain's Call card with no explicit question or no way to answer it, naming it"
+  # A flag is the build's own: a payload that authors one has it cleared.
+  write_valid_payload "$data"
+  jq '.captains_call[0].problem = "authored"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null 2>&1 || fail "a payload authoring a flag on a sound card was refused"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '[.captains_call[] | has("problem")] | any | not' >/dev/null \
+    || fail "an authored flag on a card that states its decision reached the board"
+  pass "build flags a Captain's Call card with no explicit question or no way to answer it, naming it, and builds every other card"
 }
 
 test_build_accepts_explicit_decisions_and_in_person_actions() {
@@ -1153,10 +1161,10 @@ test_build_accepts_explicit_decisions_and_in_person_actions() {
 }
 
 # A decision card offers the decision's own recorded values and something to
-# click. A card whose hold recorded no choices, or that has no link, is refused
+# click. A card whose hold recorded no choices, or that has no link, is flagged
 # naming exactly what to re-hold with; a declared free-text question and a
 # --no-link opt-out pass, and the generator's own status cards keep passing.
-test_build_refuses_a_card_without_recorded_choices_or_a_link() {
+test_build_flags_a_card_without_recorded_choices_or_a_link() {
   local home data rc out
   home=$(make_home no-choices-no-link)
   data="$home/payload.json"
@@ -1171,14 +1179,17 @@ test_build_refuses_a_card_without_recorded_choices_or_a_link() {
      "options":[{"value":"dismiss","label":"Dismiss both"},{"value":"keep","label":"Keep them"}]}]' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a card with guessed choices and a card with no link were built"
+  [ "$rc" -eq 0 ] || fail "a card with guessed choices and a card with no link stopped the whole board: $out"
   assert_contains "$out" "undecided-card: guessed-choices: missing options (no recorded choices: re-hold with --option <value>=<label> or --free-text)" \
     "the guessed-choices refusal did not say what to add: $out"
   assert_not_contains "$out" "guessed-choices: missing options (no recorded choices: re-hold with --option <value>=<label> or --free-text), link" \
     "a linked card was refused for its link: $out"
   assert_contains "$out" "undecided-card: nothing-to-click: missing link (no link: re-hold with --link <url|page:id> or --no-link)" \
     "the no-link refusal did not say what to add: $out"
-  assert_absent "$home/.lavish/bearings-board.html" "a refused card still produced a board"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    ([.captains_call[] | select(.key == "guessed-choices" or .key == "nothing-to-click") | .problem | strings] | length) == 2
+    and ([.captains_call[] | select(.key == "merge.sample-task") | has("problem")] == [false])
+  ' >/dev/null || fail "the board did not flag exactly the two cards: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '[.captains_call[] | {key, problem}]')"
 
   write_valid_payload "$data"
   jq '.captains_call += [
@@ -1191,10 +1202,11 @@ test_build_refuses_a_card_without_recorded_choices_or_a_link() {
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   out=$(run_board "$home" build "$data" 2>&1) \
     || fail "a declared free-text call with --no-link or a generator status card was refused: $out"
+  assert_not_contains "$out" "undecided-card" "a declared free-text call or a generator status card was flagged: $out"
   extract_payload "$home/.lavish/bearings-board.html" \
     | jq -e '[.captains_call[].key] | index("name-it") != null and index("worker-asks") != null' >/dev/null \
     || fail "an opted-out or generator card did not reach the board"
-  pass "build refuses a card with no recorded choices or no link by what to add, and passes the opt-outs and generator cards"
+  pass "build flags a card with no recorded choices or no link by what to add, and passes the opt-outs and generator cards"
 }
 
 # A live page about a task links that task's card in place, whether its record
@@ -1236,9 +1248,9 @@ test_a_page_about_a_task_links_its_card_and_context_in_place() {
 }
 
 test_path_is_stable_and_home_scoped
-test_build_refuses_a_card_without_recorded_choices_or_a_link
+test_build_flags_a_card_without_recorded_choices_or_a_link
 test_a_page_about_a_task_links_its_card_and_context_in_place
-test_build_refuses_a_card_with_no_explicit_decision
+test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
 test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
