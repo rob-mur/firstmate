@@ -53,7 +53,7 @@
 // queued anchors after a queue call only when the set of anchors changed.
 // The page's data file is read from beside <built-board.html> each time the
 // page loads it, so a rebuild between polls is seen by the next poll.
-// Prints { cards, storage, calls, queue, anchors, ids, order, reloads,
+// Prints { cards, storage, calls, queue, anchors, ids, order, stack, reloads,
 //   opens, pageView, snaps, framePosts, keys, errors, boot, polls, rows }; each card
 //   also carries error {shown, text} from the box beside its answer, errors
 //   has the priority's and the page view's boxes, boot is the load problem
@@ -62,7 +62,8 @@
 //   page asked to open elsewhere, framePosts every message the board sent
 //   each page frame, keyed by page id, and keys every key press the board
 //   dispatched to itself, and rows every waiting row that can
-//   expand ({key, expanded, details}, details the shown detail text or null).
+//   expand ({key, expanded, details}, details the shown detail text or null);
+//   stack is the deck's counter text and whether its nav is hidden.
 //   Lavish's own elements (ids starting "lavish-")
 //   are absent unless the simulated chrome adds them.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -439,6 +440,7 @@ process.stdout.write(JSON.stringify({
     titles: get("bb-order-list").children.map((r) => r.children[1].children[0].textContent),
     reorderDisabled: get("bb-reorder").disabled,
   },
+  stack: { count: get("bb-stack-count").textContent, navHidden: !!get("bb-stack-count").parentNode?.hidden },
   rows: expandable().map((r) => ({
     key: r.key, expanded: r.button.getAttribute("aria-expanded"),
     details: r.details && !r.details.hidden ? r.details.textContent : null,
