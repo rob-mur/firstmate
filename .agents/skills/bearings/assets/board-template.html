@@ -326,9 +326,10 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bb-pageframe { display: block; width: 100%; height: calc(100vh - 130px); min-height: 320px;
   border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); background: var(--white); }
-/* Full screen: the same page view, fixed over the whole window above the board
-   header, so the frame is never moved or reloaded and keeps its state. */
-.bb-pageview.is-max { position: fixed; inset: 0; z-index: 1000; display: flex; flex-direction: column;
+/* Full screen: the same page view, fixed over the window below the board
+   header (64px and its 1px border), so the frame is never moved or reloaded and
+   keeps its state, and the header stays on screen to bring the board home. */
+.bb-pageview.is-max { position: fixed; inset: 65px 0 0 0; z-index: 1000; display: flex; flex-direction: column;
   padding: 6px 8px 8px; background: var(--surface-card); }
 .bb-pageview.is-max[hidden] { display: none; }
 .bb-pageview.is-max .bb-pagebar { padding-bottom: 6px; }
@@ -1518,8 +1519,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   /* The brand returns to the board's home view from anywhere in place: it
      leaves a shown page (and full screen) and goes back to the priority list
      when there is one. It is a native button, so Lavish annotate mode lets it
-     act, and it never loads a page into this frame. */
+     act, and it never loads a page into this frame. A click leaves focus on the
+     button, which would keep the reader from ever counting as idle, so it lets
+     go of focus. */
   function goHome() {
+    try { document.getElementById("bb-brand").blur(); } catch (e) { /* no focus to drop */ }
     showPage(null);
     if (orderKeys.length > 1) backToList();
     try { window.scrollTo(0, 0); } catch (e) { /* no scrolling */ }
