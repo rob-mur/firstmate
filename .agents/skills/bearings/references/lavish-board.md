@@ -10,6 +10,7 @@ It maps the fleet snapshot to the fm-bearings-board.v1 payload deterministically
 Run `bin/fm-bearings-board-payload.sh > <payload.json>` (add `--include-prs` when the digest used live PRs), then `bin/fm-bearings-board.sh build <payload.json>`.
 Add nothing for a plain board.
 The board opens on step 1, one priority list of every Captain's Call decision, which the captain reorders (drag or arrows), most important first.
+Repeated down presses on the top row walk the list: each brings up the next decision while the ones already passed over drop just below the top as a block in their original order, and a press after the last decision restores the original order.
 Clicking a decision row opens its card; "Start answering" deals the cards in the list's order.
 A task under way is not a decision, so the board never lists it unless it is blocked or needs a decision, in which case it is a question card; a sent priority carries the tasks under way after the decisions in their recorded order, so their stored rank survives.
 The "bearings" header on the page links back to the board.
