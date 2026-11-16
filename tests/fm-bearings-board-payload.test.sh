@@ -1032,6 +1032,53 @@ test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them(
   pass "a card shows every option its text refers to, or says it does not list them"
 }
 
+# A secondmate decision is answered from its card: options the reason marks
+# recommended are the card recommendation, a "Captain call:" label is not the
+# heading, and a decision answered on a page the board may not show carries what
+# the card says without that page.
+test_a_secondmate_decision_is_answerable_from_its_card() {
+  local snap="$TMP_ROOT/mate-calls.json" copy="$TMP_ROOT/mate-calls-copy.json" p
+  fresh_homes mate-calls
+  write_snapshot "$TMP_ROOT/mate-calls-base.json"
+  jq '.decisions_open = [
+    {id: "pruner/diag", key: "status.pruner.diag", verb: "needs-decision", source: "status", task: "diag", decision_key: "default", owner: "pruner",
+     reason: "forge diagnosis done (report: data/diag/report.md). Root cause: the seed push is refused. Captain call: main on armed repos only lets the pipeline push, so the re-run must either (a, recommended) push the seed with the pipeline token, which is never the admin token, or (b) open a PR and do one admin merge past the red check. PR 40 stays open."},
+    {id: "pruner/tiers", key: "status.pruner.tiers", verb: "needs-decision", source: "status", task: "tiers", decision_key: "tiers", owner: "pruner",
+     reason: "grilling round ready on one Lavish page: http://dev-1.tailf848b0.ts.net:4387/session/041adba9a930a7a9 - 15 questions, each with options and a pre-selected recommendation. No GPU used."},
+    {id: "pruner/viewer", key: "status.pruner.viewer", verb: "needs-decision", source: "status", task: "viewer", decision_key: "viewer", owner: "pruner",
+     reason: "the run-viewer prototype is ready for round-1 feedback on its review page http://dev-1.tailf848b0.ts.net:4387/session/08e66097e7ba349c. Feedback on the page goes straight to the prototype worker."},
+    {id: "pruner/calls", key: "status.pruner.calls", verb: "needs-decision", source: "status", task: "calls", decision_key: "calls", owner: "pruner",
+     title: "pruner: all seven baseline-run choices are now on one…",
+     reason: "all seven baseline-run choices are now on one page: http://dev-1.tailf848b0.ts.net:4387/session/0c1b2a3d4e5f6a7b (answer on the page). 1-4 unchanged."}]' "$TMP_ROOT/mate-calls-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
+  assert_equals "Main on armed repos only lets the pipeline push, so the re-run must either" "$(card status.pruner.diag | jq -r .question)" "a decision label is not part of the heading"
+  assert_equals "option-a|option-b" "$(card status.pruner.diag | jq -r '[.options[].value] | join("|")')" "the lettered options are the choices"
+  card status.pruner.diag | jq -e '.about | test("PR 40 stays open") and (test("Captain call") | not)' >/dev/null \
+    || fail "the about kept the decision label of the sentence the heading took: $(card status.pruner.diag | jq -r .about)"
+  assert_equals "option-a" "$(card status.pruner.diag | jq -r .recommend_value)" "the option marked recommended is the recommendation"
+  assert_equals "Push the seed with the pipeline token, which is never the admin token" "$(card status.pruner.diag | jq -r '.options[0].label')" "the recommendation note is not part of the option label"
+  for k in status.pruner.tiers status.pruner.viewer status.pruner.calls; do
+    assert_equals '{"options":[],"allow_freeform":false,"question":null}' "$(card "$k" | jq -c '{options, allow_freeform, question}')" "a page-backed decision shows only its page link"
+    assert_equals 'true|answer in your own words (say later to defer)' "$(card "$k" | jq -r '.off_board | "\(.allow_freeform)|\(.freeform_hint)"')" "a page-backed decision can still be answered in words off its page"
+    card "$k" | jq -e '.off_board | (.question | length > 0) and (.malformed | test("Lavish page"))' >/dev/null \
+      || fail "a page-backed decision does not carry its question and why its choices are missing: $(card "$k")"
+  done
+  assert_equals "pruner: grilling round ready" "$(card status.pruner.tiers | jq -r .title)" "a page-backed card is titled by what its page is about"
+  assert_equals "pruner: the run-viewer prototype is ready" "$(card status.pruner.viewer | jq -r .title)" "a page-backed card is titled by what its page is about"
+  assert_equals "pruner: all seven baseline-run choices" "$(card status.pruner.calls | jq -r .title)" "a title cut short before its page phrase is still titled by what the page is about"
+  printf '%s\n' "$p" > "$TMP_ROOT/mate-calls-payload.json"
+  validates "$TMP_ROOT/mate-calls-payload.json" || fail "a payload with off-board fields did not satisfy the board validator"
+  printf '{"captains_call":{"status.pruner.tiers":{"question":"Which test tiers run?","options":[{"value":"all","label":"All"},{"value":"fast","label":"Fast only"}]},"status.pruner.diag":{"options":[{"value":"seed","label":"Seed it"}]}}}\n' > "$copy"
+  p=$("$GEN" --snapshot "$snap" --copy "$copy") || fail "the generator failed with a copy overlay"
+  assert_equals '{"allow_freeform":true,"freeform_hint":"answer in your own words (say later to defer)"}' \
+    "$(card status.pruner.tiers | jq -c '.off_board | del(.about)')" "an authored question and options leave the off-board fields"
+  assert_equals "null" "$(card status.pruner.diag | jq -r '.recommend_value // null')" "a recommendation the authored options lack is dropped"
+  printf '%s\n' "$p" > "$TMP_ROOT/mate-calls-copy-payload.json"
+  validates "$TMP_ROOT/mate-calls-copy-payload.json" || fail "an overlaid payload with off-board fields did not satisfy the board validator"
+  pass "a secondmate decision is answerable from its card, and a page-backed one off its page"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
@@ -1069,4 +1116,5 @@ fm_test_run \
   test_a_review_card_the_captain_approved_leaves_and_any_other_stays \
   test_a_freeze_or_a_hold_that_says_it_is_no_decision_waits_instead_of_asking \
   test_a_card_carries_the_pr_link_its_snapshot_row_recorded \
-  test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them
+  test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them \
+  test_a_secondmate_decision_is_answerable_from_its_card

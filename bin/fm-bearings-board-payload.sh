@@ -66,17 +66,25 @@
 #                      to `waiting` instead (see below). Each remaining card leads with
 #                      one short `question` (at most 120 characters, first letter
 #                      capitalised): for a reason with its own options, the sentence
-#                      that introduces them; else the sentence led by "Question:", else
+#                      that introduces them (without a leading "Captain call:" or
+#                      "Decision needed:" label); else the sentence led by "Question:", else
 #                      its first sentence ending in "?", else its first sentence; dropped
 #                      when it only repeats the title. `about` holds the rest of the
 #                      text without the options and without any sentence that only
-#                      repeats the question. Every reason shown has its `corr=<hex>`
+#                      repeats the question. An option the reason marks recommended
+#                      ("(a, recommended) ...") is the card's `recommend_value`.
+#                      Every reason shown has its `corr=<hex>`
 #                      tokens removed (clean_reason in bin/fm-bearings-question-lib.sh).
 #                      A reason answered on its Lavish page (a tailnet page link plus
-#                      "is on the ... page", "the page shows", "answer ... on the page")
+#                      "is on the ... page", "ready on the ... page", "ready for ...
+#                      on its ... page", "the page shows", "answer ... on the page")
 #                      is a page-backed card: no question, about, or choices, only its
-#                      tailnet page link, titled by what the page is about; `build`
-#                      gives it only the reconcile choice.
+#                      tailnet page link, titled by what the page is about. It also
+#                      carries `off_board`: the question and about it would show, a
+#                      free-form answer, and a `malformed` sentence saying its choices
+#                      are on its page, less any field the copy overlay authors.
+#                      `build` keeps the card page-only when that page is in the
+#                      board, else shows `off_board` on it so it can still be answered.
 #                      A `source:"status"` row is titled from its decision, never the
 #                      asking home: the task its decision key names, else a given title
 #                      that is not just the task or home, else that same asking
@@ -474,10 +482,16 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     # before the options: the sentence that introduces them when it ends in a
     # colon ("Merge PR 13: (1) ..."), else its asking sentence, without a
     # trailing colon or dash.
+    # A last sentence led by a decision label ("Captain call: the re-run must
+    # either") is the heading; the card question drops that label.
+    def decision_label: "^(?:Captain(?:\u0027s)? (?:call|decision)|Decision(?: needed)?)[[:space:]]*:[[:space:]]*";
     def lead_sentence:
       gsub("[[:space:]]+"; " ") | sub("^ "; "")
-      | if test(":[[:space:]]*$") and (test("Question:"; "i") | not)
-        then ([ scan("[^[:space:]].*?(?:[.?!](?=[[:space:]]|$)|$)") | select(length > 0) ][-1] // "")
+      | ([ scan("[^[:space:]].*?(?:[.?!](?=[[:space:]]|$)|$)") | select(length > 0) ][-1] // "") as $last
+      | if ($last | test(decision_label + "[^[:space:]]"; "i"))
+        then $last
+        elif test(":[[:space:]]*$") and (test("Question:"; "i") | not)
+        then $last
         else ask_sentence end
       | sub("[[:space:]:;,-]+$"; "");
     # The body shows the lead and tail of a text; its options are the choices on the card.
@@ -491,7 +505,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
              | map(select(length > 0)) | join(" ") end;
     # A decision answered on a Lavish page: its text holds a tailnet page link
     # and says the question is on that page.
-    def page_phrase: "(?:is|are) on (?:one|the|a|this|its|that) (?:[a-z0-9-]+ ){0,2}page|the page (?:now )?(?:shows|has|holds|asks|carries|lists)|(?:answer|pick|choose|decide|reply|respond)[^.?!]{0,40} on the page";
+    def page_phrase: "(?:is|are) (?:now |all )?on (?:one|the|a|this|its|that) (?:[a-z0-9-]+ ){0,2}page|(?:(?<=ready)|(?<=live)) on (?:one|the|a|this|its|that) (?:[a-z0-9-]+ ){0,2}page|(?<=ready) for [^.?!]{0,60}? on (?:one|the|a|this|its|that) (?:[a-z0-9-]+ ){0,2}page|the page (?:now )?(?:shows|has|holds|asks|carries|lists)|(?:answer|pick|choose|decide|reply|respond)[^.?!]{0,40} on the page";
     def page_backed: test("http://dev-1\\.tailf848b0\\.ts\\.net:4387/") and test(page_phrase; "i");
     def page_subject:
       [match(page_phrase; "i")][0].offset as $o
@@ -529,7 +543,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                 | (if $long == null then null
                    elif ($long | option_parse) != null then ($long | option_parse | .lead | lead_sentence | short_text_n(120) | nz(null))
                    else ($long | ask_sentence | short_text_n(120) | nz(null)) end) as $q0
-                | (if $q0 == null then null else ($q0 | cap) end) as $q
+                | (if $q0 == null then null else ($q0 | sub(decision_label; ""; "i") | cap) end) as $q
                 | (if ($d.verb // "") == "review-ready" then $texts else [ $texts[] | without_options ] end) as $body
                 | ($q != null and $title != $q and ($title | endswith(": " + $q) | not)) as $asks
                 # The body drops each whole sentence that only repeats the heading.
@@ -565,6 +579,12 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                    [ ($d.reason_earlier // [])[], (($d.twins // [])[] | (.reason_earlier // [])[]) ]
                    | map(tostring | clean_reason) | reverse)
             end
+          # An option the reason itself marks recommended is the card recommendation.
+          | ( if ($d.verb // "") == "review-ready" then null
+              else [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
+                   | map(nz(null) | select(. != null) | clean_reason | option_parse | .recommend? // empty)
+                   | .[0] end ) as $rec
+          | if $rec != null and any(.options[]; .value == $rec) then .recommend_value = $rec else . end
           # A decision answered on its Lavish page shows only the link to that
           # page: no recap, no choices, and a title that names what the page is
           # about rather than the sentence pointing at it.
@@ -574,18 +594,36 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
           | if $paged == null then .
             else ( ($paged | page_subject) as $subject
                    | ($d.owner // "(main)") as $owner
+                   # What the card shows when its page is not in the board.
+                   | ( {allow_freeform: true,
+                        freeform_hint: "answer in your own words (say later to defer)",
+                        malformed: "Its choices are on its Lavish page, which the board does not show; answer in your own words."}
+                       + (if .question != null then {question} else {} end)
+                       + (if .about != null then {about} else {} end) ) as $off
                    | .title as $t
+                   # A title cut short before the page phrase is still the sentence pointing at the page.
+                   | ($t | sub("^" + ($owner | gsub("[^A-Za-z0-9 _-]"; ".")) + ": "; "") | sub("…$"; "") | ascii_downcase) as $stem
+                   | (($t | test(page_phrase; "i"))
+                      or (($t | endswith("…")) and ($stem | length) > 0
+                          and ($paged | gsub("[[:space:]]+"; " ") | ascii_downcase | startswith($stem)))) as $points
                    | { key, type, repo,
-                       title: (if ($t | test(page_phrase; "i")) and ($subject | length) > 0 and ($subject | length) <= 120
+                       title: (if $points and ($subject | length) > 0 and ($subject | length) <= 120
                                then (if $owner != "(main)" and ($t | startswith($owner + ": ")) then $owner + ": " else "" end) + $subject
                                else $t end),
-                       options: [], allow_freeform: false }
+                       options: [], allow_freeform: false, off_board: $off }
                      + ( [ (.links // [])[] | select(.url | startswith("http://dev-1.tailf848b0.ts.net:4387/")) ]
                          | if length > 0 then {links: .} else {} end ) )
             end
           | overlay("captains_call"; $d.key; card_fields) as $ov
           | . + $ov
           | if ($ov | has("options")) then del(.malformed) else . end
+          | if has("recommend_value") and ($ov | has("recommend_value") | not)
+               and (.recommend_value as $rv | any(.options[]; .value == $rv) | not)
+            then del(.recommend_value) else . end
+          | if has("off_board") then
+              .off_board |= ( with_entries(select(.key as $k | $ov | has($k) | not))
+                              | if ($ov | has("options")) then del(.malformed) else . end )
+            else . end
           | . as $card
           | select((($copy.captains_call // {}) | has($d.key) | not)
                    or ($copy.captains_call[$d.key] != null))
