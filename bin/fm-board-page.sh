@@ -66,6 +66,16 @@
 #          during the relay's run is dropped. A changed form whose handler
 #          queues nothing, or that is not valid, is flagged in the page and on
 #          the board instead.
+#          Nothing wipes input the captain has not sent. The relay records a
+#          changed form's input as a draft per question (data-lavish-question,
+#          else the form's id, name or position) and each control's name, and
+#          the board keeps the drafts in Lavish's own review state, so they
+#          outlive the page drawing its form again, a page or board reload,
+#          and a reload of the browser tab. A form with a draft gets it back,
+#          with input and change events, whenever it appears in the page; a
+#          draft not yet queued is queued again as above. A page that draws
+#          its form again should therefore keep the same question and control
+#          names. Reset drops a draft, and a draft Lavish has sent is dropped.
 #          Printed actions are moved to the page's handled folder, so each is
 #          delivered once. Actions already waiting are delivered before an
 #          ended status. Without --timeout-s it waits until one arrives.
@@ -116,6 +126,10 @@
 # home over a local route (.fm-secondmate-parent) and that home has a board,
 # every command uses the parent home in place of FM_HOME, so a page a
 # secondmate's worker opens shows on the board that carries its decisions.
+# Each command then runs with the code of the home whose board it serves: when
+# that home carries its own bin/fm-board-page.sh and it is not this file, this
+# script runs that one in its place, so the parent's own relay goes beside the
+# page and the parent's own refresh runs.
 #
 # FM_BOARD_PAGE_REFRESH overrides the refresh command (tests only); the default
 # is a detached `bin/fm-board-refresh.sh --force`.
@@ -148,6 +162,9 @@ if [ ! -f "$BOARD" ] && [ -f "$FM_HOME/.fm-secondmate-parent" ]; then
     SERVED="$FM_HOME/.lavish/pages"
     RECORDS="$STATE/pages"
   fi
+fi
+if [ -x "$FM_HOME/bin/fm-board-page.sh" ] && [ ! "$FM_HOME/bin/fm-board-page.sh" -ef "${BASH_SOURCE[0]}" ]; then
+  exec "$FM_HOME/bin/fm-board-page.sh" "$@"
 fi
 
 die() { printf 'fm-board-page: %s\n' "$1" >&2; exit "${2:-1}"; }

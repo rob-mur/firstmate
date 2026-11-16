@@ -149,6 +149,29 @@ test_a_secondmate_page_goes_on_its_parent_board() {
   pass "a secondmate home's page registers on its local parent's board, and exits 3 when there is none"
 }
 
+# A parent home that carries its own Firstmate code serves its pages with its
+# own relay, even when a secondmate on another release registers the page, so
+# every page on that board keeps the parent's form and draft handling.
+test_a_secondmate_page_gets_its_parent_homes_own_relay() {
+  local parent mate dir
+  parent=$(make_home sm-code-parent)
+  cp -R "$ROOT/bin" "$parent/bin"
+  mkdir -p "$parent/.agents/skills"
+  cp -R "$ROOT/.agents/skills/bearings" "$parent/.agents/skills/bearings"
+  printf '/* the parent home relay */\n' >> "$parent/.agents/skills/bearings/assets/lavish-relay.js"
+  mate=$(make_home sm-code-mate --no-board)
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$mate/.fm-secondmate-parent"
+  dir=$(in_home "$mate" "$PAGE" dir own-relay) || fail "dir in a secondmate home failed"
+  assert_equals "$parent/.lavish/pages/own-relay" "$dir" "dir did not use the parent board's page folder"
+  cmp -s "$parent/.agents/skills/bearings/assets/lavish-relay.js" "$dir/lavish-relay.js" \
+    || fail "a secondmate installed its own relay on the parent board's page"
+  printf '<html></html>\n' > "$dir/page.html"
+  in_home "$mate" "$PAGE" open own-relay --title "Own relay" >/dev/null || fail "open in a secondmate home failed"
+  [ -e "$mate/refreshed" ] || fail "open did not ask the board to refresh"
+  assert_equals "$(printf 'own-relay\tlive\tOwn relay')" "$(in_home "$parent" "$PAGE" list)" "the parent board did not list the page"
+  pass "a page a secondmate registers on its parent's board is served with the parent home's own relay"
+}
+
 test_bad_page_ids_are_refused() {
   local home
   home=$(make_home badid)
@@ -463,6 +486,7 @@ fm_test_run \
   test_open_records_the_task_a_page_is_about \
   test_open_without_a_board_exits_3 \
   test_a_secondmate_page_goes_on_its_parent_board \
+  test_a_secondmate_page_gets_its_parent_homes_own_relay \
   test_bad_page_ids_are_refused \
   test_route_delivers_each_action_once_and_wait_prints_it \
   test_routed_reports_only_fully_delivered_lines \
