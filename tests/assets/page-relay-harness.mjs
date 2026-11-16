@@ -32,12 +32,14 @@
 //   tick:<ms>         advance the fake clock and run the timers now due
 //   leave             the pointer leaves the page's frame
 //   blur              the page's frame loses focus
-// Prints { posted, card, prevented, pageClicks, warning, submits }: posted is
+// Prints { posted, card, prevented, pageClicks, warning, submits, drafts }: posted is
 // every message the relay sent the board, card is the open card's quoted text
 // or null, prevented lists the clicks the relay kept from the page,
 // pageClicks the clicks the page's own handler saw, warning the text of the
 // relay's notice of form changes not queued (null when hidden), and submits
-// how many submit events each form's own handler saw, by form name.
+// how many submit events each form's own handler saw, by form name. The
+// relay's draft messages (its request for drafts on load and each draft it
+// passes up) go to drafts rather than posted.
 import { readFileSync } from "node:fs";
 
 const [, , relayPath, actionList = ""] = process.argv;
@@ -81,6 +83,12 @@ class Node {
   }
   matches(sel) { return sel.split(",").some((s) => this.matchesOne(s)); }
   closest(sel) { for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n.matches(sel)) return n; return null; }
+  querySelectorAll(sel) {
+    const out = [];
+    const walk = (n) => { for (const c of n.children) { if (c.matches(sel)) out.push(c); walk(c); } };
+    walk(this);
+    return out;
+  }
 }
 
 let focused = null;
@@ -113,9 +121,11 @@ const submits = { round: 0, quick: 0, plain: 0 };
 const docListeners = [];
 const winListeners = [];
 const posted = [];
+const drafts = [];
 const prevented = [];
 const pageClicks = [];
-const board = { postMessage: (data) => posted.push(data) };
+const DRAFT_TYPES = ["fm-board-page:draftsWanted", "fm-board-page:draft"];
+const board = { postMessage: (data) => (DRAFT_TYPES.includes(data && data.type) ? drafts : posted).push(data) };
 const stranger = { postMessage() {} };
 Object.defineProperty(globalThis, "navigator", { value: { platform: "Linux x86_64" }, configurable: true });
 globalThis.window = {
@@ -252,4 +262,4 @@ for (const act of actionList.split(",").filter(Boolean)) {
   else throw new Error("unknown action " + act);
 }
 process.stdout.write(JSON.stringify({ posted, card: card() ? card().children[0].textContent : null, prevented, pageClicks,
-  warning: warning(), submits }) + "\n");
+  warning: warning(), submits, drafts }) + "\n");

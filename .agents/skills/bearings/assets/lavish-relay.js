@@ -12,6 +12,8 @@
  * note up as an annotation action for the page's agent.
  * A form the captain changed is queued through the page's own submit handler
  * before anything is sent, so answers are never left behind in the page.
+ * Input not yet sent is kept as a draft the board stores, and put back into
+ * the form after the page draws it again or any reload.
  * bin/fm-board-page.sh's header owns the contract.
  */
 (function () {
@@ -120,6 +122,8 @@
       if (!hit || !(rec.dirty || rec.pending || rec.unsent)) return;
       settle(rec);
       changed = true;
+      var s = scopeOf(rec.form);
+      if (s && drafts[scopeKey(s)]) draftChanged(scopeKey(s));
     });
     if (changed) showUnsentForms();
   }
@@ -161,7 +165,8 @@
   }
   function formChanged(ev) {
     var t = ev.target;
-    if (inUi(ev) || !t || !t.form || t.form.nodeType !== 1) return;
+    /* a restored draft marks its own form when it is not queued */
+    if (restoring || inUi(ev) || !t || !t.form || t.form.nodeType !== 1) return;
     var rec = formRecord(t.form, true);
     rec.dirty = true;
     rec.pending = false;
@@ -189,6 +194,214 @@
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'hidden') flushForms();
   });
+  /* DRAFTS. Input the captain has not sent must outlive the page drawing its
+     form again and a reload of the page, the board or the browser tab. Every
+     change to a form control records that form's whole input as a draft,
+     keyed by its question (data-lavish-question, else the form's id, name or
+     position) and each control's name, and passes it up to the board, which
+     keeps it across reloads. Whenever a form with a draft appears in the page,
+     at load or because the page drew it again, the draft is put back into it
+     with input and change events, so the page sees the same input again; a
+     draft that was not yet queued marks its form changed, so it is queued as
+     before. A draft from the board never overwrites a form the captain has
+     already changed in this load. Reset drops a form's draft, and the board
+     drops a page's queued drafts once Lavish has sent them. */
+  var DRAFT_MS = 250;
+  var SKIP_TYPES = { password: 1, file: 1, hidden: 1, submit: 1, button: 1, reset: 1, image: 1 };
+  var drafts = {};
+  var typedHere = {};
+  var toTell = {};
+  var draftTimer = null;
+  var restoring = false;
+  var restoredAt = {};
+  var lastFocus = null;
+  function scopeOf(el) {
+    if (!el || !el.closest) return null;
+    return el.closest('[data-lavish-question]') || el.form || el.closest('form');
+  }
+  function scopeKey(scope) {
+    var q = scope.getAttribute('data-lavish-question');
+    if (q) return 'q:' + q;
+    if (scope.id) return 'id:' + scope.id;
+    if (scope.getAttribute('name')) return 'name:' + scope.getAttribute('name');
+    return 'form:' + Array.prototype.indexOf.call(document.forms, scope);
+  }
+  function controlsOf(scope) {
+    var list = scope.tagName === 'FORM' && scope.elements ? scope.elements : scope.querySelectorAll('input,select,textarea');
+    return Array.prototype.filter.call(list, function (c) {
+      var tag = c.tagName;
+      if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA') return false;
+      return !SKIP_TYPES[String(c.type || '').toLowerCase()];
+    });
+  }
+  function fieldKey(c, i) {
+    var t = String(c.type || '').toLowerCase();
+    var n = c.getAttribute('name');
+    if (n) return n + (t === 'radio' || t === 'checkbox' ? '=' + c.value : '');
+    return c.id ? '#' + c.id : '@' + i;
+  }
+  function readScope(scope) {
+    var fields = {};
+    controlsOf(scope).forEach(function (c, i) {
+      var t = String(c.type || '').toLowerCase();
+      if (t === 'radio' || t === 'checkbox') fields[fieldKey(c, i)] = !!c.checked;
+      else if (c.tagName === 'SELECT' && c.multiple) {
+        fields[fieldKey(c, i)] = Array.prototype.filter.call(c.options, function (o) { return o.selected; })
+          .map(function (o) { return o.value; });
+      } else fields[fieldKey(c, i)] = String(c.value);
+    });
+    return fields;
+  }
+  /* true when every form of the question on screen is queued, false when
+     one is not, null when the relay holds no form of it */
+  function scopeHeld(key) {
+    var queued = null;
+    forms.forEach(function (rec) {
+      var s = scopeOf(rec.form);
+      if (!document.documentElement.contains(rec.form) || !s || scopeKey(s) !== key) return;
+      var held = !(rec.dirty || rec.pending || rec.unsent);
+      queued = queued === null ? held : queued && held;
+    });
+    return queued;
+  }
+  function tellDrafts() {
+    if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+    Object.keys(toTell).forEach(function (key) {
+      var d = drafts[key];
+      if (d) d.queued = scopeHeld(key) === true;
+      tell({ type: 'fm-board-page:draft', scope: key, draft: d ? { fields: d.fields, queued: d.queued, at: d.at } : null });
+    });
+    toTell = {};
+  }
+  function draftChanged(key) {
+    toTell[key] = true;
+    if (draftTimer) clearTimeout(draftTimer);
+    draftTimer = setTimeout(tellDrafts, DRAFT_MS);
+  }
+  function keepDraft(ev) {
+    if (restoring || inUi(ev)) return;
+    var scope = scopeOf(ev.target);
+    if (!scope || SKIP_TYPES[String(ev.target.type || '').toLowerCase()]) return;
+    var key = scopeKey(scope);
+    typedHere[key] = true;
+    drafts[key] = { fields: readScope(scope), queued: false, at: Date.now() };
+    draftChanged(key);
+  }
+  function fire(c, type) {
+    try { c.dispatchEvent(new Event(type, { bubbles: true })); } catch (e) { /* no events */ }
+  }
+  function applyDraft(scope, d) {
+    var moved = [];
+    controlsOf(scope).forEach(function (c, i) {
+      var k = fieldKey(c, i);
+      if (!Object.prototype.hasOwnProperty.call(d.fields, k)) return;
+      var v = d.fields[k];
+      var t = String(c.type || '').toLowerCase();
+      if (t === 'radio' || t === 'checkbox') {
+        if (c.checked !== !!v) { c.checked = !!v; if (c.checked || t === 'checkbox') moved.push(c); }
+      } else if (c.tagName === 'SELECT' && c.multiple && Array.isArray(v)) {
+        var was = readScope(scope)[k];
+        Array.prototype.forEach.call(c.options, function (o) { o.selected = v.indexOf(o.value) >= 0; });
+        if (JSON.stringify(was) !== JSON.stringify(v)) moved.push(c);
+      } else if (typeof v === 'string' && c.value !== v) {
+        c.value = v;
+        if (c.value === v) moved.push(c);
+      }
+    });
+    if (!moved.length) return;
+    /* a page that draws its form again on every input event would loop, so
+       a question gets events at most once a second */
+    var key = scopeKey(scope);
+    var now = Date.now();
+    if (!(restoredAt[key] > now - 1000)) {
+      restoredAt[key] = now;
+      restoring = true;
+      try {
+        moved.forEach(function (c) { fire(c, 'input'); fire(c, 'change'); });
+      } finally { restoring = false; }
+    }
+    var form = scope.tagName === 'FORM' ? scope : moved[0].form;
+    if (!d.queued && form) {
+      var rec = formRecord(form, true);
+      rec.dirty = true;
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = setTimeout(flushForms, FLUSH_MS);
+    }
+  }
+  function restoreFocus(scope, key) {
+    if (!lastFocus || lastFocus.scope !== key || !document.hasFocus()) return;
+    var act = document.activeElement;
+    if (act && act !== document.body && act !== document.documentElement) return;
+    controlsOf(scope).forEach(function (c, i) {
+      if (fieldKey(c, i) !== lastFocus.field) return;
+      try {
+        c.focus();
+        if (lastFocus.start !== null && c.setSelectionRange) c.setSelectionRange(lastFocus.start, lastFocus.end);
+      } catch (e) { /* a control that takes no caret */ }
+    });
+  }
+  function restoreDrafts(root) {
+    var scopes = [];
+    if (root.nodeType !== 1) return;
+    if (root.matches && root.matches('[data-lavish-question],form')) scopes.push(root);
+    Array.prototype.push.apply(scopes, root.querySelectorAll ? root.querySelectorAll('[data-lavish-question],form') : []);
+    if (!scopes.length && /^(INPUT|SELECT|TEXTAREA|OPTION|LABEL|DIV|P|SPAN|FIELDSET)$/.test(root.tagName) && scopeOf(root)) scopes.push(scopeOf(root));
+    scopes.forEach(function (s) {
+      if (scopeOf(s) !== s && s.tagName === 'FORM') return;
+      var key = scopeKey(s);
+      if (drafts[key]) { applyDraft(s, drafts[key]); restoreFocus(s, key); }
+    });
+  }
+  document.addEventListener('input', keepDraft, true);
+  document.addEventListener('change', keepDraft, true);
+  document.addEventListener('reset', function (ev) {
+    var scope = scopeOf(ev.target) || ev.target;
+    if (!scope || scope.nodeType !== 1) return;
+    var key = scopeKey(scope);
+    delete drafts[key];
+    draftChanged(key);
+  }, true);
+  document.addEventListener('focusin', function (ev) {
+    var c = ev.target;
+    var scope = scopeOf(c);
+    if (!scope || inUi(ev)) return;
+    var i = controlsOf(scope).indexOf(c);
+    if (i < 0) return;
+    lastFocus = { scope: scopeKey(scope), field: fieldKey(c, i), start: null, end: null };
+  }, true);
+  document.addEventListener('selectionchange', function () {
+    var c = document.activeElement;
+    if (!lastFocus || !c || typeof c.selectionStart !== 'number') return;
+    try { lastFocus.start = c.selectionStart; lastFocus.end = c.selectionEnd; } catch (e) { /* no caret */ }
+  });
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(function (records) {
+      records.forEach(function (r) {
+        Array.prototype.forEach.call(r.addedNodes, function (n) {
+          if (!host || n !== host) restoreDrafts(n);
+        });
+      });
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  }
+  window.addEventListener('message', function (ev) {
+    var d = ev && ev.data;
+    if (ev.source !== window.parent || !d || typeof d !== 'object') return;
+    if (d.type === 'fm-board-page:drafts' && d.drafts && typeof d.drafts === 'object') {
+      Object.keys(d.drafts).forEach(function (key) {
+        var got = d.drafts[key];
+        if (typedHere[key] || !got || typeof got.fields !== 'object' || !got.fields) return;
+        drafts[key] = { fields: got.fields, queued: !!got.queued, at: Number(got.at) || 0 };
+      });
+      restoreDrafts(document.documentElement);
+    } else if (d.type === 'fm-board-page:sent') {
+      /* what Lavish sent is no longer a draft */
+      Object.keys(drafts).forEach(function (key) {
+        if (drafts[key].queued && scopeHeld(key) !== false) { delete drafts[key]; delete typedHere[key]; }
+      });
+    }
+  });
+  tell({ type: 'fm-board-page:draftsWanted' });
+
   /* Keys typed in the page stay in its frame, so pass Esc up for the board to
      leave full screen; a page that handles Esc itself prevents the default. */
   window.addEventListener('keydown', function (ev) {
