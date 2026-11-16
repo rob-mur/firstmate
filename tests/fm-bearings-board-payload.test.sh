@@ -1121,8 +1121,44 @@ test_a_secondmate_decision_is_answerable_from_its_card() {
   pass "a secondmate decision is answerable from its card, and a page-backed one off its page"
 }
 
+# The captain's open GitLab MRs that no task covers reach the board as
+# information rows - URL and one state line - never as decision cards. A
+# snapshot without them adds no section.
+test_open_mrs_no_task_covers_become_information_rows() {
+  local base snap out
+  base="$TMP_ROOT/mrs-base.json"; write_snapshot "$base"
+  snap="$TMP_ROOT/mrs-snap.json"
+  jq '.open_mrs = [
+        {key:"mr-42-880", repo:"aegis", title:"Bump the dependencies",
+         url:"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880",
+         state:"mergeable, CI passing, 0 approvals, threads resolved, last activity 2026-07-11",
+         updated:"2026-07-11T08:30:00Z"}]
+      | .mrs = "checked (gitlab.example.com, 1 open MR(s) no task covers)"' "$base" > "$snap"
+  out="$TMP_ROOT/mrs-payload.json"
+  "$GEN" --snapshot "$snap" > "$out" || fail "the generator failed on a snapshot with open MRs"
+  jq -e '
+    .open_mrs == [{key:"mr-42-880", repo:"aegis", title:"Bump the dependencies",
+                   url:"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880",
+                   state:"mergeable, CI passing, 0 approvals, threads resolved, last activity 2026-07-11"}]
+    and ([.captains_call[] | select((.pr_url // "") | test("merge_requests/880"))] | length) == 0
+  ' "$out" >/dev/null || fail "an uncovered MR must be an information row, not a card: $(cat "$out")"
+  validates "$out" || fail "a payload with open MRs must satisfy the board validator"
+  "$GEN" --snapshot "$base" | jq -e 'has("open_mrs") | not' >/dev/null \
+    || fail "a snapshot without open MRs must add no open_mrs section"
+  jq '.open_mrs[0].url = "http://gitlab.example.com/x"' "$out" > "$TMP_ROOT/mrs-bad-url.json"
+  validates "$TMP_ROOT/mrs-bad-url.json" && fail "an open MR row without an https URL must be refused"
+  jq '.open_mrs[0].state = ""' "$out" > "$TMP_ROOT/mrs-bad-state.json"
+  validates "$TMP_ROOT/mrs-bad-state.json" && fail "an open MR row without a state line must be refused"
+  jq '.open_mrs[0].question = "Merge?"' "$out" > "$TMP_ROOT/mrs-bad-key.json"
+  validates "$TMP_ROOT/mrs-bad-key.json" && fail "an open MR row must not carry decision-card fields"
+  jq '.open_mrs = {}' "$out" > "$TMP_ROOT/mrs-bad-shape.json"
+  validates "$TMP_ROOT/mrs-bad-shape.json" && fail "open_mrs must be an array"
+  pass "uncovered open MRs are validated information rows with their URL and state"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
+  test_open_mrs_no_task_covers_become_information_rows \
   test_the_same_snapshot_yields_the_same_payload \
   test_rows_map_deterministically_from_the_snapshot \
   test_charted_rows_derive_dispatchable_and_warning_from_structure \

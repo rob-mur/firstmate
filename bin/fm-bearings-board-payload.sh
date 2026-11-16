@@ -11,8 +11,9 @@
 #   fm-bearings-board-payload.sh [--snapshot <file|->] [--copy <file>] [--include-prs]
 #
 # The payload goes to stdout. With no --snapshot the script runs
-# `fm-bearings-snapshot.sh --json --all-decisions` itself (--include-prs is passed
-# through), so every open captain hold - live, blocked, dated, or aged, past the
+# `fm-bearings-snapshot.sh --json --all-decisions --include-mrs` itself
+# (--include-prs is passed through; FM_BEARINGS_BOARD_MR_CHECK=0 drops
+# --include-mrs, so the build makes no GitLab call), so every open captain hold - live, blocked, dated, or aged, past the
 # snapshot's decision cap - yields at most one card, waiting row, or dated charted
 # row; with --snapshot it reads that JSON from the file or stdin instead.
 #
@@ -129,6 +130,10 @@
 #                      bin/fm-board-priority.sh holds the captain's ranking, ranked rows
 #                      come first in that order, and unranked rows keep snapshot order after.
 #   omitted         -> charted_more, from the `gates showing N of M` surface.
+#   open_mrs        -> open_mrs: the captain's open GitLab MRs that no task records,
+#                      as information rows {key, repo, title, url, state} - never
+#                      decision cards. The section is absent when the snapshot has
+#                      no open_mrs (not requested, or GitLab unavailable).
 #
 # Copy overlay (--copy): a JSON object whose optional maps are keyed by the row
 # key or id they refine, so a missing entry leaves the deterministic default.
@@ -183,11 +188,10 @@ done
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 
 if [ -z "$SNAPSHOT" ]; then
-  if [ "$INCLUDE_PRS" = 1 ]; then
-    SNAP_JSON=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" --json --all-decisions --include-prs) || fail "snapshot failed"
-  else
-    SNAP_JSON=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" --json --all-decisions) || fail "snapshot failed"
-  fi
+  set -- --json --all-decisions
+  [ "$INCLUDE_PRS" = 0 ] || set -- "$@" --include-prs
+  [ "${FM_BEARINGS_BOARD_MR_CHECK:-1}" = 0 ] || set -- "$@" --include-mrs
+  SNAP_JSON=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" "$@") || fail "snapshot failed"
 elif [ "$SNAPSHOT" = - ]; then
   SNAP_JSON=$(cat)
 else
@@ -741,4 +745,6 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       landed: $landed,
       charted: $charted }
     + (if $gates_cut != null then {charted_more: (($gates_cut.m | tonumber) - ($gates_cut.n | tonumber))} else {} end)
+    + (if ($snap.open_mrs | type) == "array"
+       then {open_mrs: [$snap.open_mrs[] | {key, repo, title, url, state}]} else {} end)
 ' || fail "could not build the payload"
