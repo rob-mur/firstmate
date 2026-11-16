@@ -55,7 +55,7 @@
 # question (contains a question mark) is promoted to decisions_open so a real
 # question is never hidden in a gate bucket. Every captain-hold row, main or
 # secondmate, carries its hold_until and hold_bucket so a consumer can tell a
-# dated deferral from a live call, plus hold_set and origin for the hand-off
+# dated deferral from a live call, plus hold_set, hold_reconciled and origin for the hand-off
 # check below (a decision handed to a worker gains handed_* fields), and the
 # choices, answers, notes, and report_path bin/fm-fleet-snapshot.sh documents. A needs-decision or blocked status
 # on a task under way, main or secondmate, also reaches decisions_open as a
@@ -193,7 +193,7 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,title,reason,title_full,reason_full,summary,question,owner,
-    hold_until,hold_bucket,hold_set,origin,choices,answers,notes,report_path
+    hold_until,hold_bucket,hold_set,hold_reconciled,origin,choices,answers,notes,report_path
       (captain holds only),
     handed_at,handed_via,handed_task,raised_at (handed decisions only),
     pr_url (a PR or MR its home recorded, when the reason links none)},
@@ -643,7 +643,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             summary:hold_summary(.title; .hold_reason),
             question:(.title + ": " + .hold_reason),owner:"(main)",
             hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null),
-            hold_set:(.hold_set // null),
+            hold_set:(.hold_set // null),hold_reconciled:(.hold_reconciled // null),
             origin:([(.body_lines // [])[]
                      | capture("^Captain hold origin:[[:space:]]*(?<v>[^[:space:]]+)")?
                      | .v][0] // null),
@@ -680,7 +680,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                                       (.reason // "captain decision pending")),
                  question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id,
                  hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null),
-                 hold_set:(.hold_set // null),origin:(.origin // null),
+                 hold_set:(.hold_set // null),hold_reconciled:(.hold_reconciled // null),
+                 origin:(.origin // null),
                  choices:(.choices // {options:[],links:[],free_text:false,no_link:false}),
                  answers:(.answers // []),notes:(.notes // []),
                  report_path:(.report_path // null)} ]
@@ -880,7 +881,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
 # feedback relay, a process rule) or merely mentions it to some other task is
 # not a hand-off, and neither is one that tells the worker to wait for the
 # captain (for example "stay parked until the captain answers" or "keep the
-# question held: the captain decides"). The decision is raised at the latest of its hold set stamp and
+# question held: the captain decides"). The decision is raised at the latest of its hold set stamp, its
+# latest hold reconciled stamp (a re-hold after a reconcile request), and
 # every needs-decision or blocked line its tracked tasks append, so a worker
 # that raises a fresh question puts the decision back in front of the captain;
 # a hold is also raised by every `captain-held` line naming it, and a review
@@ -1042,7 +1044,7 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
                 | select(.verb == "needs-decision" or .verb == "blocked"
                          or (.verb == "captain-held" and (.text | names($id))))
                 | select((.task as $t | $tracked | index($t)) or (.key | test($mirror))) | .at ]
-              + [ ($row.hold_set | set_epoch) // 0 ] | max) as $raised
+              + [ ($row.hold_set | set_epoch) // 0, ($row.hold_reconciled | set_epoch) // 0 ] | max) as $raised
            | handed(
                [ handoff_steers($recs; $raised)[]
                  | select((.task as $t | $tracked | index($t)) and (.body | names($id)))
@@ -1077,7 +1079,9 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
   # A decision whose reason links no PR/MR gains the pr_url its home recorded:
   # the one a task the row tracks recorded (the hold id or origin, the asking
   # task), else, when the reason names a number ("PR 91", "MR 874", "!874",
-  # "#91"), the single PR/MR that home recorded with that number.
+  # "#91"), the single PR/MR that home recorded with that number. A hold recorded
+  # with no link (choices.no_link) never takes the PR of a task it tracks, only one its
+  # reason names by number.
   | def pr_re: "https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+";
     .decisions_open |= map(
       ((.reason_full // .reason // "") | tostring) as $r
@@ -1086,7 +1090,7 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
           (if .verb == "captain-hold" then (.owner // "(main)")
            elif .source == "status" then (.mate // "(main)") else "(main)" end) as $home
           | [ ($ev[$home] // [])[] | select(.kind == "pr" and (.url | test("^" + pr_re + "$"))) ] as $prs
-          | ([.key, .origin, .task] | map(strings)) as $own
+          | (if (.choices.no_link // false) then [] else [.key, .origin, .task] | map(strings) end) as $own
           | [ $r | scan("(?:\\b(?:pr|mr|pull request|merge request)[[:space:]]*#?|\\B[!#])([0-9]+)(?![0-9])"; "i")
               | .[0] ] as $nums
           | [ $prs[] | select(.task as $t | $own | index($t)) | .url ] as $mine
