@@ -11,6 +11,8 @@
 //                   or only into that card
 //   focus:<key>     put focus in that card's note box
 //   blur            move focus off the page's controls
+//   home            click the bearings header, which focuses it as a browser
+//                   click focuses a button
 //   run             run the shell command in FM_HARNESS_RUN (a rebuild while
 //                   the page stays open)
 //   poll            let the page's live-update poll run once
@@ -114,6 +116,7 @@ class Node {
   setAttribute(k, v) { this.attributes[k] = v; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   fire(t) { for (const fn of this.listeners[t] || []) fn({ preventDefault() {} }); }
+  blur() { if (document.activeElement === this) document.activeElement = document.body; }
   dispatchEvent(ev) { for (let n = this; n; n = ev.bubbles ? n.parentNode : null) for (const fn of n.listeners[ev.type] || []) fn(ev); return true; }
   matches(sel) {
     const checked = sel.endsWith(":checked");
@@ -374,6 +377,7 @@ for (const act of actionList.split(",").filter(Boolean)) {
   } else if (name === "reorder") {
     byId.get("bb-reorder").fire("click");
   } else if (name === "home") {
+    document.activeElement = byId.get("bb-brand");
     byId.get("bb-brand").fire("click");
   } else if (name === "annotate") {
     post({ type: "lavish:setAnnotationMode", enabled: arg === "on" });
