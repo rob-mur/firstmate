@@ -22,7 +22,8 @@
 #     Structured rows preserve captain-hold metadata such as hold_kind,
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
-#     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
+#     unresolved_blocker_ids, captain_actionable, hold_set, hold_reconciled
+#     (the latest "Captain hold reconciled:" stamp in the body), hold_age_days,
 #     and hold_bucket fields.
 #     Repeated blocker tokens remain ordered; a blocker resolves only when its
 #     structured record is Done, and missing ids stay open.
@@ -100,8 +101,9 @@
 #     question for presentation, plus uncut title_full and reason_full
 #     (queued rows: title_full and hold_reason_full); their overview summary,
 #     reason, title, and hold_reason fields stay bounded. A decisions_open
-#     captain-hold row also carries hold_set and origin (null when unrecorded),
-#     so a reader can tell when the hold was raised and which task carries it.
+#     captain-hold row also carries hold_set, hold_reconciled, and origin (null
+#     when unrecorded), so a reader can tell when the hold was raised or re-held
+#     and which task carries it.
 #     Both captain-hold row shapes also carry choices (the options, links,
 #     free_text, and no_link that bin/fm-captain-hold.sh recorded on the hold),
 #     answers (each recorded resolution's at, mode, and first paragraph of
@@ -600,6 +602,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
              hold_kind:metadata($rest; "hold-kind"),
              hold_until:metadata($rest; "hold-until"),
              hold_set:null,
+             hold_reconciled:null,
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
              blocked_by_ids:blocked_by_ids($rest),
              blocked_reason:blocked_reason($rest),
@@ -642,6 +645,9 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          | .hold_reconciled = ([.body_lines[]
+              | capture("^Captain hold reconciled:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)$")?
+              | .v] | max)
           | .local_note = (.local_note
               // (if any(.body_lines[];
                     test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
@@ -1195,6 +1201,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             hold_bucket:(.hold_bucket // null),
             hold_age_days:(.hold_age_days // null),
             hold_set:(.hold_set // null),
+            hold_reconciled:(.hold_reconciled // null),
             origin:([(.body_lines // [])[]
                      | capture("^Captain hold origin:[[:space:]]*(?<v>[^[:space:]]+)")?
                      | .v][0] // null),
