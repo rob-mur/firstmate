@@ -59,7 +59,11 @@
 #          action reaches its agent at once instead of on the next monitoring
 #          cycle.
 # reply    Post <text> to the board's Lavish chat, prefixed with the page title,
-#          through `lavish-axi reply`; it never opens a tab.
+#          through `lavish-axi reply`; it never opens a tab. A caller whose
+#          PATH lacks lavish-axi uses the directory a board refresh recorded
+#          (bin/fm-lavish-path-lib.sh); with neither it exits 1 naming the
+#          missing tool. A reply Lavish refuses exits 1 with Lavish's own error,
+#          code, and suggested recovery on stderr.
 # end      Mark the page ended; the board removes it on its next refresh, which
 #          end requests at once. The page's folder and answers are kept. Ending
 #          a page never ends the board or any other page.
@@ -259,14 +263,19 @@ cmd_wait() {
 }
 
 cmd_reply() {
-  local id=${1-} text=${2-} title
+  local id=${1-} text=${2-} title out
   need_id "$id"
   [ -n "$text" ] || usage
   [ -f "$(record "$id")" ] || die "no registered page: $id"
   [ -f "$BOARD" ] || die "no bearings board in this home"
   title=$(field "$id" title)
-  lavish-axi reply "$BOARD" --agent-reply "$title: $text" >/dev/null \
-    || die "Lavish did not accept the reply for page $id"
+  # shellcheck source=bin/fm-lavish-path-lib.sh
+  . "$SCRIPT_DIR/fm-lavish-path-lib.sh"
+  fm_lavish_reachable "$STATE/.board-refresh.lavish-dir" \
+    || die "cannot reply to page $id: lavish-axi is not on PATH and no board refresh recorded where it is; add its directory to PATH (\`npm prefix -g\`/bin) and run the reply again"
+  out=$(lavish-axi reply "$BOARD" --agent-reply "$title: $text" 2>&1) \
+    || die "Lavish did not accept the reply for page $id:
+$out"
 }
 
 cmd_end() {
