@@ -641,6 +641,52 @@ test_a_home_board_is_built_by_its_own_code_whoever_asks() {
   pass "a home's board is built by its own code, whichever code root asks for the refresh"
 }
 
+# An older code root's refresher, as a secondmate on an older release starts by
+# forwarding a kick, holds the home's lock and serves every later request with
+# its own code. Stands in for that loop: it holds the lock between passes until
+# it is stopped.
+start_old_refresher() {  # <old-root> <home> -> pid
+  local pidfile="$2/old-refresher.pid" i=0
+  mkdir -p "$1/bin"
+  cat > "$1/bin/fm-board-refresh.sh" <<'SH'
+#!/usr/bin/env bash
+lock="${FM_STATE_OVERRIDE:-$FM_HOME/state}/.board-refresh.lock"
+mkdir "$lock" || exit 1
+trap 'rmdir "$lock"' EXIT
+printf '%s\n' "$$" > "$OLD_REFRESHER_PIDFILE"
+while :; do touch "$lock"; sleep 1; done
+SH
+  chmod +x "$1/bin/fm-board-refresh.sh"
+  rm -f "$pidfile"
+  ( OLD_REFRESHER_PIDFILE=$pidfile in_home "$2" nohup bash "$1/bin/fm-board-refresh.sh" \
+      >/dev/null 2>&1 </dev/null & )
+  while [ ! -s "$pidfile" ]; do
+    i=$((i + 1)); [ "$i" -lt 50 ] || fail "the old refresher did not start"; sleep 0.1
+  done
+  cat "$pidfile"
+}
+
+test_a_home_replaces_a_refresher_another_code_root_left_running() {
+  local home other old_pid other_pid
+  [ -r "/proc/$$/environ" ] || { echo "skip: no /proc process environments"; return 0; }
+  home=$(make_code_home code-replace)
+  in_home "$home" "$home/bin/fm-bearings-board-payload.sh" > "$home/payload.json" || fail "payload failed"
+  in_home "$home" "$home/bin/fm-bearings-board.sh" build "$home/payload.json" >/dev/null || fail "the board did not build"
+  in_home "$home" "$home/bin/fm-board-refresh.sh" || fail "baseline refresh failed"
+  other=$(make_home code-replace-other)
+  old_pid=$(start_old_refresher "$TMP_ROOT/old-root" "$home")
+  other_pid=$(start_old_refresher "$TMP_ROOT/old-root" "$other")
+  add_task "$home" t1
+  in_home "$home" "$home/bin/fm-board-refresh.sh" --kick || fail "the home kick failed"
+  await_rebuilds "$home" 2 || fail "the home's own code did not take over from the old refresher"
+  grep -q 't1' "$home/.lavish/bearings-board.data.js" || fail "the new refresher did not read the fleet"
+  kill -0 "$old_pid" 2>/dev/null && fail "the old code root's refresher for this home is still running"
+  kill -0 "$other_pid" 2>/dev/null || fail "a refresher for another home was stopped"
+  [ -d "$other/state/.board-refresh.lock" ] || fail "another home's refresher lost its lock"
+  kill "$other_pid" 2>/dev/null
+  pass "a home's own code replaces a refresher another code root left running for it, and no other"
+}
+
 fm_test_run \
   test_a_home_without_a_board_is_left_alone \
   test_the_board_is_rebuilt_only_when_fleet_state_changes \
@@ -663,4 +709,5 @@ fm_test_run \
   test_a_done_task_ranked_first_never_renders_as_a_card \
   test_a_secondmate_change_refreshes_the_parent_board \
   test_new_board_code_is_installed_with_an_unchanged_fleet \
-  test_a_home_board_is_built_by_its_own_code_whoever_asks
+  test_a_home_board_is_built_by_its_own_code_whoever_asks \
+  test_a_home_replaces_a_refresher_another_code_root_left_running
