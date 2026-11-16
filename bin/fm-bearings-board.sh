@@ -109,7 +109,16 @@
 # `question` or `decide` carries a `?`, or its title does - and a way to answer
 # it, at least one option of its own besides the injected reconcile choice or a
 # free-text answer. A card whose options include `done` and `not-done` asks
-# for an in-person action, so its prompt may be an imperative sentence. Exempt are a merge card (its type is the
+# for an in-person action, so its prompt may be an imperative sentence. A card
+# also needs the decision's own values and something to click: its options must
+# be recorded ones - not empty and not `options_inferred`, the payload mark for
+# a hold that recorded none - unless it carries `free_text: true` (a hold that
+# declared a free-text question) or is a done/not-done action card; and it
+# needs a link (`links` or `pr_url`) unless it carries `no_link: true`. A card
+# with `from_status: true` (a worker status question or a review page the
+# generator raised, which has no hold to record choices on) needs only the
+# prompt and a way to answer. The booleans `free_text`, `no_link`,
+# `options_inferred` and `from_status` are optional. Exempt are a merge card (its type is the
 # question) and a page-backed card, one carrying `off_board` or with no options
 # and a Lavish page link, whose decision is on that page. Each refused card is
 # named on stderr as an `undecided-card: <key>: missing <field> (<why>)` line
@@ -164,6 +173,17 @@
 # session the listing no longer shows (an ended standalone page) resolves only
 # when a live page record names it in `replaces` (bin/fm-board-page.sh open
 # --replaces), which maps that old session URL to the registered page.
+# A live page also links itself to the work it is about: before the decision
+# check, a card whose key or `context.task` the page record names in `task`
+# (bin/fm-board-page.sh open --task), whose key is the page id, or whose text
+# (title, question, about, context reason or notes) names the page id as a
+# whole word gains a `{page, label}` link to it, and a Waiting or Charted row
+# matched the same way gains `context.page` ({id, title}).
+#
+# EVERY BOARD ITEM MAY CARRY `context`, what it expands to show in place: an
+# object of `task`, `reason` and `report` (strings), `answers` (an array of
+# {at, mode, text}, each recorded captain answer with its date and words) and
+# `notes` (an array of strings), plus `page` added by build as above.
 # A decision card MAY carry `off_board`, an object of `question`, `about`,
 # `freeform_hint`, `malformed` (strings) and `allow_freeform` (boolean): what
 # the card shows when the page it is answered on is not in the board. When a
@@ -297,6 +317,20 @@ validate_payload() {  # <data.json>
       and (test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$")
         or test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#][^[:space:]]*)?$"));
     def page_id: type == "string" and test("^[a-z0-9][a-z0-9-]{0,63}$");
+    def optional_bool($name): (has($name) | not) or (.[$name] | type == "boolean");
+    def opt_str: . == null or type == "string";
+    def optional_context:
+      (has("context") | not)
+      or (.context
+        | type == "object"
+          and optional_string("task") and optional_string("reason") and optional_string("report")
+          and ((has("answers") | not)
+            or (.answers | type == "array"
+              and ([.[] | type == "object" and (.at | opt_str) and (.mode | opt_str)
+                    and (.text | type == "string")] | all)))
+          and ((has("notes") | not) or (.notes | type == "array" and all(.[]; type == "string")))
+          and ((has("page") | not)
+            or (.page | type == "object" and (.id | page_id) and (.title | type == "string"))));
     def optional_links:
       (has("links") | not)
       or (.links
@@ -338,6 +372,9 @@ validate_payload() {  # <data.json>
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
+      and optional_bool("free_text") and optional_bool("no_link")
+      and optional_bool("options_inferred") and optional_bool("from_status")
+      and optional_context
       and ((has("close") | not) or (.close == "done" or .close == "release"))
       and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
       and ((has("recommend_value") | not)
@@ -363,7 +400,8 @@ validate_payload() {  # <data.json>
       and optional_subject;
     def waiting_item:
       type == "object" and repo_marker and (.key | slug(128))
-      and (.title | nonempty_string) and (.reason | type == "string");
+      and (.title | nonempty_string) and (.reason | type == "string")
+      and optional_context;
     def open_mr_item:
       type == "object"
       and ((keys - ["key", "repo", "title", "url", "state"]) | length == 0)
@@ -376,6 +414,7 @@ validate_payload() {  # <data.json>
       and (.dispatchable | type == "boolean")
       and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
       and optional_filed
+      and optional_context
       and (if .kind == "warning" then .dispatchable == false else true end);
     type == "object"
     and (.schema == $schema)
@@ -417,6 +456,8 @@ undecided_cards() {  # <data.json>
     | .key as $key
     | ([.question, .decide] | map(text) | map(select(length > 0))) as $prompts
     | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $action
+    | (.from_status == true) as $raised
+    | ((.links // [] | length) > 0 or ((.pr_url // "") | length) > 0 or .no_link == true) as $linked
     | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
          then "question (no question or decide prompt, and the title is not a question)"
          elif ($prompts | length) > 0 and (any($prompts[]; asks) | not) and (.title | asks | not)
@@ -424,7 +465,13 @@ undecided_cards() {  # <data.json>
          then "question (\($prompts[0] | if length > 80 then .[:79] + "…" else . end) is not a question)"
          else empty end),
         (if (.options | length) == 0 and .allow_freeform != true
-         then "options (no options and no free-text answer)" else empty end) ]
+         then "options (no options and no free-text answer)"
+         elif ($raised | not) and .free_text != true and ($action | not)
+              and ((.options | length) == 0 or .options_inferred == true)
+         then "options (no recorded choices: re-hold with --option <value>=<label> or --free-text)"
+         else empty end),
+        (if ($raised | not) and ($linked | not)
+         then "link (no link: re-hold with --link <url|page:id> or --no-link)" else empty end) ]
     | select(length > 0)
     | "\($key): missing \(join(", "))"
   ' "$1"
@@ -441,7 +488,8 @@ live_pages_json() {
              and (.id | type == "string" and test("^[a-z0-9][a-z0-9-]{0,63}$"))
              and (.title | type == "string" and length > 0))
            | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/page.html"),
-              replaces: ([.replaces // [] | arrays | .[] | strings])}' "$f" 2>/dev/null
+              replaces: ([.replaces // [] | arrays | .[] | strings]),
+              task: (.task | if type == "string" and length > 0 then . else null end)}' "$f" 2>/dev/null
   done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))'
 }
 
@@ -474,6 +522,30 @@ lavish_session_pages() {  # <pages-json>
         | from_entries'
 }
 
+# Link each card, Waiting row and Charted row to the live page about its work
+# (see A PAGE LINK OPENS IN PLACE above). Reads the effective payload on stdin.
+attach_page_links() {  # <pages-json>
+  jq -c --argjson pages "$1" '
+    def names($id): type == "string" and test("(^|[^a-z0-9-])" + $id + "($|[^a-z0-9-])"; "i");
+    def task_ids($i): [$i.key, $i.id, ($i.context.task // null)] | map(strings | ., (split("/") | last)) | unique;
+    def about_page($i; $p):
+      (task_ids($i) as $t | ($t | index([$p.id])) or ($p.task != null and ($t | index([$p.task]))))
+      or any(($i.title, $i.question, $i.about, $i.reason, $i.context.reason, ($i.context.notes // [])[]); names($p.id));
+    def pages_for($i): [ $pages[] | select(about_page($i; .)) ];
+    .captains_call |= map(
+      . as $c
+      | [ pages_for($c)[] | {page: .id, label: .title} ] as $auto
+      | if ($auto | length) == 0 then .
+        else .links = ( [ (.links // [])[] | select(has("page")) ] + $auto + [ (.links // [])[] | select(has("page") | not) ]
+                        | reduce .[] as $l ([]; ($l.url // ("page:" + $l.page)) as $k
+                                                | if any(.[]; (.url // ("page:" + .page)) == $k) then . else . + [$l] end)
+                        | .[:8] ) end)
+    | def with_page: . as $r | (pages_for($r)[0] // null) as $p
+        | if $p != null and has("context") then .context.page = {id: $p.id, title: $p.title} else . end;
+      (if has("waiting") then .waiting |= map(with_page) else . end)
+    | .charted |= map(with_page)'
+}
+
 # Rewrite every card link to a Lavish page as described under A PAGE LINK OPENS
 # IN PLACE in the header. Reads the effective payload on stdin.
 resolve_page_links() {  # <pages-json> <sessions-json>
@@ -492,7 +564,7 @@ resolve_page_links() {  # <pages-json> <sessions-json>
              elif $id != null and ($live | index([$id])) then label_of + {page: $id}
              else label_of + {not_in_board: true} end)
         else . end;
-    . + {pages: ($pages | map(del(.replaces)))}
+    . + {pages: ($pages | map(del(.replaces, .task)))}
     | .captains_call |= map(
         (if has("links") then .links |= map(resolve) else . end)
         | if has("off_board") then
@@ -683,6 +755,10 @@ command_build() {
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
   fi
+  pages=$(live_pages_json)
+  if ! json=$(attach_page_links "$pages" < "$effective") || ! printf '%s\n' "$json" > "$effective"; then
+    rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot link the board pages: $data"
+  fi
   undecided=$(undecided_cards "$effective") \
     || { rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot check the Captain's Call cards: $data"; }
   if [ -n "$undecided" ]; then
@@ -690,7 +766,6 @@ command_build() {
     printf '%s\n' "$undecided" | sed 's/^/undecided-card: /' >&2
     fail "refusing Captain's Call cards with no explicit decision - $(printf '%s' "$undecided" | paste -sd ';' - | sed 's/;/; /g'): $data"
   fi
-  pages=$(live_pages_json)
   # Only a card that links a Lavish page needs the server's session listing.
   sessions='{}'
   if jq -e '[.captains_call[]?.links[]?.url | strings

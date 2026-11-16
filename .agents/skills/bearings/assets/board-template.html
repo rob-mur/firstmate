@@ -278,6 +278,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 .bb-expand[aria-expanded="false"] > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bb-row-details { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-top: 8px; }
 .bb-row-details[hidden] { display: none; }
+.bb-ctx-toggle { font-size: var(--fs-2xs); font-weight: 700; color: var(--ocean-600); margin-top: 6px; }
 .bb-decision__kicker { font-size: var(--fs-2xs); color: var(--text-faint); font-family: var(--font-mono); overflow-wrap: anywhere; }
 .bb-reorder { margin-left: 6px; }
 
@@ -773,7 +774,38 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     rows.forEach(function (r) { if (r[1]) ctx.appendChild(ctxRow(r[0], r[1])); });
     details.appendChild(ctx);
     appendLinks(details, item);
+    appendContext(details, item.context);
     return details;
+  }
+  /* An item's recorded context, shown in place: its task, the full hold
+     reason, each recorded captain answer with its date and exact words, the
+     key backlog notes, and its report - a board page opens in place, a report
+     with no page shows its path. Nothing here leaves the board. */
+  function hasContext(c) {
+    return !!(c && typeof c === "object" && (c.reason || c.report || c.page
+      || (Array.isArray(c.answers) && c.answers.length) || (Array.isArray(c.notes) && c.notes.length)));
+  }
+  function appendContext(host, c) {
+    if (!hasContext(c)) return;
+    var box = el("div", "bb-ctx bb-ctx--record");
+    if (c.task) box.appendChild(ctxRow("task", c.task));
+    if (c.reason) box.appendChild(ctxRow("reason", c.reason));
+    (Array.isArray(c.answers) ? c.answers : []).forEach(function (a) {
+      if (!a || typeof a.text !== "string") return;
+      var when = [a.at, a.mode].filter(function (v) { return typeof v === "string" && v; }).join(" - ");
+      box.appendChild(ctxRow("answered", (when ? when + ": " : "") + a.text));
+    });
+    (Array.isArray(c.notes) ? c.notes : []).forEach(function (n) { box.appendChild(ctxRow("note", n)); });
+    if (c.page && typeof c.page.id === "string") {
+      var b = el("button", "bb-decision__link bb-decision__link--page", c.page.title || "Report");
+      b.type = "button";
+      b.setAttribute("data-board-page", c.page.id);
+      b.addEventListener("click", function () { showPage(c.page.id); });
+      box.appendChild(b);
+    } else if (c.report) {
+      box.appendChild(ctxRow("report", c.report));
+    }
+    host.appendChild(box);
   }
 
   /* Captain's chosen answer order. Stored beside the drafts so it survives a
@@ -924,6 +956,16 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       pad.appendChild(ctx);
     }
     appendLinks(pad, item);
+    /* the decision's recorded context expands in place under its links */
+    if (hasContext(item.context)) {
+      var ctxBtn = el("button", "bb-expand bb-ctx-toggle");
+      ctxBtn.appendChild(el("span", "bb-ctx-toggle__label", "What was said about this"));
+      var ctxDetails = el("div", "bb-row-details");
+      appendContext(ctxDetails, item.context);
+      pad.appendChild(ctxBtn);
+      pad.appendChild(ctxDetails);
+      expandable("card-context:" + item.key, ctxBtn, ctxDetails);
+    }
 
     var form = document.createElement("form");
     form.id = stableId("bb-card-", item.key);
@@ -1024,6 +1066,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
         note: note
       };
       if (item.close) ctxData.close = item.close;
+      /* Free text on a card with its own options is a comment, not an
+         answer: the intake closes the call only on a picked option, unless
+         the hold declared a free-text question. */
+      if (item.options.some(function (o) { return o.value !== "reconcile"; })) ctxData.has_options = true;
+      if (item.free_text === true) ctxData.free_text = true;
       /* the captain's priority: answers are handled in this order */
       var rank = orderKeys.indexOf(item.key) + 1;
       ctxData.order = rank;

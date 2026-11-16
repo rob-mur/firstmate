@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-board-page.sh dir <page-id>
-#   fm-board-page.sh open <page-id> --title <title> [--replaces <session-url-or-id>]...
+#   fm-board-page.sh open <page-id> --title <title> [--task <task-id>] [--replaces <session-url-or-id>]...
 #   fm-board-page.sh wait <page-id> [--timeout-s <seconds>]
 #   fm-board-page.sh reply <page-id> <text>
 #   fm-board-page.sh end <page-id>
@@ -36,6 +36,9 @@
 #          session this page now stands in for (its /session/<id> URL or bare
 #          id); the board then opens a card link to that old session as this
 #          page, in place. Re-opening keeps the sessions already recorded.
+#          --task names the backlog task the page is about; the board links
+#          that task's Captain's Call card and context to this page, in place.
+#          Re-opening without --task keeps the task already recorded.
 # wait     Block until the page has something for its agent, then print
 #            page: <page-id>
 #            status: feedback | ended | timeout
@@ -101,7 +104,7 @@
 # (inside the board's Lavish artifact folder, so the board can frame them, and
 # outside the board file Lavish watches, so writing them never reloads the
 # board), and its record under state/pages/<id>/: page.json
-# ({id,title,opened,state,replaces}) plus inbox/ and inbox/handled/.
+# ({id,title,opened,state,replaces,task}) plus inbox/ and inbox/handled/.
 #
 # One refresh policy covers the whole board app: no frame ever reloads. The
 # board and each page poll their own data file and patch in place; the board
@@ -199,12 +202,17 @@ cmd_dir() {
 }
 
 cmd_open() {
-  local id=${1-} title='' dir sid replaces=()
+  local id=${1-} title='' task='' dir sid replaces=()
   need_id "$id"
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) [ $# -ge 2 ] || usage; title=$2; shift 2 ;;
+      --task)
+        [ $# -ge 2 ] || usage
+        [[ $2 =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "--task needs a task id, not '$2'"
+        task=$2
+        shift 2 ;;
       --replaces)
         [ $# -ge 2 ] || usage
         sid=$2
@@ -222,8 +230,10 @@ cmd_open() {
   # shellcheck disable=SC2016 # jq program text, not shell expansion.
   write_json "$(record "$id")" \
     '{id: $id, title: $title, opened: (.opened // $now), state: "live",
-      replaces: (((.replaces // []) | arrays | map(strings)) + $rep | unique)}' \
-    --arg id "$id" --arg title "$title" --arg now "$(date -u +%FT%TZ)" \
+      replaces: (((.replaces // []) | arrays | map(strings)) + $rep | unique)}
+     + (if $task != "" then {task: $task}
+        elif (.task | type) == "string" then {task: .task} else {} end)' \
+    --arg id "$id" --arg title "$title" --arg task "$task" --arg now "$(date -u +%FT%TZ)" \
     --argjson rep "$(jq -nc '$ARGS.positional' --args ${replaces[@]+"${replaces[@]}"})" \
     || die "cannot record page $id"
   refresh_board

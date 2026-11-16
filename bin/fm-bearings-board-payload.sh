@@ -52,7 +52,17 @@
 #                      reason's own numbered, lettered or listed options in full, a two-way
 #                      or, yes/no, done/not done for an action the captain performs, else
 #                      approve/decline; an authored overlay `options` still
-#                      wins) with reconcile secondary. Options the text refers to but does
+#                      wins) with reconcile secondary. A hold that recorded its
+#                      choices (`choices` from bin/fm-captain-hold.sh hold --option,
+#                      --free-text, --link, --no-link) uses them instead: its options
+#                      are the card's, its links lead the card's `links` (`page:<id>`
+#                      becomes `{page}`), and it carries `free_text`/`no_link` when it
+#                      declared them; a hold that recorded no options carries
+#                      `options_inferred`, which `build` refuses; a worker status
+#                      question or review-page card carries `from_status`. Every card, waiting
+#                      row, and charted row also carries `context` ({task, reason,
+#                      answers[{at, mode, text}], notes, report} from the snapshot's
+#                      structured fields), which the board expands in place. Options the text refers to but does
 #                      not list ("A/B/C") come from its other listing or its `reason_earlier`
 #                      lines; when none lists them the card carries `malformed`, a sentence
 #                      saying so, and no button for them (recover_options). And any
@@ -139,7 +149,8 @@
 # key or id they refine, so a missing entry leaves the deterministic default.
 #   captains_call  {"<key>": {title, question, about, decide, detail, options, recommend_value,
 #                   type, close, risk, pr_url, links, subject, freeform_hint,
-#                   allow_freeform, repo} | null}   (null drops the card)
+#                   allow_freeform, repo, free_text, no_link} | null}   (null drops the card;
+#                   an authored `options` clears `options_inferred`)
 #   captains_call_extra  [<call item>, ...]   merge, credential, and any other card
 #                   waiting on the captain that firstmate did not hold, appended
 #   underway       {"<id>": {repo}}
@@ -207,12 +218,21 @@ fi
 
 printf '%s\n' "$SNAP_JSON" | jq -e '.schema == "fm-bearings.v1"' >/dev/null 2>&1 \
   || fail "input is not an fm-bearings.v1 snapshot"
+# The snapshot keeps a gate's title_full/reason_full behind --fields gate-text
+# and prefixes the hold note into reason_full; every card here reads the gate's
+# always-on raw card_title/card_reason instead, through those two names.
+SNAP_JSON=$(printf '%s\n' "$SNAP_JSON" | jq -c '
+  if (.gates | type) == "array" then
+    .gates |= map(.title_full = (.card_title // .title_full)
+                  | .reason_full = (.card_reason // .reason_full))
+  else . end') || fail "snapshot gates unreadable"
 printf '%s\n' "$COPY_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 \
   || fail "copy overlay is not a JSON object"
 
 overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
   { captains_call: ["title","about","decide","detail","options","recommend_value","type","close",
-                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question"],
+                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question",
+                    "free_text","no_link"],
     underway: ["repo"],
     landed: ["repo","pr_url","subject"],
     charted: ["title","reason","repo","dispatchable","filed"] } as $allowed
@@ -306,7 +326,8 @@ fi
 
 jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$PRIO_JSON" --argjson pr_states "$PR_STATES_JSON" --arg today "$(date -u +%Y-%m-%d)" "$FM_BEARINGS_QUESTION_JQ_DEFS"'
   def card_fields: ["title","about","decide","detail","options","recommend_value","type","close",
-                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question"];
+                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo","question",
+                    "free_text","no_link"];
   def underway_fields: ["repo"];
   def landed_fields: ["repo","pr_url","subject"];
   def charted_fields: ["title","reason","repo","dispatchable","filed"];
@@ -326,6 +347,19 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     | if ($u | https_url) then $u else null end;
   def overlay($section; $id; $allowed):
     (($copy[$section] // {})[$id] // {}) | with_entries(select(.key as $k | $allowed | index($k)));
+  # What a board item expands to show in place: its task, the full hold or gate
+  # reason, each recorded captain answer with its date and words, the task notes,
+  # and its report, all from the snapshot structured fields.
+  def context_of($d):
+    ( {task: (($d.task // $d.id // $d.key) | if type == "string" and length > 0 then . else null end),
+       reason: (($d.reason_full // $d.reason) | nz(null)
+                | if . == null then null else (tostring | clean_reason | nz(null)) end),
+       answers: [ ($d.answers // [])[] | objects
+                  | {at: (.at // null), mode: (.mode // null), text: ((.text // "") | tostring)}
+                  | select(.text != "") ][:12],
+       notes: [ ($d.notes // [])[] | strings | select(length > 0) ][:12],
+       report: ($d.report_path | if type == "string" and length > 0 then . else null end)} )
+    | with_entries(select(.value != null and .value != []));
 
   ($snap.contributions.captain // []) as $contrib
   | ($snap.recorded_prs // []) as $recorded
@@ -468,7 +502,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
             title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
             reason: (if handed($d) then handed_reason($d)
                      else (($d.reason_full // $d.reason) | nz(null) | if . == null then "waiting" else (clean_reason | nz("waiting")) end) end),
-            repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null) } ] ) as $waiting
+            repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null),
+            context: context_of($d) } ] ) as $waiting
   # A card link is labelled by what it points at, never by its raw URL: a
   # PR/MR/issue number from the URL shape, or for a Lavish page the kind the
   # text just before the URL names (understand, review, report). Question and
@@ -539,7 +574,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                              elif any(.[]; .value == $o.value) then . + [$o + {value: ($o.value + "-" + ((length + 1) | tostring))}]
                              else . + [$o] end) ),
               allow_freeform: true,
-              freeform_hint: "answer in your own words (say later to defer)"
+              freeform_hint: "answer in your own words (say later to defer)",
+              context: context_of($d)
             }
             # The heading is one short asking sentence; the full cleaned text
             # (with the text of any folded twin) is the body, each URL shown as its
@@ -589,6 +625,33 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                    [ ($d.reason_earlier // [])[], (($d.twins // [])[] | (.reason_earlier // [])[]) ]
                    | map(tostring | clean_reason) | reverse)
             end
+          # The choices and links the hold recorded (bin/fm-captain-hold.sh hold
+          # --option/--link/--free-text/--no-link) are the card own: recorded
+          # options replace the ones read from its text, recorded links lead, and
+          # a `page:<id>` link opens that board page in place. A hold that
+          # recorded no options carries options_inferred, which build refuses.
+          | (($d.choices // {}) | if type == "object" then . else {} end) as $ch
+          | ( [ ($ch.links // [])[] | objects | select(.target | type == "string" and length > 0)
+                | . as $l
+                | if ($l.target | startswith("page:"))
+                  then {page: $l.target[5:], label: (($l.label // "") | nz("Board page"))}
+                  else {url: $l.target, label: (($l.label // "") | nz(link_label($l.target; $l.target)))} end ]
+              + (.links // [])
+              | reduce .[] as $l ([]; ($l.url // ("page:" + $l.page)) as $k
+                                      | if any(.[]; (.url // ("page:" + .page)) == $k) then . else . + [$l] end)
+              | .[:8] ) as $ls
+          | if ($ls | length) > 0 then .links = $ls else . end
+          | if (($ch.options // []) | length) > 0
+            then .options = [ $ch.options[] | objects | . as $o | {value: $o.value, label: (($o.label // "") | nz($o.value))} ]
+                 | del(.malformed)
+            elif ($d.verb // "") == "captain-hold" and ($ch.free_text != true) then .options_inferred = true
+            else . end
+          | if $ch.free_text == true then .free_text = true else . end
+          | if $ch.no_link == true then .no_link = true else . end
+          # A worker status question or a review page the generator raised has
+          # no hold to record choices on.
+          | if ($d.source // "") == "status" or ($d.verb // "") == "review-ready"
+            then .from_status = true else . end
           # An option the reason itself marks recommended is the card recommendation.
           | ( if ($d.verb // "") == "review-ready" then null
               else [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
@@ -623,17 +686,18 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                    | (($t | test(page_phrase; "i"))
                       or (($t | endswith("…")) and ($stem | length) > 0
                           and ($paged | gsub("[[:space:]]+"; " ") | ascii_downcase | startswith($stem)))) as $points
-                   | { key, type, repo,
+                   | { key, type, repo, context,
                        title: (if $points and ($subject | length) > 0 and ($subject | length) <= 120
                                then (if $owner != "(main)" and ($t | startswith($owner + ": ")) then $owner + ": " else "" end) + $subject
                                else $t end),
                        options: [], allow_freeform: false, off_board: $off }
-                     + ( [ (.links // [])[] | select(.url | startswith("http://dev-1.tailf848b0.ts.net:4387/")) ]
+                     + with_entries(select(.key == "free_text" or .key == "no_link" or .key == "from_status"))
+                     + ( [ (.links // [])[] | select(.page != null or ((.url // "") | startswith("http://dev-1.tailf848b0.ts.net:4387/"))) ]
                          | if length > 0 then {links: .} else {} end ) )
             end
           | overlay("captains_call"; $d.key; card_fields) as $ov
           | . + $ov
-          | if ($ov | has("options")) then del(.malformed) else . end
+          | if ($ov | has("options")) then del(.malformed, .options_inferred) else . end
           | if has("recommend_value") and ($ov | has("recommend_value") | not)
                and (.recommend_value as $rv | any(.options[]; .value == $rv) | not)
             then del(.recommend_value) else . end
@@ -661,8 +725,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
             # refuses a card that states no decision).
             question: "What should happen with this contribution?",
             pr_url: .url,
-            options: [], allow_freeform: true,
-            freeform_hint: "answer in your own words (say later to defer)" }
+            options: [], allow_freeform: true, free_text: true,
+            freeform_hint: "answer in your own words (say later to defer)",
+            context: {task: $c.task, reason: ($c.reason | nz("waiting on the captain"))} }
         | . as $card
         | select((($copy.captains_call // {}) | has($card.key) | not)
                  or ($copy.captains_call[$card.key] != null)) ]
@@ -691,6 +756,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
             reason: ($r.reason | nz("")),
             dispatchable: (($synthetic | not) and ($r.blocked_by | nz("")) == "" and ($r.reason | nz("")) == ""),
             filed: (.filed // null) }
+          + (if $synthetic then {} else {context: context_of($r)} end)
           + (if $synthetic then {kind: "warning"} else {kind: "queued"} end)
         | if .kind == "warning" then .dispatchable = false else . end
         | . as $row
@@ -727,7 +793,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                     + (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key))),
             reason: ("until " + ((($d.hold_until // "") | tostring | .[:10]) | nz("a later date")) + ": "
                      + (($d.reason_full // $d.reason) | nz("deferred"))),
-            dispatchable: false, kind: "queued" }
+            dispatchable: false, kind: "queued", context: context_of($d) }
         | . as $row | . + overlay("charted"; $row.id; charted_fields)
         | .dispatchable = false ] ) as $deferred_rows
 
