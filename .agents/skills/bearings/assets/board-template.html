@@ -160,6 +160,7 @@ a { color: inherit; text-decoration: none; }
 .bb-callwrap { display: flex; flex-direction: column; gap: 12px; }
 /* extra top margin clears the pile edges that poke below the active card */
 .bb-stacknav { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.bb-stacknav[hidden] { display: none; }
 .bb-stacknav__count { flex: 1 1 auto; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-muted); }
 .bb-stacknav__btn {
   display: inline-grid; place-items: center; width: 34px; height: 34px; cursor: pointer;
@@ -1218,6 +1219,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       emptyNote = null;
     }
     stackNav.hidden = empty;
+    /* the last deck's counter must not outlive its cards */
+    if (empty) stackCount.textContent = "";
     orderGo.textContent = empty ? "Save priority" : orderGoLabel;
   }
   stackPrev.addEventListener("click", function () { if (cards.length) showCard(active - 1); });

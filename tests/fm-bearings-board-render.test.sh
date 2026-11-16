@@ -267,8 +267,25 @@ test_a_departed_card_leaves_the_board_even_while_it_is_busy() {
   pass "a departed card leaves the board even while it is queued, focused or filled in"
 }
 
+# A refresh that leaves no decisions must not keep the last deck's counter:
+# the old "card N of M · K answered" stays on screen otherwise.
+test_a_refresh_to_no_decisions_clears_the_stack_counter() {
+  local home out run
+  home=$(make_home live-emptied)
+  build_call_board "$home" '["k1","k2","k3"]'
+  run=$(rebuild_command "$home" '.captains_call = []')
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "go,type:k1,submit:k1,run,poll")
+  printf '%s' "$out" | jq -e '
+    .cards == [] and .stack.navHidden
+      and (.stack.count | test("card|answered") | not)
+      and .reloads == [] and .polls == 1
+  ' >/dev/null || fail "a refresh to no decisions kept a stale counter or reloaded: $out"
+  pass "a refresh that leaves no decisions shows no stale card counter or answered count"
+}
+
 test_a_refresh_patches_changed_cards_without_reloading_or_touching_typed_text
 test_a_refresh_leaves_a_card_alone_while_it_is_being_edited
+test_a_refresh_to_no_decisions_clears_the_stack_counter
 test_a_departed_card_leaves_the_board_even_while_it_is_busy
 
 test_every_card_type_renders_its_links() {
