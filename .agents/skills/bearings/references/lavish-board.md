@@ -16,7 +16,7 @@ The "bearings" header on the page links back to the board.
 The list's order survives a refresh and rebuild like a queued answer, and a row added since asks to be placed again.
 `bin/fm-bearings-board-payload.sh` already sorts cards and tasks by the stored priority, so a rebuilt board starts in the captain's order.
 Every question card carries real default answer choices derived from its question, and the standard reconcile choice stays secondary.
-A yes/no question gets yes and no, numbered sub-questions become one choice each, a plain two-way "A or B" question gets both sides, and any other question gets approve and decline.
+A yes/no question gets yes and no, numbered sub-questions become one choice each, a plain two-way "A or B" question gets both sides, a request that the captain do something in person (dismiss, merge, run, re-run, log in) gets done and not done (say why), and any other request gets approve and decline.
 Authored overlay options still replace the derived ones.
 `bin/fm-bearings-question-lib.sh` owns that derivation and the question-versus-wait rule for the payload and the snapshot.
 URLs in a question lift into the card's links (https or a Lavish page, at most eight), each labelled by what it points at (`PR 837`, `MR 872`, `Understand page`, `Review page`), and the question text shows that label in place of the URL; everything else stays escaped text.

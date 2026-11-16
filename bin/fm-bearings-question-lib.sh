@@ -82,8 +82,15 @@
 #      with no alternatives becomes yes and no;
 #   5. any other question offers no choices, so the card takes a free-text
 #      answer rather than choices that do not fit it;
-#   6. a reason with no question mark and no option list is a yes-or-no
-#      go-ahead and becomes approve and decline.
+#   6. a reason with no question mark and no option list that asks the
+#      captain to do the thing in person (is_action: a sentence that opens with
+#      dismiss, merge, run, re-run, log in, sign in or re-authenticate,
+#      optionally after "please" or "captain, ...") offers done and not done,
+#      the not-done choice asking for the reason in the answer box;
+#   7. any other reason with no question mark and no option list is a
+#      yes-or-no go-ahead and becomes approve and decline.
+# The done and not-done values are the captain's report, recorded as the
+# answer text; neither sets a close mode, so neither reads as a release.
 # The asking sentence is the last sentence before the first question mark.
 # The board's `build` appends the standard reconcile choice after these, and a
 # payload never authors it.
@@ -235,6 +242,8 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
       and ($r | asks | not)
       and ($r | test("(^|[^a-z])(choose|pick|decide|which)([^a-z]|$)"; "i") | not)
       and ($r | test("(^|[^a-z])(review|understand|lavish|report|pr|mr|pull request|merge request)( (page|board))?(( is| now| are))*[[:space:]]*(live|ready|up|posted)([^a-z]|$)"; "i"));
+  def is_action:
+    test("(^|[.!;:][[:space:]]+)(please[[:space:]]+)?((the[[:space:]]+)?captain[,:]?[[:space:]]+(to[[:space:]]+|must[[:space:]]+|needs?[[:space:]]+to[[:space:]]+|please[[:space:]]+)?)?(dismiss|merge|run|re-?run|log[[:space:]]?in(to)?|sign[[:space:]]?in(to)?|re-?auth(enticate)?|re-?login)([^a-z-]|$)"; "i");
   def default_options($d):
     (($d.reason_full // $d.reason // $d.question // "") | clean_reason) as $q
     | ($q | option_parse) as $parsed
@@ -256,6 +265,9 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
         [{value: "yes", label: "Yes"}, {value: "no", label: "No"}]
       elif ($q | test("\\?")) then
         []
+      elif ($q | is_action) then
+        [{value: "done", label: "Done"},
+         {value: "not-done", label: "Not done (say why)", hint: "Say why in the answer box"}]
       else
         [{value: "approve", label: "Approve / go ahead"}, {value: "decline", label: "Decline"}]
       end;
