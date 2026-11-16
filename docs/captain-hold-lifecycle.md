@@ -76,6 +76,7 @@ Repeat and edge cases:
 - If an incomplete hold leaves a stamp above an earlier answer, the [completion durability boundary](#recording-a-reviewed-inventory-complete) applies.
   When the task already records its previous origin, replaying the earlier `answer --release` can remove that stamp, and normal work completion can retain the answer, but neither transition changes the stored origin: neither can certify the failed move's new origin.
   Re-running `hold` completes the move, and re-running the same `answer --release` also normalizes a release interrupted before its stamp was removed.
+- A re-hold that names options or `--free-text` replaces the recorded choices, one that names links or `--no-link` replaces the recorded links, and one that names neither keeps them; a new lifecycle starts with neither ([`bin/fm-captain-hold.sh --help`](../bin/fm-captain-hold.sh) owns the flags).
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
 
@@ -288,9 +289,10 @@ The Lavish adapter splits each capture between two commands:
 
 | Command | What it emits |
 | --- | --- |
-| `bin/fm-procevent-lavish.sh answers` | An exact non-reconcile selection, or a bare note when no option was selected. |
+| `bin/fm-procevent-lavish.sh answers` | An exact non-reconcile selection, or a bare note when no option was selected and the card had no defined options or declared a free-text answer. |
 | `reconciles` | Only task ids whose structured selection is Reconcile, carrying their notes as request provenance. |
 
+A note typed with no selection on a card that has defined options is a comment, not an answer: it feeds neither intake, stays announced so firstmate reads it, and never closes the call.
 Current rows require the versioned shape and the `choice` tag.
 A time-limited rollout branch accepts ordinary answers from the old question/answer shape.
 That branch refuses the old shape's bare and separator-annotated reconcile values from both intakes, because those rows do not separate the selected option from its note.

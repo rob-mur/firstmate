@@ -21,7 +21,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--option <value>[=<label>]]... [--free-text] [--link <target>[ <label>]]... [--no-link]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh pr-policy <task-id> <PR-url> <merged|closed|terminal> <close|release>
 #   fm-captain-hold.sh settle-pr <task-id> <PR-url>
@@ -60,6 +61,23 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# The choices a decision card offers are recorded structurally on the hold,
+# never inferred from the reason prose. `--option <value>[=<label>]` adds one
+# choice (repeatable): the value is what a pick feeds the `answers` intake
+# unchanged, so it must be a 1-128 character slug other than `reconcile`, and
+# the label defaults to the value. `--free-text` declares a call whose answer
+# is the captain's own words. `--link <target>[ <label>]` adds one thing the
+# captain needs to click (repeatable, at most 8): an https URL, the board's own
+# http origin, or `page:<page-id>` for a live board page, with an optional
+# label after the first space. `--no-link` declares a call that truly has
+# nothing to click and cannot be combined with `--link`. The options and
+# `--free-text` form one group and the links and `--no-link` another: a hold
+# naming a group replaces that group, a hold naming neither keeps it, and a
+# hold that starts a new lifecycle starts with neither. Each value is stored on
+# its own `Captain hold option:`, `Captain hold free text:`, `Captain hold
+# link:`, or `Captain hold no link:` line beside the hold-set stamp, and every
+# value is validated before the backlog is touched.
+# bin/fm-bearings-board.sh refuses a decision card that lacks either group.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -948,31 +966,105 @@ task_identity() {
   printf '%s' "$id"
 }
 
-write_hold_origin() {  # <task-id> <shown-body> <origin>
-  local id=$1 body=$2 origin=$3 stamp rest new_body tmp
+# The hold header is the stamp line plus the structured lines directly under
+# it: origin, then the option group, then the link group. A group named on this
+# hold replaces its old lines; an unnamed group keeps them. Origin lines
+# elsewhere in the body are dropped when a new origin is recorded, as before.
+HOLD_HEADER_PATTERN='^Captain hold (origin|option|free text|link|no link): '
+
+rewrite_hold_header() {  # <task-id> <shown-body> <origin> <options-named-0-or-1> <links-named-0-or-1>
+  local id=$1 body=$2 origin=$3 options_named=$4 links_named=$5 stamp header rest
+  local origin_lines option_lines link_lines new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   stamp=$(printf '%s\n' "$body" | sed -n 1p)
   [ -n "$(body_hold_set_timestamp "$body")" ] \
-    || fail "task $id lost its hold-set stamp before its origin was recorded"
-  rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
+    || fail "task $id lost its hold-set stamp before its header was recorded"
+  header=$(printf '%s\n' "$body" | sed 1d | awk -v pat="$HOLD_HEADER_PATTERN" '$0 ~ pat { print; next } { exit }')
+  rest=$(printf '%s\n' "$body" | sed 1d | awk -v pat="$HOLD_HEADER_PATTERN" 'done || $0 !~ pat { done = 1; print }' \
     | awk 'NF || started { started = 1; print }')
-  new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
+  if [ -n "$origin" ]; then
+    origin_lines="Captain hold origin: $origin"
+    rest=$(printf '%s\n' "$rest" | awk '!/^Captain hold origin: /' | awk 'NF || started { started = 1; print }')
+  else
+    origin_lines=$(printf '%s\n' "$header" | grep '^Captain hold origin: ' || true)
+  fi
+  if [ "$options_named" = 1 ]; then
+    option_lines=$HOLD_OPTION_LINES
+  else
+    option_lines=$(printf '%s\n' "$header" | grep -E '^Captain hold (option|free text): ' || true)
+  fi
+  if [ "$links_named" = 1 ]; then
+    link_lines=$HOLD_LINK_LINES
+  else
+    link_lines=$(printf '%s\n' "$header" | grep -E '^Captain hold (link|no link): ' || true)
+  fi
+  new_body=$stamp
+  [ -z "$origin_lines" ] || new_body=$(printf '%s\n%s' "$new_body" "$origin_lines")
+  [ -z "$option_lines" ] || new_body=$(printf '%s\n%s' "$new_body" "$option_lines")
+  [ -z "$link_lines" ] || new_body=$(printf '%s\n%s' "$new_body" "$link_lines")
   if [ -n "$rest" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
   fi
-  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-origin.XXXXXX") \
-    || fail "cannot stage the hold origin"
+  [ "$new_body" != "$body" ] || return 0
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-header.XXXXXX") \
+    || fail "cannot stage the hold header"
   if ! printf '%s\n' "$new_body" > "$tmp"; then
     rm -f -- "$tmp"
-    fail "cannot stage the hold origin for $id"
+    fail "cannot stage the hold header for $id"
   fi
   if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
     rm -f -- "$tmp"
-    printf 'fm-captain-hold: could not record the hold origin on %s\n' "$id" >&2
+    printf 'fm-captain-hold: could not record the hold header on %s\n' "$id" >&2
     return 1
   fi
   rm -f -- "$tmp"
+}
+
+HOLD_OPTION_LINES=''
+HOLD_LINK_LINES=''
+
+# Validates the structured choices before anything is written and stages their
+# header lines in HOLD_OPTION_LINES and HOLD_LINK_LINES.
+stage_hold_choices() {  # <free-text-0-or-1> <no-link-0-or-1>; reads HOLD_OPTION_ARGS and HOLD_LINK_ARGS
+  local free_text=$1 no_link=$2 arg value label target seen=' ' count=0
+  HOLD_OPTION_LINES=''
+  HOLD_LINK_LINES=''
+  for arg in ${HOLD_OPTION_ARGS[@]+"${HOLD_OPTION_ARGS[@]}"}; do
+    validate_one_line option "$arg"
+    value=${arg%%=*}
+    label=''
+    case "$arg" in
+      *=*) label=${arg#*=}; [ -n "$label" ] || fail "--option $value has an empty label after =" ;;
+    esac
+    [[ "$value" =~ ^[A-Za-z0-9._-]{1,128}$ ]] \
+      || fail "--option value must be a 1-128 character slug of letters, digits, dot, dash, or underscore: $value"
+    [ "$value" != reconcile ] || fail "--option value reconcile is reserved for re-checking reality"
+    case "$seen" in
+      *" $value "*) fail "--option $value is given twice" ;;
+    esac
+    seen="$seen$value "
+    HOLD_OPTION_LINES+="${HOLD_OPTION_LINES:+$'\n'}Captain hold option: $arg"
+  done
+  [ "$free_text" != 1 ] || HOLD_OPTION_LINES+="${HOLD_OPTION_LINES:+$'\n'}Captain hold free text: yes"
+  for arg in ${HOLD_LINK_ARGS[@]+"${HOLD_LINK_ARGS[@]}"}; do
+    validate_one_line link "$arg"
+    target=${arg%% *}
+    count=$((count + 1))
+    [ "$count" -le 8 ] || fail "a card shows at most 8 links"
+    if [[ "$target" =~ ^page:[a-z0-9][a-z0-9-]{0,63}$ ]] \
+      || [[ "$target" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^[:space:]]*)?$ ]] \
+      || [[ "$target" =~ ^http://dev-1\.tailf848b0\.ts\.net:4387([/?#][^[:space:]]*)?$ ]]; then
+      :
+    else
+      fail "--link target must be an https URL, the board's own origin, or page:<page-id>: $target"
+    fi
+    HOLD_LINK_LINES+="${HOLD_LINK_LINES:+$'\n'}Captain hold link: $arg"
+  done
+  if [ "$no_link" = 1 ]; then
+    [ "$count" -eq 0 ] || fail "--no-link cannot be combined with --link"
+    HOLD_LINK_LINES="Captain hold no link: yes"
+  fi
 }
 
 # Best-effort restoration removes a refused hold attempt's stamp while
@@ -1178,6 +1270,9 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
+  local free_text=0 no_link=0 options_named=0 links_named=0
+  HOLD_OPTION_ARGS=()
+  HOLD_LINK_ARGS=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1187,11 +1282,16 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --option) shift; [ "$#" -gt 0 ] || { usage >&2; exit 2; }; HOLD_OPTION_ARGS+=("$1"); options_named=1 ;;
+      --free-text) free_text=1; options_named=1 ;;
+      --link) shift; [ "$#" -gt 0 ] || { usage >&2; exit 2; }; HOLD_LINK_ARGS+=("$1"); links_named=1 ;;
+      --no-link) no_link=1; links_named=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
+  stage_hold_choices "$free_text" "$no_link"
   [ -n "$reason" ] || fail "reason must not be empty"
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
@@ -1284,8 +1384,8 @@ command_hold() {
     || fail "task $id lost its hold-set stamp while being held"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
-  if [ -n "$origin" ]; then
-    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
+  if [ -n "$origin" ] || [ "$options_named" = 1 ] || [ "$links_named" = 1 ]; then
+    rewrite_hold_header "$id" "$(show_field "$show" body)" "$origin" "$options_named" "$links_named" || exit $?
   fi
   printf '%s\n' "$id"
 }

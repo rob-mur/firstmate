@@ -2784,6 +2784,179 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
+# A hold records the decision's own choices and the links it needs as
+# structured data, so the board card can offer them; a re-hold of an active
+# hold replaces only the groups it names.
+hold_choices() {  # <home> <task-id>
+  run_bearings "$1" | jq -cS --arg id "$2" '.decisions_open[] | select(.id == $id) | .choices'
+}
+
+test_hold_records_options_and_links() {
+  local home id choices show
+  home=$(make_home hold-choices)
+  id=sample-route-pick
+  run_captain "$home" hold "$id" --title "Pick the sample route" \
+    --reason "captain route choice pending" --repo sample \
+    --option "north=Take the north route" --option south \
+    --link "https://example.com/sample/pull/7 The route PR" --link "page:sample-grill" >/dev/null \
+    || fail "hold refused recorded options and links"
+  choices=$(hold_choices "$home" "$id")
+  assert_equals "$choices" \
+    "$(jq -cS . <<<'{"options":[{"value":"north","label":"Take the north route"},{"value":"south","label":"south"}],"links":[{"target":"https://example.com/sample/pull/7","label":"The route PR"},{"target":"page:sample-grill","label":""}],"free_text":false,"no_link":false}')" \
+    "the hold did not carry its recorded options and links"
+
+  run_captain "$home" hold "$id" --reason "captain route choice pending" --option east >/dev/null \
+    || fail "re-hold with a new option set failed"
+  choices=$(hold_choices "$home" "$id")
+  assert_equals "$(jq -c '[.options[].value]' <<<"$choices")" '["east"]' "a named option group was not replaced"
+  assert_equals "$(jq -c '[.links[].target]' <<<"$choices")" '["https://example.com/sample/pull/7","page:sample-grill"]' \
+    "an unnamed link group was not kept"
+
+  run_captain "$home" hold "$id" --reason "captain route choice pending" --no-link >/dev/null \
+    || fail "re-hold with --no-link failed"
+  choices=$(hold_choices "$home" "$id")
+  assert_equals "$(jq -c '[.links, .no_link, [.options[].value]]' <<<"$choices")" '[[],true,["east"]]' \
+    "--no-link did not replace the links while keeping the options"
+
+  run_captain "$home" hold "$id" --reason "captain route choice still pending" >/dev/null \
+    || fail "plain re-hold failed"
+  assert_equals "$(hold_choices "$home" "$id")" "$choices" "a plain re-hold changed the recorded choices"
+
+  run_captain "$home" hold "$id" --reason "captain route choice pending" --free-text >/dev/null \
+    || fail "re-hold with --free-text failed"
+  assert_equals "$(hold_choices "$home" "$id" | jq -c '[.free_text, .options]')" '[true,[]]' \
+    "--free-text did not replace the option group"
+
+  run_captain "$home" hold "$id" --reason "captain route choice pending" --option east >/dev/null \
+    || fail "re-hold restoring an option failed"
+  printf '%s\teast\t\n' "$id" | run_captain "$home" answers --source "the captured board result" >/dev/null \
+    || fail "a recorded option value did not feed the keyed-answer intake"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: done" "a picked option value did not close the call"
+  assert_contains "$show" "east" "the closed call lost the picked option value"
+  pass "a hold records its options and links, and a re-hold replaces only the groups it names"
+}
+
+test_hold_refuses_malformed_choices() {
+  local home id args
+  home=$(make_home hold-choice-refusals)
+  id=sample-bad-choice
+  for args in "--option reconcile" "--option bad%value" "--option north --option north" \
+      "--option north=" "--link ftp://example.com/x" "--link http://example.com/x" \
+      "--link page:Bad_Page" "--link https://example.com/x --no-link"; do
+    # shellcheck disable=SC2086
+    if run_captain "$home" hold "$id" --title "Bad choice" --reason "captain choice pending" \
+        --repo sample $args >/dev/null 2>&1; then
+      fail "hold accepted malformed choices: $args"
+    fi
+  done
+  if run_captain "$home" hold "$id" --title "Bad choice" --reason "captain choice pending" --repo sample \
+      --link https://example.com/1 --link https://example.com/2 --link https://example.com/3 \
+      --link https://example.com/4 --link https://example.com/5 --link https://example.com/6 \
+      --link https://example.com/7 --link https://example.com/8 --link https://example.com/9 >/dev/null 2>&1; then
+    fail "hold accepted more links than a card can show"
+  fi
+  assert_contains "$(tasks_in "$home" show "$id" 2>&1 || true)" "NOT_FOUND" \
+    "a refused hold still created its task"
+  pass "a hold refuses malformed options and links before touching the backlog"
+}
+
+# Re-holding released work starts a new lifecycle, so the previous call's
+# choices never resurface on the new card; an origin and choices coexist.
+test_new_hold_lifecycle_starts_without_old_choices() {
+  local home id choices origin_seen
+  home=$(make_home hold-choice-lifecycle)
+  id=sample-cycle-call
+  tasks_in "$home" add sample-cycle-origin "Sample cycle origin" --kind scout --repo sample >/dev/null \
+    || fail "could not create the origin"
+  run_captain "$home" hold "$id" --title "Cycle call" --reason "captain cycle choice pending" --repo sample \
+    --origin sample-cycle-origin --option keep --link https://example.com/cycle >/dev/null \
+    || fail "hold with an origin and choices failed"
+  origin_seen=$(run_bearings "$home" | jq -r --arg id "$id" '.decisions_open[] | select(.id == $id) | .origin')
+  assert_equals "$origin_seen" sample-cycle-origin "the origin was lost beside the recorded choices"
+  assert_equals "$(hold_choices "$home" "$id" | jq -c '[.options[].value]')" '["keep"]' \
+    "the choices were lost beside the origin"
+  printf 'Release the cycle call.\n' > "$home/release.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/release.txt" --release >/dev/null \
+    || fail "could not release the cycle call"
+  run_captain "$home" hold "$id" --reason "captain cycle choice pending again" >/dev/null \
+    || fail "could not re-hold the released call"
+  choices=$(hold_choices "$home" "$id")
+  assert_equals "$(jq -c '[.options, .links]' <<<"$choices")" '[[],[]]' \
+    "a new hold lifecycle carried the previous call's choices: $choices"
+  pass "a new hold lifecycle starts without the previous call's choices"
+}
+
+# The board shows each call's context from the structured record: the
+# recorded captain answers with their dates and exact words, and the notes.
+test_bearings_carries_hold_answers_and_notes() {
+  local home id row
+  home=$(make_home hold-context)
+  id=sample-context-call
+  tasks_in "$home" add "$id" "Context call" --kind captain --repo sample \
+    --body "The relock waits for the upstream lockfile fix." >/dev/null \
+    || fail "could not create the context call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-01T09:00:00Z run_captain "$home" hold "$id" \
+    --reason "captain relock choice pending" --option now --option later >/dev/null \
+    || fail "could not hold the context call"
+  printf 'Wait for the upstream fix, then relock.\n' > "$home/answer.txt"
+  FM_CAPTAIN_HOLD_NOW=2026-07-02T10:30:00Z run_captain "$home" answer "$id" \
+    --decision-file "$home/answer.txt" --release >/dev/null \
+    || fail "could not record the captain's answer"
+  FM_CAPTAIN_HOLD_NOW=2026-07-10T08:00:00Z run_captain "$home" hold "$id" \
+    --reason "captain relock choice pending again" --option now --option later >/dev/null \
+    || fail "could not re-hold the context call"
+  row=$(run_bearings "$home" | jq -c --arg id "$id" '.decisions_open[] | select(.id == $id)')
+  assert_equals "$(jq -cS '.answers' <<<"$row")" \
+    '[{"at":"2026-07-02T10:30:00Z","mode":"released","text":"Wait for the upstream fix, then relock."}]' \
+    "the hold row did not carry the recorded answer with its date and exact words: $row"
+  assert_contains "$(jq -c '.notes' <<<"$row")" "The relock waits for the upstream lockfile fix." \
+    "the hold row did not carry the backlog note: $row"
+  assert_not_contains "$(jq -c '.notes' <<<"$row")" "Resolution recorded" \
+    "the hold notes repeated the machine resolution record: $row"
+  pass "the hold row carries its recorded answers and backlog notes"
+}
+
+# Free text typed on a card that offers defined options is a comment for
+# firstmate, never the captain's answer: only a picked option closes the call.
+test_board_comment_on_an_option_card_does_not_close_the_call() {
+  local home sid stub out queue show result
+  home=$(make_home board-comment)
+  sid=lavish-b0a4d0000000c0e1
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
+  run_captain "$home" hold sample-dismiss-call --title "Dismiss the sample cards" \
+    --reason "captain dismissal choice pending" --repo sample \
+    --option dismiss --option keep --link https://example.com/sample >/dev/null \
+    || fail "could not register the option call"
+  stub="$home/board-source.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+session:
+  status: feedback
+  session_ended: false
+prompts[1]{tag,text,prompt}:
+  "choice","Dismiss the sample cards","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-dismiss-call\",\"selection\":\"\",\"note\":\"links and a decision required\",\"has_options\":true}"
+OUT
+SH
+  chmod +x "$stub"
+  run_procevent "$home" register lavish "$sid" -- "$stub" >/dev/null \
+    || fail "could not register the board source"
+  run_captain "$home" bind "$sid" >/dev/null || fail "could not bind the board source"
+  out=$(run_procevent "$home" start "$sid" 2>&1) || fail "the board source runner did not complete: $out"
+  assert_contains "$out" "$sid.1.result" "the board comment was never durably captured: $out"
+  queue=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
+  assert_contains "$queue" "check: procevent lavish $sid 1" "the board comment never reached firstmate: $queue"
+  show=$(tasks_in "$home" show sample-dismiss-call --full)
+  assert_not_contains "$show" "state: done" "a free-text comment on an option card closed the call"
+  assert_contains "$show" "hold_kind: captain" "a free-text comment on an option card lifted the hold"
+  result=$(find "$home" -name "$sid.1.result" -type f | head -1)
+  [ -n "$result" ] || fail "the captured board comment has no result file"
+  out=$(run_lavish "$home" read "$result" 2>&1 || true)
+  assert_contains "$out" "links and a decision required" "the comment text did not reach firstmate's read: $out"
+  pass "free text on an option card reaches firstmate as a comment and leaves the call open"
+}
+
 test_hold_reason_round_trips_awkward_characters
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
@@ -2828,3 +3001,8 @@ test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
+test_hold_records_options_and_links
+test_hold_refuses_malformed_choices
+test_new_hold_lifecycle_starts_without_old_choices
+test_bearings_carries_hold_answers_and_notes
+test_board_comment_on_an_option_card_does_not_close_the_call

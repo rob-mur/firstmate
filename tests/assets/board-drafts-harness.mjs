@@ -29,6 +29,9 @@
 //   open:<key>      press that key's title in the order list to open its card
 //   expand:<key>    press a waiting row ("waiting:<key>") to expand or
 //                   collapse it in place
+//                   or a card's context toggle ("card-context:<key>")
+//   rowpage:<key>   press the first in-place page button in that row's details
+//   note:<key>      type a note into that card without picking an option
 //   tick            let pending timers (the debounced priority send) fire
 //   reorder         press "Reorder" on the deck
 //   page:<key>      press the first in-place page button on that key's card
@@ -333,6 +336,12 @@ const expandable = () => [
   ...get("bb-waiting-list").children.map((r) => ({ key: r.attributes["data-waiting-key"], row: r })),
 ].map(({ key, row }) => ({ key, button: row.querySelector(".bb-expand"), details: row.querySelector(".bb-row-details") }))
   .filter((r) => r.button);
+// Each card's recorded context toggles in place under its links.
+const cardContexts = () => forms().map((f) => ({
+  key: "card-context:" + f.attributes["data-lavish-question"], card: f.parentNode.parentNode,
+})).map(({ key, card }) => ({ key, button: card.querySelector(".bb-ctx-toggle"), details: card.querySelector(".bb-row-details") }))
+  .filter((r) => r.button);
+const allExpandable = () => [...expandable(), ...cardContexts()];
 for (const act of actionList.split(",").filter(Boolean)) {
   const cut = act.indexOf(":");
   const [name, arg] = cut < 0 ? [act, undefined] : [act.slice(0, cut), act.slice(cut + 1)];
@@ -360,7 +369,14 @@ for (const act of actionList.split(",").filter(Boolean)) {
     const row = byId.get("bb-order-list").children.find((r) => r.attributes["data-order-key"] === arg);
     row.querySelector(".bb-order__open").fire("click");
   } else if (name === "expand") {
-    expandable().find((r) => r.key === arg).button.fire("click");
+    allExpandable().find((r) => r.key === arg).button.fire("click");
+  } else if (name === "rowpage") {
+    allExpandable().find((r) => r.key === arg).details.querySelectorAll("button")
+      .find((b) => b.attributes["data-board-page"] != null).fire("click");
+  } else if (name === "note") {
+    const f = forms().find((x) => x.attributes["data-lavish-question"] === arg);
+    f.querySelector("input[name=note]").value = "noted " + arg;
+    f.fire("input");
   } else if (name === "focus") {
     document.activeElement = forms().find((f) => f.attributes["data-lavish-question"] === arg).querySelector("input[name=note]");
   } else if (name === "blur") {
@@ -480,7 +496,7 @@ process.stdout.write(JSON.stringify({
     reorderDisabled: get("bb-reorder").disabled,
   },
   stack: { count: get("bb-stack-count").textContent, navHidden: !!get("bb-stack-count").parentNode?.hidden },
-  rows: expandable().map((r) => ({
+  rows: allExpandable().map((r) => ({
     key: r.key, expanded: r.button.getAttribute("aria-expanded"),
     details: r.details && !r.details.hidden ? r.details.textContent : null,
   })),

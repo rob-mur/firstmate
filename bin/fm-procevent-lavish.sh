@@ -31,7 +31,9 @@
 #            selector, tag, and text. A non-choice freeform comment (`prompt`)
 #            is printed as its own field even when a selector is also present
 #            and even when that comment matches the element text, so typed
-#            words are never dropped. Choice Context data is not a comment.
+#            words are never dropped. Choice Context data is not a comment;
+#            a board answer row prints its question, selection, and typed note
+#            instead, flagged when the note is only a comment on an option card.
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
 #            are reported explicitly.
@@ -785,7 +787,9 @@ cmd_silent() {
 # only items whose `tag` field is `choice` are read.
 # The header owns the partial-output and failure contract.
 # A freeform `message` row is captain prose and is deliberately never a
-# source of decision keys. A row that does not carry both a slug-shaped `question`
+# source of decision keys, and neither is a v1 row with an empty selection
+# whose context carries `has_options: true` without `free_text: true`: that
+# text is a comment on an option card, read by firstmate from the capture. A row that does not carry both a slug-shaped `question`
 # and the versioned `selection` and `note` fields inside its `Context data:` block
 # is skipped. A time-limited rollout branch accepts the old question/answer
 # shape only for ordinary answers and rejects its bare or annotated reconcile
@@ -804,6 +808,7 @@ cmd_choice_rows() {
     defined $form or exit 1;
     my %seen;
     my @choices;
+    sub truthy { my ($v) = @_; return JSON::PP::is_bool($v) ? ($v ? 1 : 0) : 0 }
     for my $item (@$items) {
       my %f = %$item;
       next unless defined $f{tag} && $f{tag} eq "choice";
@@ -822,6 +827,12 @@ cmd_choice_rows() {
           || !defined($note) || ref($note);
         next unless $selected eq "" || $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
         next unless length($selected) || length($note);
+        # Free text alone on a card that offers its own options is a comment
+        # for firstmate, never an answer: only a picked option closes such a
+        # call, unless the card declares itself a free-text question. The
+        # captured result and its wake still carry the comment.
+        next if !length($selected) && truthy($data->{has_options})
+          && !truthy($data->{free_text});
         # A selection with a note keeps the whole note in the answer; the
         # label is only the 512-cut display text.
         $answer = length($selected) ? (length($note) ? "$selected - $note" : $selected) : $note;
@@ -962,14 +973,17 @@ cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 # A non-choice annotation that carries a freeform `prompt` prints that comment
 # as its own field; a selector must not hide the typed words, even when the
 # comment matches the captured element text. Choice rows keep Context data
-# out of that field. A pure annotation has no prompt.
+# out of that field; a board answer row instead prints its question, its
+# selection, and its typed note, marked `choice_comment_only: yes` when the
+# note is a comment on an option card that `answers` does not treat as an
+# answer. A pure annotation has no prompt.
 cmd_read() {
   local file=${1-} lifecycle session_ended
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  perl -e "$(lavish_result_parser)"'
+  perl -MJSON::PP -e "$(lavish_result_parser)"'
     use strict; use warnings;
     my ($path, $lifecycle, $session_ended) = @ARGV;
     my ($form, $want, $items, $malformed) = lavish_result($path, "prompts|feedback");
@@ -1043,6 +1057,29 @@ cmd_read() {
         if ($tag ne "choice" && length $comment) {
           print "prompt:\n";
           emit_body($comment);
+        }
+        if ($tag eq "choice" && $comment =~ /Context data:\s*(\{.*\})/s) {
+          my $data = eval { decode_json($1) };
+          if (ref($data) eq "HASH" && defined($data->{schema}) && !ref($data->{schema})
+              && $data->{schema} eq "fm-bearings-answer.v1"
+              && defined($data->{selection}) && !ref($data->{selection})
+              && defined($data->{note}) && !ref($data->{note})) {
+            my $is_bool = sub { JSON::PP::is_bool($_[0]) && $_[0] };
+            my $question = defined($data->{question}) && !ref($data->{question}) ? $data->{question} : "";
+            $question =~ s/[\x00-\x1f\x7f]/ /g;
+            my $selection = $data->{selection};
+            $selection =~ s/[\x00-\x1f\x7f]/ /g;
+            print "choice_question: $question\n";
+            print "choice_selection: ", (length $selection ? $selection : "(none)"), "\n";
+            if (!length($data->{selection}) && length($data->{note})
+                && $is_bool->($data->{has_options}) && !$is_bool->($data->{free_text})) {
+              print "choice_comment_only: yes\n";
+            }
+            if (length $data->{note}) {
+              print "choice_note:\n";
+              emit_body($data->{note});
+            }
+          }
         }
       }
       print "END ANNOTATIONS\n";
