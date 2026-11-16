@@ -361,6 +361,12 @@ validate_payload() {  # <data.json>
     def waiting_item:
       type == "object" and repo_marker and (.key | slug(128))
       and (.title | nonempty_string) and (.reason | type == "string");
+    def open_mr_item:
+      type == "object"
+      and ((keys - ["key", "repo", "title", "url", "state"]) | length == 0)
+      and repo_marker and (.key | slug(128))
+      and (.title | nonempty_string) and (.state | nonempty_string)
+      and has("url") and optional_https_url("url");
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
       and (.title | nonempty_string) and (.reason | type == "string")
@@ -384,6 +390,7 @@ validate_payload() {  # <data.json>
     and ([.captains_call[] | call_item] | all)
     and ([.underway[] | underway_item] | all)
     and ((has("waiting") | not) or ((.waiting | type == "array") and ([.waiting[] | waiting_item] | all)))
+    and ((has("open_mrs") | not) or ((.open_mrs | type == "array") and ([.open_mrs[] | open_mr_item] | all)))
     and ([.landed[] | landed_item] | all)
     and ([.charted[] | charted_item] | all)
     and (has("pages") | not)
