@@ -25,6 +25,7 @@ make_home() {  # <name> [--no-board]
   cat > "$fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_HOME/lavish-calls"
+[ ! -f "$FM_HOME/lavish-refusal" ] || { cat "$FM_HOME/lavish-refusal"; exit 1; }
 exit 0
 SH
   chmod +x "$fakebin/lavish-axi"
@@ -217,6 +218,70 @@ test_reply_posts_through_lavish_reply_with_the_page_title() {
   pass "reply posts one lavish-axi reply prefixed with the page title"
 }
 
+# PATH with no directory that holds a lavish-axi, as in a shell that never
+# had the tool's directory added.
+path_without_lavish() {
+  local dir out=
+  local IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] && [ ! -e "$dir/lavish-axi" ] && out="$out${out:+:}$dir"
+  done
+  printf '%s\n' "$out"
+}
+
+test_reply_finds_lavish_axi_where_the_board_refresh_recorded_it() {
+  local home bare
+  home=$(make_home reply-path)
+  show "$home" p1 --title "Review MR 9" >/dev/null || fail "open failed"
+  mkdir -p "$home/lavishbin"
+  mv "$home/fakebin/lavish-axi" "$home/lavishbin/lavish-axi"
+  printf '%s\n' "$home/lavishbin" > "$home/state/.board-refresh.lavish-dir"
+  bare=$(path_without_lavish)
+  [ -n "$bare" ] || fail "could not build a PATH without lavish-axi"
+  PATH="$bare" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PAGE" reply p1 "checked your answer" || fail "reply without lavish-axi on PATH failed"
+  assert_equals "reply $home/.lavish/bearings-board.html --agent-reply Review MR 9: checked your answer" \
+    "$(cat "$home/lavish-calls")" "reply did not reach lavish-axi where the board refresh found it"
+  pass "reply finds lavish-axi where the board refresh recorded it when PATH lacks it"
+}
+
+test_reply_without_lavish_axi_says_so() {
+  local home bare err
+  home=$(make_home reply-no-tool)
+  show "$home" p1 --title "Review MR 9" >/dev/null || fail "open failed"
+  rm -f "$home/fakebin/lavish-axi"
+  bare=$(path_without_lavish)
+  [ -n "$bare" ] || fail "could not build a PATH without lavish-axi"
+  if err=$(PATH="$bare" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PAGE" reply p1 "checked your answer" 2>&1 >/dev/null); then
+    fail "reply with no lavish-axi reported success"
+  fi
+  case "$err" in
+    *"lavish-axi is not on PATH"*) ;;
+    *) fail "a missing lavish-axi was not named: $err" ;;
+  esac
+  case "$err" in
+    *"did not accept"*) fail "a missing lavish-axi was reported as a Lavish refusal: $err" ;;
+  esac
+  pass "reply with no lavish-axi names the missing tool, not a Lavish refusal"
+}
+
+test_reply_refused_by_lavish_carries_its_reason() {
+  local home err
+  home=$(make_home reply-refused)
+  show "$home" p1 --title "Review MR 9" >/dev/null || fail "open failed"
+  printf '%s\n' 'error: Session is ended' 'code: SESSION_ENDED' 'help[1]:' \
+    '  Run lavish-axi <file> to start a new session' > "$home/lavish-refusal"
+  if err=$(in_home "$home" "$PAGE" reply p1 "checked your answer" 2>&1 >/dev/null); then
+    fail "a refused reply reported success"
+  fi
+  case "$err" in
+    *"did not accept the reply for page p1"*"Session is ended"*"SESSION_ENDED"*"to start a new session"*) ;;
+    *) fail "a refused reply did not carry Lavish's reason and suggestion: $err" ;;
+  esac
+  pass "a reply Lavish refuses reports Lavish's own reason and suggested recovery"
+}
+
 test_install_writes_a_command_bound_to_this_home() {
   local home bin out
   home=$(make_home install)
@@ -314,6 +379,9 @@ fm_test_run \
   test_wait_delivers_pending_actions_before_ended \
   test_app_ended_ends_every_live_page \
   test_reply_posts_through_lavish_reply_with_the_page_title \
+  test_reply_finds_lavish_axi_where_the_board_refresh_recorded_it \
+  test_reply_without_lavish_axi_says_so \
+  test_reply_refused_by_lavish_carries_its_reason \
   test_install_writes_a_command_bound_to_this_home \
   test_relay_annotates_page_elements_while_the_board_says_annotate_is_on \
   test_relay_annotate_mode_spares_controls_and_toggles_from_the_page
