@@ -1041,6 +1041,71 @@ test_release_is_attended_only() {
   pass "a captain hold is released only in an attended session: away refuses, quiet and no record release"
 }
 
+# A captain hold on an in-flight work item gates the work, it is not a question
+# row: an answer through any channel records the captain's words and lifts the
+# hold, leaving the task in flight with its body below the record. The board
+# declares no close mode, so the keyed intake's default must not close it.
+test_answer_on_in_flight_work_releases_instead_of_closing() {
+  local home show out
+  home=$(make_home answer-in-flight)
+  printf 'The dispatcher plan body.\n' > "$home/plan.txt"
+  tasks_in "$home" add sample-flight "Fix the dispatcher queue" --kind ship --repo sample \
+    --body-file "$home/plan.txt" --start >/dev/null \
+    || fail "could not create the in-flight work item"
+  run_captain "$home" hold sample-flight --reason "captain picks the queue rule" \
+    --option a --option b --no-link >/dev/null \
+    || fail "could not hold the in-flight work item for the captain"
+
+  out=$(printf 'sample-flight\ta\tPick a rule\n' \
+    | run_captain "$home" answers --source "board fixture") \
+    || fail "the keyed intake refused an answer on in-flight work: $out"
+  assert_contains "$out" "closed: sample-flight" "the in-flight answer was not accepted: $out"
+  show=$(tasks_in "$home" show sample-flight --full)
+  assert_contains "$show" "state: in_flight" "an answer on in-flight work closed the work item"
+  assert_contains "$show" "held: no" "an answer on in-flight work kept the hold"
+  assert_contains "$show" "Resolution mode: released" "the in-flight answer recorded a close"
+  assert_contains "$show" "Answer: a" "the in-flight answer lost the captain's words"
+  assert_contains "$show" "The dispatcher plan body." "the in-flight answer replaced the work body"
+  out=$(printf 'sample-flight\ta\tPick a rule\n' \
+    | run_captain "$home" answers --source "board fixture") \
+    || fail "a replayed in-flight answer was not idempotent: $out"
+  show=$(tasks_in "$home" show sample-flight --full)
+  assert_contains "$show" "state: in_flight" "a replayed in-flight answer closed the work item"
+
+  tasks_in "$home" add sample-flight-two "Fix the other queue" --kind ship --repo sample \
+    --start >/dev/null || fail "could not create the second in-flight item"
+  run_captain "$home" hold sample-flight-two --reason "captain go needed" >/dev/null \
+    || fail "could not hold the second in-flight item"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" enter \
+    --words 'merge green work' >/dev/null 2>&1 || fail "away entry failed"
+  out=$(printf 'sample-flight-two\tGo ahead.\tGo\tdone\n' \
+    | run_captain "$home" answers --source "board fixture") || true
+  assert_contains "$out" "refused: sample-flight-two" "an answer freed in-flight work while away: $out"
+  assert_contains "$out" "attended session" "the in-flight away refusal named no reason: $out"
+  show=$(tasks_in "$home" show sample-flight-two --full)
+  assert_contains "$show" "state: in_flight" "the away refusal changed the in-flight item"
+  assert_contains "$show" "held: yes" "the away refusal lifted the hold"
+  assert_not_contains "$show" "Resolution mode" "the away refusal wrote a record"
+  rm -f "$home/state/.afk-contract"
+  out=$(printf 'sample-flight-two\tGo ahead.\tGo\tdone\n' \
+    | run_captain "$home" answers --source "board fixture") \
+    || fail "a done-mode answer on in-flight work failed: $out"
+  show=$(tasks_in "$home" show sample-flight-two --full)
+  assert_contains "$show" "state: in_flight" "a done-mode answer closed in-flight work"
+  assert_contains "$show" "held: no" "a done-mode answer on in-flight work kept the hold"
+
+  tasks_in "$home" add sample-question "Which queue rule?" --kind ship --repo sample >/dev/null \
+    || fail "could not create the question row"
+  run_captain "$home" hold sample-question --reason "captain picks" >/dev/null \
+    || fail "could not hold the question row"
+  out=$(printf 'sample-question\tRule a.\tPick\n' \
+    | run_captain "$home" answers --source "board fixture") \
+    || fail "the question answer failed: $out"
+  show=$(tasks_in "$home" show sample-question --full)
+  assert_contains "$show" "state: done" "a question-only row no longer closes on its answer"
+  pass "a keyed answer on in-flight work lifts the hold and records the words without closing the work"
+}
+
 # A release that waits behind another task action must recheck the away posture
 # once it holds the task control lock: the captain can enter away mode during
 # the wait, and the release then refuses with the hold still in place.
@@ -5485,6 +5550,7 @@ test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
 test_release_is_attended_only
+test_answer_on_in_flight_work_releases_instead_of_closing
 test_release_rechecks_away_after_waiting_on_task_lock
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
