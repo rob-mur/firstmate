@@ -138,7 +138,7 @@ EOF
   # authored explicitly here, never inferred by parsing the stored prose.
   calls=$(printf '%s' "$snapshot" | jq '[.decisions_open[] | {
     key:.key,type:"decision",repo:"sample",title:"Rollout scope",decide:.question,
-    options:[{value:"a",label:"Retain the workflow"},{value:"b",label:"Defer the migration"}]}]')
+    options:[{value:"a",label:"Retain the workflow"},{value:"b",label:"Defer the migration"}], no_link:true}]')
   out=$(render_board "$home" '[]' '[]' 0 0 "$calls")
   printf '%s' "$out" | jq -e --arg question "Choose rollout scope: $reason" --arg a "$a" --arg b "$b" '
     .error == "" and (.captains_call | length) == 1
@@ -157,7 +157,7 @@ build_call_board() {  # <home> <keys-json> [charted-json] [underway-json]
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, underway:$underway, landed:[], charted:$charted, charted_more:0, charted_warning_more:0,
     captains_call:[$keys[] | {key:., type:"decision", title:("Card " + .), repo:"r",
-      about:"a", decide:"Pick one?", allow_freeform:true,
+      about:"a", decide:"Pick one?", allow_freeform:true, no_link:true,
       options:[{value:"a",label:"A"},{value:"b",label:"B"}]}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -297,7 +297,7 @@ test_every_card_type_renders_its_links() {
     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
     captains_call:[
       {key:"held-decision", type:"decision", title:"A held decision", question:"Take the held option?", repo:"r", about:"a",
-       options:[], allow_freeform:true, pr_url:"https://example.test/o/r/pull/7",
+       options:[], allow_freeform:true, free_text:true, pr_url:"https://example.test/o/r/pull/7",
        links:[{url:"https://example.test/o/r/issues/3", label:"Issue"}]},
       {key:"merge.some-task", type:"merge", title:"A merge", repo:"r", risk:"low",
        options:[{value:"merge",label:"Merge now"}], pr_url:"https://example.test/o/r/pull/9"},
@@ -337,7 +337,7 @@ test_every_card_link_opens_in_annotate_mode() {
     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
     captains_call:[
       {key:"held-decision", type:"decision", title:"A held decision", question:"Take the held option?", repo:"r", about:"a",
-       options:[], allow_freeform:true, pr_url:"https://example.test/o/r/pull/7",
+       options:[], allow_freeform:true, free_text:true, pr_url:"https://example.test/o/r/pull/7",
        links:[{url:"https://example.test/console", label:"Console"}]}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -375,7 +375,7 @@ render_card_links() {  # <home> <links-jq> [options-jq]
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
     captains_call:[{key:"mr-872", type:"decision", title:"MR 872", question:"Approve MR 872?", repo:"r", about:"a",
-      options:$options, allow_freeform:true, pr_url:"https://example.test/o/r/merge_requests/872",
+      options:$options, allow_freeform:true, free_text:(($options | length) == 0), pr_url:"https://example.test/o/r/merge_requests/872",
       links:$links}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -566,7 +566,7 @@ test_a_page_backed_decision_is_answered_on_the_board_when_its_page_is_not_there(
   printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$understand" > "$home/lavish-sessions"
   jq -n '
     def paged($key; $sid): {key:$key, type:"decision", title:("mate: " + $key), repo:null,
-      options:[], allow_freeform:false,
+      options:[], allow_freeform:false, free_text:true,
       links:[{url:("http://dev-1.tailf848b0.ts.net:4387/session/" + $sid), label:"Lavish page"}],
       off_board:{question:("Which tiers for " + $key + "?"), about:"Fifteen questions.",
         allow_freeform:true, freeform_hint:"answer in your own words",
@@ -615,7 +615,7 @@ test_board_renders_only_the_captains_call() {
   out=$(render_board "$home" \
     '[{"id":"u1","name":"Underway one","repo":"r","state":"working","doing":"x","kind":"task"}]' \
     '[{"id":"c1","repo":"r","title":"Charted one","reason":"queued","dispatchable":true}]' 0 0 \
-    '[{"key":"k1","type":"decision","title":"Decide","question":"Go ahead?","repo":"r","options":[],"allow_freeform":true}]')
+    '[{"key":"k1","type":"decision","title":"Decide","question":"Go ahead?","repo":"r","options":[],"allow_freeform":true,"free_text":true,"no_link":true}]')
   printf '%s' "$out" | jq -e '
     .error == "" and (.captains_call | length) == 1
       and .stats == [] and .underway == [] and .charted == []
@@ -632,7 +632,7 @@ test_a_long_title_and_about_render_in_full() {
   title=$(printf 'T%.0s' $(seq 1 200))
   about=$(printf 'A%.0s' $(seq 1 400))
   out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg t "$title" --arg a "$about" \
-    '[{key:"k1",type:"decision",title:$t,question:"Go ahead?",about:$a,repo:"r",options:[],allow_freeform:true}]')")
+    '[{key:"k1",type:"decision",title:$t,question:"Go ahead?",about:$a,repo:"r",options:[],allow_freeform:true,free_text:true,no_link:true}]')")
   printf '%s' "$out" | jq -e --arg t "$title" --arg a "$about" '
     .error == "" and (.captains_call[0] | contains($t) and contains($a))
   ' >/dev/null || fail "a long title or about was cut: $out"
@@ -644,9 +644,9 @@ test_a_card_that_refers_to_unlisted_options_says_so() {
   home=$(make_home unlisted-options)
   note="This question refers to options A, B and C, which it does not list; answer in your own words."
   out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg m "$note" '[
-    {key:"k1",type:"decision",title:"Stale gate stops",question:"Which of A/B/C?",repo:"r",options:[],allow_freeform:true,malformed:$m},
+    {key:"k1",type:"decision",title:"Stale gate stops",question:"Which of A/B/C?",repo:"r",options:[],allow_freeform:true,malformed:$m,free_text:true,no_link:true},
     {key:"k2",type:"decision",title:"Merge 836",question:"Merge it now?",repo:"r",
-     options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allow_freeform:true}]')")
+     options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allow_freeform:true,no_link:true}]')")
   printf '%s' "$out" | jq -e --arg m "$note" '
     .error == "" and (.captains_call | length) == 2
       and (.captains_call[0] | contains("options missing") and contains($m))
@@ -1114,6 +1114,75 @@ test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
 }
 
 test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
+
+# Every board item expands in place to its recorded context: the task, the hold
+# reason, each captain answer with its date and exact words, the key notes, and
+# its report - a board page about the item opens in place, never a new tab or a
+# reload.
+test_every_board_item_expands_in_place_to_its_recorded_context() {
+  local home data out
+  home=$(make_home item-context)
+  register_page "$home" cd-grill "CD grill" >/dev/null
+  build_call_board "$home" '["k1"]'
+  data="$home/payload.json"
+  jq '.captains_call[0] += {context:{task:"k1", reason:"Which route should proceed?",
+        answers:[{at:"2026-11-02T10:00Z", mode:"answer", text:"Keep route A for now"}],
+        notes:["Asked again after the outage"], report:"data/k1/report.md"}}
+      | .waiting = [{key:"cd-grill", title:"CD grill", reason:"Parked", repo:null,
+        context:{task:"cd-grill", reason:"Parked until the grill is read",
+          answers:[{at:"2026-11-03T09:30Z", mode:"answer", text:"Hold it until I read the grill"}],
+          notes:["Grill covers both dismissals"]}}]' \
+    "$data" > "$data.new" && mv "$data.new" "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board with item context did not build"
+  out=$(run_board "$home" "go")
+  printf '%s' "$out" | jq -e '
+    (.rows | map(select(.key == "card-context:k1" or .key == "waiting:cd-grill"))
+      | length == 2 and all(.expanded == "false" and .details == null))
+  ' >/dev/null || fail "an item context was not collapsed in place at first: $out"
+  out=$(run_board "$home" "go,expand:card-context:k1,expand:waiting:cd-grill")
+  printf '%s' "$out" | jq -e '
+    (.rows | map({key: .key, value: .}) | from_entries) as $r
+    | ($r["card-context:k1"] | .expanded == "true" and (.details | contains("Which route should proceed?")
+        and contains("2026-11-02T10:00Z") and contains("Keep route A for now")
+        and contains("Asked again after the outage") and contains("data/k1/report.md")))
+      and ($r["waiting:cd-grill"] | .expanded == "true" and (.details | contains("Parked until the grill is read")
+        and contains("2026-11-03T09:30Z") and contains("Hold it until I read the grill")
+        and contains("Grill covers both dismissals") and contains("CD grill")))
+      and .reloads == [] and .opens == []
+  ' >/dev/null || fail "an item did not show its recorded context in place: $out"
+  out=$(run_board "$home" "go,expand:waiting:cd-grill,rowpage:waiting:cd-grill")
+  printf '%s' "$out" | jq -e '
+    .pageView.shown and .pageView.title == "CD grill" and .reloads == [] and .opens == []
+  ' >/dev/null || fail "the waiting item did not open its board page in place: $out"
+  pass "every board item expands in place to its recorded context and opens its page in place"
+}
+
+test_every_board_item_expands_in_place_to_its_recorded_context
+
+# A board answer carries whether its card has defined options, so a note typed
+# with no option picked reaches firstmate as a comment rather than an answer.
+test_a_board_answer_says_whether_its_card_has_defined_options() {
+  local home data out
+  home=$(make_home answer-options)
+  build_call_board "$home" '["k1","k2"]'
+  data="$home/payload.json"
+  jq '.captains_call[1] += {options:[], free_text:true}' "$data" > "$data.new" && mv "$data.new" "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board with a free-text card did not build"
+  out=$(run_board "$home" "go,note:k1,submit:k1,note:k2,submit:k2")
+  printf '%s' "$out" | jq -e '
+    [.calls[] | select(.tag == "choice") | .data] as $d
+    | ($d | length) == 2
+      and ($d[0] | .has_options == true and (has("free_text") | not))
+      and ($d[1] | .free_text == true and (has("has_options") | not))
+  ' >/dev/null || fail "a board answer did not say whether its card has defined options: $out"
+  pass "a board answer says whether its card has defined options or asks for free text"
+}
+
+test_a_board_answer_says_whether_its_card_has_defined_options
 
 # The captain's open MRs no task covers render as information rows - title,
 # one state line and the full URL - apart from Captain's Call, and the group

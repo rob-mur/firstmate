@@ -56,7 +56,8 @@
 # question is never hidden in a gate bucket. Every captain-hold row, main or
 # secondmate, carries its hold_until and hold_bucket so a consumer can tell a
 # dated deferral from a live call, plus hold_set and origin for the hand-off
-# check below (a decision handed to a worker gains handed_* fields). A needs-decision or blocked status
+# check below (a decision handed to a worker gains handed_* fields), and the
+# choices, answers, notes, and report_path bin/fm-fleet-snapshot.sh documents. A needs-decision or blocked status
 # on a task under way, main or secondmate, also reaches decisions_open as a
 # source:"status" row with task, decision_key and mate for routing the answer,
 # plus reason_earlier when the same key was raised before with other text. A
@@ -188,11 +189,13 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,title,reason,title_full,reason_full,summary,question,owner,
-    hold_until,hold_bucket,hold_set,origin (captain holds only),
+    hold_until,hold_bucket,hold_set,origin,choices,answers,notes,report_path
+      (captain holds only),
     handed_at,handed_via,handed_task,raised_at (handed decisions only),
     pr_url (a PR or MR its home recorded, when the reason links none)},
   landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
+  gates{id,title,blocked_by,reason,owner,filed,title_full,reason_full,answers,notes,report_path},
+  reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
@@ -519,7 +522,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     {id, title:(.title | trunc(60)),
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
      reason:(hold_gate_reason | trunc(40)), owner:$owner,
-     filed:((.since // null) | trunc(40))};
+     filed:((.since // null) | trunc(40)),
+     title_full:(.title_full // .title // null),
+     reason_full:(.hold_reason_full // .hold_reason // .blocked_reason // null),
+     answers:(.hold_answers // .answers // []),notes:(.body_notes // .notes // []),
+     report_path:(.report_path // null)};
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -623,7 +630,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             hold_set:(.hold_set // null),
             origin:([(.body_lines // [])[]
                      | capture("^Captain hold origin:[[:space:]]*(?<v>[^[:space:]]+)")?
-                     | .v][0] // null)} ]
+                     | .v][0] // null),
+            choices:(.hold_choices // {options:[],links:[],free_text:false,no_link:false}),
+            answers:(.hold_answers // []),notes:(.body_notes // []),
+            report_path:(.report_path // null)} ]
      + [ . as $root | .tasks[]? | . as $t
          # A secondmate home that is valid and reports no active work is
          # authoritative: a parent-log question for it is stale (contradiction
@@ -654,7 +664,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                                       (.reason // "captain decision pending")),
                  question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id,
                  hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null),
-                 hold_set:(.hold_set // null),origin:(.origin // null)} ]
+                 hold_set:(.hold_set // null),origin:(.origin // null),
+                 choices:(.choices // {options:[],links:[],free_text:false,no_link:false}),
+                 answers:(.answers // []),notes:(.notes // []),
+                 report_path:(.report_path // null)} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -668,7 +681,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                    summary:hold_summary((.title // .id);
                                         (.hold_reason // "captain decision pending")),
                    question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id,
-                   hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null)} ]
+                   hold_until:(.hold_until // null),hold_bucket:(.hold_bucket // null),
+                   choices:(.choices // {options:[],links:[],free_text:false,no_link:false}),
+                   answers:(.answers // []),notes:(.notes // []),
+                   report_path:(.report_path // null)} ]
             + [ $m.decisions_open[]?
                 | select(.source == "status")
                 | status_question_row($m.id; $m.id; .id; .id) ])[] ]) as $decisions_all
