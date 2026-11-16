@@ -912,7 +912,7 @@ test_build_drops_decision_cards_whose_subject_already_landed() {
         {"key":"quota-version","type":"decision","repo":"sample","title":"Old quota release",
          "subject":{"artifact":"quota-axi","version":"0.1.37"},
          "options":[{"value":"yes","label":"Yes"}]},
-        {"key":"still-open","type":"decision","repo":"sample","title":"Genuinely open",
+        {"key":"still-open","type":"decision","repo":"sample","title":"Genuinely open","question":"Adopt the new quota release?",
          "subject":{"artifact":"quota-axi","version":"0.2.0"},
          "options":[{"value":"yes","label":"Yes"}]}
       ]
@@ -953,7 +953,7 @@ EOF
   write_valid_payload "$data"
   jq '.captains_call = [{
         "key":"remote-mate-call","type":"decision","repo":"sample",
-        "title":"Remote secondmate decision",
+        "title":"Remote secondmate decision","question":"Approve the remote call?",
         "options":[{"value":"yes","label":"Yes"}]
       }]
       | .landed = []' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
@@ -1024,8 +1024,9 @@ test_a_page_backed_decision_gets_only_the_plain_reconcile_choice() {
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
   write_valid_payload "$data"
-  jq '.captains_call[0].options = [] | .captains_call[0].allow_freeform = false' "$data" > "$data.tmp" \
-    && mv "$data.tmp" "$data"
+  jq '.captains_call[0].options = [] | .captains_call[0].allow_freeform = false
+      | .captains_call[0].links = ((.captains_call[0].links // []) + [{"label":"Decision page","page":"decision-page"}])' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null || fail "a decision with no options and no free text was refused"
   extract_payload "$board" | jq -e '
     .captains_call[0].options == [{value: "reconcile",
@@ -1067,7 +1068,90 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+# A Captain's Call card must state its decision: a question the captain is
+# asked and the choices that answer it. A card missing either is refused by
+# name, never rendered and never dropped.
+test_build_refuses_a_card_with_no_explicit_decision() {
+  local home data rc out
+  home=$(make_home no-explicit-decision)
+  data="$home/payload.json"
+
+  # No question at all: the generator dropped it, and the title is a statement.
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"fos-pr20-merge-status","type":"decision","repo":"fos",
+    "title":"fos PR 20 merge status","about":"Merged upstream.",
+    "options":[{"value":"approve","label":"Approve"},{"value":"decline","label":"Decline"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a card with no question was built"
+  assert_contains "$out" "fos-pr20-merge-status" "the no-question refusal did not name the card: $out"
+  assert_contains "$out" "question" "the no-question refusal did not name the missing field: $out"
+  assert_absent "$home/.lavish/bearings-board.html" "a card with no question still produced a board"
+
+  # A prompt that is a statement, not a question.
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"runner-image-pr63-waive","type":"decision","repo":"runner",
+    "title":"Runner image PR 63","question":"The image check is red on PR 63.",
+    "options":[{"value":"approve","label":"Approve"},{"value":"decline","label":"Decline"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a card whose prompt is not a question was built"
+  assert_contains "$out" "runner-image-pr63-waive" "the statement refusal did not name the card: $out"
+  assert_contains "$out" "question" "the statement refusal did not name the missing field: $out"
+
+  # An empty question over a free-text box: a box alone does not say what to decide.
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"mr872-approve","type":"decision","repo":"cd",
+    "title":"MR 872","question":"","options":[],"allow_freeform":true}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a card with an empty question was built"
+  assert_contains "$out" "mr872-approve" "the empty-card refusal did not name the card: $out"
+  assert_contains "$out" "question" "the empty-card refusal did not name the question: $out"
+
+  # A real question with no options and no free-text answer: nothing answers it.
+  write_valid_payload "$data"
+  jq '.captains_call[0].options = [] | .captains_call[0].allow_freeform = false' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a question card with no way to answer it was built"
+  assert_contains "$out" "sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice" \
+    "the no-options refusal did not name the card: $out"
+  assert_contains "$out" "options" "the no-options refusal did not name the missing field: $out"
+
+  assert_absent "$home/.lavish/bearings-board.html" "a refused card still produced a board"
+  pass "build refuses a Captain's Call card with no explicit question or no way to answer it, naming it"
+}
+
+test_build_accepts_explicit_decisions_and_in_person_actions() {
+  local home data
+  home=$(make_home explicit-decision)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [
+    {"key":"ship-it","type":"decision","repo":"sample","title":"Ship it",
+     "question":"Ship the release today?",
+     "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}]},
+    {"key":"cd-872-874-dismiss","type":"decision","repo":"cd","title":"Dismiss stale reviews",
+     "question":"Dismiss review 623 on MR 872 and review 624 on MR 874.",
+     "options":[{"value":"done","label":"Done"},
+                {"value":"not-done","label":"Not done (say why)","hint":"Say why in the answer box"}],
+     "allow_freeform":true},
+    {"key":"pick-a-name","type":"decision","repo":"sample","title":"Public name",
+     "question":"Which public name should the tool ship under?","options":[],"allow_freeform":true}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null 2>&1 \
+    || fail "build refused explicit question and in-person action cards"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '[.captains_call[].key] | index("ship-it") != null and index("cd-872-874-dismiss") != null
+             and index("pick-a-name") != null' >/dev/null \
+    || fail "an explicit decision card did not reach the board"
+  pass "build accepts an explicit question card, an open question answered in free text, and an in-person action card"
+}
+
 test_path_is_stable_and_home_scoped
+test_build_refuses_a_card_with_no_explicit_decision
+test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_lists_live_pages_and_refuses_payload_pages
