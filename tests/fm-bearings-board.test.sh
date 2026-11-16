@@ -167,7 +167,8 @@ write_valid_payload() {  # <path>
         { "value": "yes", "label": "Adopt", "hint": "recommended" },
         { "value": "no", "label": "Keep current" }
       ],
-      "allow_freeform": true
+      "allow_freeform": true,
+      "links": [{ "url": "https://github.com/example/sample/pull/2", "label": "PR 2" }]
     },
     {
       "key": "merge.sample-task",
@@ -914,7 +915,7 @@ test_build_drops_decision_cards_whose_subject_already_landed() {
          "options":[{"value":"yes","label":"Yes"}]},
         {"key":"still-open","type":"decision","repo":"sample","title":"Genuinely open","question":"Adopt the new quota release?",
          "subject":{"artifact":"quota-axi","version":"0.2.0"},
-         "options":[{"value":"yes","label":"Yes"}]}
+         "options":[{"value":"yes","label":"Yes"}],"no_link":true}
       ]
       | .landed = [
         {"id":"landed-by-task","repo":"sample","what":"shipped it","owner":"crew"},
@@ -954,7 +955,7 @@ EOF
   jq '.captains_call = [{
         "key":"remote-mate-call","type":"decision","repo":"sample",
         "title":"Remote secondmate decision","question":"Approve the remote call?",
-        "options":[{"value":"yes","label":"Yes"}]
+        "options":[{"value":"yes","label":"Yes"}],"no_link":true
       }]
       | .landed = []' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
 
@@ -1131,14 +1132,16 @@ test_build_accepts_explicit_decisions_and_in_person_actions() {
   jq '.captains_call += [
     {"key":"ship-it","type":"decision","repo":"sample","title":"Ship it",
      "question":"Ship the release today?",
-     "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}]},
+     "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}],
+     "links":[{"url":"https://github.com/example/sample/releases","label":"Releases"}]},
     {"key":"cd-872-874-dismiss","type":"decision","repo":"cd","title":"Dismiss stale reviews",
      "question":"Dismiss review 623 on MR 872 and review 624 on MR 874.",
      "options":[{"value":"done","label":"Done"},
                 {"value":"not-done","label":"Not done (say why)","hint":"Say why in the answer box"}],
-     "allow_freeform":true},
+     "allow_freeform":true,"pr_url":"https://gitlab.com/example/cd/-/merge_requests/872"},
     {"key":"pick-a-name","type":"decision","repo":"sample","title":"Public name",
-     "question":"Which public name should the tool ship under?","options":[],"allow_freeform":true}]' \
+     "question":"Which public name should the tool ship under?","options":[],"allow_freeform":true,
+     "free_text":true,"no_link":true}]' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null 2>&1 \
     || fail "build refused explicit question and in-person action cards"
@@ -1149,7 +1152,92 @@ test_build_accepts_explicit_decisions_and_in_person_actions() {
   pass "build accepts an explicit question card, an open question answered in free text, and an in-person action card"
 }
 
+# A decision card offers the decision's own recorded values and something to
+# click. A card whose hold recorded no choices, or that has no link, is refused
+# naming exactly what to re-hold with; a declared free-text question and a
+# --no-link opt-out pass, and the generator's own status cards keep passing.
+test_build_refuses_a_card_without_recorded_choices_or_a_link() {
+  local home data rc out
+  home=$(make_home no-choices-no-link)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [
+    {"key":"guessed-choices","type":"decision","repo":"cd","title":"Keep the grill?",
+     "question":"Keep the second grill round?","options_inferred":true,
+     "options":[{"value":"approve","label":"Approve"},{"value":"decline","label":"Decline"}],
+     "links":[{"url":"https://gitlab.com/example/cd/-/merge_requests/697","label":"MR 697"}]},
+    {"key":"nothing-to-click","type":"decision","repo":"cd","title":"Dismiss the reviews?",
+     "question":"Dismiss the stale reviews?",
+     "options":[{"value":"dismiss","label":"Dismiss both"},{"value":"keep","label":"Keep them"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a card with guessed choices and a card with no link were built"
+  assert_contains "$out" "undecided-card: guessed-choices: missing options (no recorded choices: re-hold with --option <value>=<label> or --free-text)" \
+    "the guessed-choices refusal did not say what to add: $out"
+  assert_not_contains "$out" "guessed-choices: missing options (no recorded choices: re-hold with --option <value>=<label> or --free-text), link" \
+    "a linked card was refused for its link: $out"
+  assert_contains "$out" "undecided-card: nothing-to-click: missing link (no link: re-hold with --link <url|page:id> or --no-link)" \
+    "the no-link refusal did not say what to add: $out"
+  assert_absent "$home/.lavish/bearings-board.html" "a refused card still produced a board"
+
+  write_valid_payload "$data"
+  jq '.captains_call += [
+    {"key":"name-it","type":"decision","repo":"sample","title":"Public name",
+     "question":"Which public name should the tool ship under?","options":[],"allow_freeform":true,
+     "free_text":true,"no_link":true},
+    {"key":"worker-asks","type":"decision","repo":"sample","title":"Worker question",
+     "question":"Use the staging database?","options_inferred":true,"from_status":true,
+     "options":[{"value":"approve","label":"Approve"},{"value":"decline","label":"Decline"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) \
+    || fail "a declared free-text call with --no-link or a generator status card was refused: $out"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '[.captains_call[].key] | index("name-it") != null and index("worker-asks") != null' >/dev/null \
+    || fail "an opted-out or generator card did not reach the board"
+  pass "build refuses a card with no recorded choices or no link by what to add, and passes the opt-outs and generator cards"
+}
+
+# A live page about a task links that task's card in place, whether its record
+# names the task (fm-board-page.sh open --task) or the card names the page id;
+# a Waiting or Charted row about it gains the page in its expandable context.
+test_a_page_about_a_task_links_its_card_and_context_in_place() {
+  local home data dir out
+  home=$(make_home page-links)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null 2>&1 || fail "the first build failed"
+  dir=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-board-page.sh" dir cd-697-698-grill) \
+    || fail "the page folder was not given"
+  printf '<html></html>\n' > "$dir/page.html"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_BOARD_PAGE_REFRESH=true \
+    "$ROOT/bin/fm-board-page.sh" open cd-697-698-grill --title "CD grill" --task cd-grill >/dev/null \
+    || fail "the page did not open with a task"
+  jq '.captains_call += [
+    {"key":"cd-grill","type":"decision","repo":"cd","title":"Grill outcome",
+     "question":"Keep both grill rounds?",
+     "options":[{"value":"keep","label":"Keep both"},{"value":"drop","label":"Drop the second"}]},
+    {"key":"cd-follow-up","type":"decision","repo":"cd","title":"Grill follow-up",
+     "question":"Act on the findings on cd-697-698-grill now?",
+     "options":[{"value":"now","label":"Now"},{"value":"later","label":"Later"}]}]
+    | .waiting = [{"key":"cd-wait","repo":"cd","title":"Grill wait","reason":"After the grill",
+                   "context":{"task":"cd-grill","reason":"After the grill"}}]
+    | .charted += [{"id":"cd-next","repo":"cd","title":"Next","reason":"","dispatchable":true,
+                    "context":{"task":"cd-next","notes":["Read cd-697-698-grill first."]}}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the cards about a live page were refused: $out"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    ([.captains_call[] | select(.key == "cd-grill") | .links[]] == [{"page":"cd-697-698-grill","label":"CD grill"}])
+    and ([.captains_call[] | select(.key == "cd-follow-up") | .links[]] == [{"page":"cd-697-698-grill","label":"CD grill"}])
+    and (.waiting[0].context.page == {"id":"cd-697-698-grill","title":"CD grill"})
+    and ([.charted[] | select(.id == "cd-next") | .context.page] == [{"id":"cd-697-698-grill","title":"CD grill"}])
+    and (.pages == [{"id":"cd-697-698-grill","title":"CD grill","href":"pages/cd-697-698-grill/page.html"}])
+  ' >/dev/null || fail "a card or row about the live page did not link it in place: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '{c: [.captains_call[] | {key, links}], w: .waiting, ch: .charted, pages}')"
+  pass "a live page about a task links its card and its Waiting and Charted context in place"
+}
+
 test_path_is_stable_and_home_scoped
+test_build_refuses_a_card_without_recorded_choices_or_a_link
+test_a_page_about_a_task_links_its_card_and_context_in_place
 test_build_refuses_a_card_with_no_explicit_decision
 test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board

@@ -362,7 +362,7 @@ test_a_captain_hold_and_its_answer_rebuild_the_board() {
   build_initial_board "$home"
   in_home "$home" "$REFRESH" || fail "baseline refresh failed"
   captain "$home" hold board-call --title "Choose the board option" \
-    --reason "Ship the board option?" --repo sample >/dev/null || fail "hold failed"
+    --reason "Ship the board option?" --repo sample --option yes=Yes --option no=No --no-link >/dev/null || fail "hold failed"
   await_rebuilds "$home" 2 || fail "a captain hold did not refresh the open board"
   grep -q 'board-call' "$home/.lavish/bearings-board.data.js" || fail "the new hold has no card"
   captain "$home" answer board-call --decision-file "$decision" >/dev/null || fail "answer failed"
@@ -378,11 +378,11 @@ test_every_open_captain_hold_has_exactly_one_board_row() {
   [ -n "$TASKS_AXI_BIN" ] || { pass "skip: tasks-axi not found"; return; }
   home=$(make_hold_home completeness)
   for i in 1 2 3; do
-    captain "$home" hold "call-$i" --title "Question $i" --reason "Pick option $i?" --repo sample \
+    captain "$home" hold "call-$i" --title "Question $i" --reason "Pick option $i?" --repo sample --option yes=Yes --option no=No --no-link \
       >/dev/null || fail "hold $i failed"
   done
   captain "$home" hold dated-call --title "A dated call" --reason "Decide the dated call?" \
-    --repo sample --until 2099-01-01 >/dev/null || fail "dated hold failed"
+    --repo sample --option yes=Yes --option no=No --no-link --until 2099-01-01 >/dev/null || fail "dated hold failed"
   in_home "$home" env FM_BEARINGS_DECISIONS=2 "$ROOT/bin/fm-bearings-board-payload.sh" \
     > "$home/payload.json" || fail "payload failed"
   keys=$(jq -r '[(.captains_call[]?, .waiting[]?) | .key | select(test("call"))] | sort | join(",")' "$home/payload.json")
@@ -448,7 +448,7 @@ test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting() {
   home=$(make_hold_home handed-steer)
   add_steerable_task "$home" t1
   captain "$home" hold board-call --title "Choose the board option" \
-    --reason "Ship the board option?" --repo sample --origin t1 >/dev/null || fail "hold failed"
+    --reason "Ship the board option?" --repo sample --option yes=Yes --option no=No --no-link --origin t1 >/dev/null || fail "hold failed"
   build_initial_board "$home"
   in_home "$home" "$REFRESH" || fail "baseline refresh failed"
   sleep 1.1
@@ -479,7 +479,7 @@ test_a_board_reconcile_request_moves_the_card_to_waiting_at_once() {
   [ -n "$TASKS_AXI_BIN" ] || { pass "skip: tasks-axi not found"; return; }
   home=$(make_hold_home reconcile)
   captain "$home" hold board-call --title "Choose the board option" \
-    --reason "Ship the board option?" --repo sample >/dev/null || fail "hold failed"
+    --reason "Ship the board option?" --repo sample --option yes=Yes --option no=No --no-link >/dev/null || fail "hold failed"
   build_initial_board "$home"
   in_home "$home" "$REFRESH" || fail "baseline refresh failed"
   sleep 1.1
@@ -501,9 +501,9 @@ test_an_answered_hold_ranked_first_never_returns_as_a_card() {
   decision="$home/decision.txt"
   printf 'go\n' > "$decision"
   captain "$home" hold board-call --title "Choose the board option" \
-    --reason "Ship the board option?" --repo sample >/dev/null || fail "hold failed"
+    --reason "Ship the board option?" --repo sample --option yes=Yes --option no=No --no-link >/dev/null || fail "hold failed"
   captain "$home" hold other-call --title "Choose the name" \
-    --reason "Pick the public name?" --repo sample >/dev/null || fail "second hold failed"
+    --reason "Pick the public name?" --repo sample --option yes=Yes --option no=No --no-link >/dev/null || fail "second hold failed"
   captain "$home" answer board-call --decision-file "$decision" >/dev/null || fail "answer failed"
   in_home "$home" "$PRIO" set board-call other-call >/dev/null || fail "set failed"
   payload "$home" "$home/after.json"
@@ -521,9 +521,9 @@ test_a_done_task_ranked_first_never_renders_as_a_card() {
   [ -n "$TASKS_AXI_BIN" ] || { pass "skip: tasks-axi not found"; return; }
   home=$(make_hold_home done-ranked)
   captain "$home" hold done-call --title "Post the held comments" \
-    --reason "Post the held set?" --repo sample >/dev/null || fail "hold failed"
+    --reason "Post the held set?" --repo sample --option yes=Yes --option no=No --no-link >/dev/null || fail "hold failed"
   captain "$home" hold other-call --title "Choose the name" \
-    --reason "Pick the public name?" --repo sample >/dev/null || fail "second hold failed"
+    --reason "Pick the public name?" --repo sample --option yes=Yes --option no=No --no-link >/dev/null || fail "second hold failed"
   build_initial_board "$home"
   in_home "$home" env REAL_TASKS_AXI="$TASKS_AXI_BIN" "$ROOT/bin/fm-tasks-axi.sh" 'done' done-call >/dev/null \
     || fail "the held task could not be closed as done"

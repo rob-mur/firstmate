@@ -102,6 +102,11 @@
 #     reason, title, and hold_reason fields stay bounded. A decisions_open
 #     captain-hold row also carries hold_set and origin (null when unrecorded),
 #     so a reader can tell when the hold was raised and which task carries it.
+#     Both captain-hold row shapes also carry choices (the options, links,
+#     free_text, and no_link that bin/fm-captain-hold.sh recorded on the hold),
+#     answers (each recorded resolution's at, mode, and first paragraph of
+#     words), notes (the task body's other paragraphs, machine lines removed),
+#     and report_path.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
@@ -529,6 +534,42 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
         elif $reported != null then {verb:"reported",date:$reported}
         elif $done != null then {verb:"done",date:$done}
         else {verb:null,date:null} end;
+    # The structured header of a hold is the paragraph that opens with the hold-set
+    # stamp; bin/fm-captain-hold.sh owns the line format.
+    def stamp_line: test("^Captain hold set:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}");
+    def machine_line:
+      stamp_line
+      or test("^Captain hold (origin|option|free text|link|no link):[[:space:]]");
+    def resolution_head: test("^Resolution recorded by fm-(captain|decision)-hold\\.$");
+    def hold_choices($paras):
+      (if ($paras | length) > 0 and ($paras[0][0] | stamp_line) then $paras[0][1:] else [] end) as $header
+      | {options:[$header[]
+           | capture("^Captain hold option:[[:space:]]*(?<v>[^=[:space:]]+)(?:=(?<l>.+))?$")?
+           | {value:.v,label:((.l // .v) | trim | .[:200])}][:12],
+         links:[$header[]
+           | capture("^Captain hold link:[[:space:]]*(?<t>[^[:space:]]+)(?:[[:space:]]+(?<l>.*))?$")?
+           | {target:.t,label:((.l // "") | trim | .[:200])}][:8],
+         free_text:any($header[]; test("^Captain hold free text:[[:space:]]*yes$")),
+         no_link:any($header[]; test("^Captain hold no link:[[:space:]]*yes$"))};
+    # Each resolution record is a machine paragraph followed by the paragraph
+    # holding the recorded words; only that first paragraph is shown.
+    def hold_answers($paras):
+      [range(0; ($paras | length)) as $i
+       | $paras[$i] as $p
+       | select(($p[0] | resolution_head))
+       | ($paras[$i + 1] // []) as $words
+       | select(($words[0] // "") | test("^(Captain decision|Reconciliation evidence):$"))
+       | {at:([$p[] | capture("^Resolved at:[[:space:]]*(?<v>.+)$")? | .v][0] // null),
+          mode:([$p[] | capture("^Resolution mode:[[:space:]]*(?<v>.+)$")? | .v][0] // null),
+          text:($words[1:] | join("\n") | .[:2000])}][:12];
+    def body_notes($paras):
+      [range(0; ($paras | length)) as $i
+       | $paras[$i] as $p
+       | select(($p[0] | resolution_head) | not)
+       | select($i == 0 or (($paras[$i - 1][0] | resolution_head) | not))
+       | [$p[] | select(machine_line | not)]
+       | select(length > 0)
+       | join("\n") | .[:1000]][:12];
     def row_match($line):
       (($line | capture("^[-*][[:space:]]+\\[(?<check>[ xX])\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+(?<rest>.*)$")?) //
        (($line | capture("^[-*][[:space:]]+\\*\\*(?<id>[^*]+)\\*\\*[[:space:]]+-[[:space:]]+(?<rest>.*)$")?)
@@ -575,15 +616,21 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
       ({path:$path,present:true,records:[],section:null,order:0};
        if ($line | test("^##[[:space:]]+")) then
          .section = (($line | sub("^##[[:space:]]+";"") | trim) | section_state)
-       elif .section == null or ($line | trim) == "" then
+       elif ($line | trim) == "" then
+         if .section != null and (.records | length) > 0 and (.records[-1].structured == true)
+         then .records[-1].body_gap = true else . end
+       elif .section == null then
          .
        elif structured_row($line) then
          .order += 1
          | .records += [parse_row($line; .section; .order)]
        elif ((.records | length) > 0 and (.records[-1].structured == true) and ($line | test("^[[:space:]]+"))) then
          ($line | trim) as $body
-         | if $body == "" then .
-           else .records[-1].body_lines += [$body] end
+         | .records[-1].body_lines += [$body]
+         | if (.records[-1].body_gap // false) or ((.records[-1].body_paras // []) | length) == 0
+           then .records[-1].body_paras = ((.records[-1].body_paras // []) + [[$body]])
+             | .records[-1].body_gap = false
+           else .records[-1].body_paras[-1] += [$body] end
        else
          .order += 1
          | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
@@ -598,7 +645,12 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
                   else cap(.body_lines[-1]; "^(?<v>local main)$")
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
-        else . end)
+          | (.body_paras // []) as $paras
+          | .hold_choices = hold_choices($paras)
+          | .hold_answers = hold_answers($paras)
+          | .body_notes = body_notes($paras)
+        else . end
+        | del(.body_paras, .body_gap))
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
@@ -1127,7 +1179,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             hold_set:(.hold_set // null),
             origin:([(.body_lines // [])[]
                      | capture("^Captain hold origin:[[:space:]]*(?<v>[^[:space:]]+)")?
-                     | .v][0] // null),source:"backlog"} ]) as $captain_holds_all
+                     | .v][0] // null),
+            choices:(.hold_choices // {options:[],links:[],free_text:false,no_link:false}),
+            answers:(.hold_answers // []),notes:(.body_notes // []),
+            report_path:(.report_path // null),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             kind:((.kind // null) | if . == null then null else trunc(40) end),
@@ -1239,6 +1294,9 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_reason_full:(.hold_reason // null),title_full:.title,
+          choices:(.hold_choices // {options:[],links:[],free_text:false,no_link:false}),
+          answers:(.hold_answers // []),notes:(.body_notes // []),
+          report_path:(.report_path // null),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           hold_bucket:(.hold_bucket // null),
