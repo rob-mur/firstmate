@@ -223,6 +223,10 @@ The optional mode column carries a card-declared close:
 | `release` | Lifts the hold so held work resumes. |
 | Any other value | Skipped. |
 
+A line on an in-flight task releases even when its mode is empty or `done`: a board answer on live work records the words and lifts the hold, never closing the work.
+It is refused while away under the same attended-only rule as a `release` line.
+The explicit `answer` command still closes such a task, so firstmate can record a rejection that ends the work.
+
 Each key is reported as follows:
 
 | Key | Result |
@@ -602,6 +606,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
+- `test_answer_on_in_flight_work_releases_instead_of_closing` exercises a keyed answer on in-flight work: it releases with the words recorded and the body kept, replays idempotently, and is refused while away.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
