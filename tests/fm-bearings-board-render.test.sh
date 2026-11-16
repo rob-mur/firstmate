@@ -682,10 +682,10 @@ test_the_board_lists_every_decision_for_reordering_before_the_cards() {
 # decisions shunt down together as a block, so the first one never flips back.
 # Each sequence runs in one page on a fresh board, since a reload keeps only
 # the order.
-walk_board() {  # <name> <actions>
-  local home
+walk_board() {  # <name> <actions> [keys-json]
+  local home keys=${3:-'["k1","k2","k3","k4"]'}
   home=$(make_home "reorder-walk-$1")
-  build_call_board "$home" '["k1","k2","k3","k4"]'
+  build_call_board "$home" "$keys"
   run_board "$home" "$2"
 }
 
@@ -709,6 +709,26 @@ test_repeated_down_on_the_top_decision_walks_the_list() {
   printf '%s' "$out" | jq -e '.order.list == ["k1","k2","k4","k3"]' >/dev/null \
     || fail "a move lower in the list did not start a new walk from the top: $out"
   pass "repeated down presses on the top decision walk the list, shunting the passed ones down as a block"
+}
+
+# The walk works from any row, leaving the rows above it where they are: after
+# a top walk puts k4 first, repeated presses on the second row pull each lower
+# decision up into that row in turn.
+test_repeated_down_on_a_lower_decision_walks_the_rest_of_the_list() {
+  local keys='["k1","k2","k3","k4","k5"]' out
+  out=$(walk_board slot2-one "down:k1,down:k2,down:k3,down:k1" "$keys")
+  printf '%s' "$out" | jq -e '.order.list == ["k4","k2","k1","k3","k5"]' >/dev/null \
+    || fail "one press on the second decision did not move it down one: $out"
+  out=$(walk_board slot2-two "down:k1,down:k2,down:k3,down:k1,down:k2" "$keys")
+  printf '%s' "$out" | jq -e '.order.list == ["k4","k3","k1","k2","k5"]' >/dev/null \
+    || fail "a second press on the second row flipped the pair back instead of bringing up the next decision: $out"
+  out=$(walk_board slot2-three "down:k1,down:k2,down:k3,down:k1,down:k2,down:k3" "$keys")
+  printf '%s' "$out" | jq -e '.order.list == ["k4","k5","k1","k2","k3"]' >/dev/null \
+    || fail "a third press on the second row did not bring up the last decision: $out"
+  out=$(walk_board slot2-wrap "down:k1,down:k2,down:k3,down:k1,down:k2,down:k3,down:k5" "$keys")
+  printf '%s' "$out" | jq -e '.order.list == ["k4","k1","k2","k3","k5"]' >/dev/null \
+    || fail "a full walk from the second row did not restore its starting order: $out"
+  pass "repeated down presses on a lower decision walk the rest of the list, leaving the rows above alone"
 }
 
 test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh() {
@@ -787,6 +807,7 @@ test_reorder_stays_usable_after_answers_are_queued_and_sent() {
 test_the_board_lists_every_decision_for_reordering_before_the_cards
 test_reorder_stays_usable_after_answers_are_queued_and_sent
 test_repeated_down_on_the_top_decision_walks_the_list
+test_repeated_down_on_a_lower_decision_walks_the_rest_of_the_list
 test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh
 test_the_order_survives_a_refresh_without_browser_storage
 
