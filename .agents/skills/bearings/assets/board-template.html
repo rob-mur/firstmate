@@ -401,6 +401,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       <span class="fm-sign fm-sign--muted">Waiting - nothing for you to do yet</span>
       <ul class="bb-waiting__list" id="bb-waiting-list"></ul>
     </div>
+    <!-- the captain's open GitLab MRs no task covers: information, not decisions -->
+    <div class="bb-waiting" id="bb-open-mrs" hidden>
+      <span class="fm-sign fm-sign--muted">Your open MRs no task covers - for your information</span>
+      <ul class="bb-waiting__list" id="bb-open-mrs-list"></ul>
+    </div>
   </section>
 
   </div>
@@ -845,6 +850,29 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     document.getElementById("bb-waiting").hidden = !waitingRows.length;
   }
   renderWaiting();
+
+  /* The captain's open GitLab MRs that no task records: each row shows its
+     title, one state line and its full URL, always visible. They are not
+     decisions, so they never join Captain's Call or its priority order. */
+  var openMrsList = document.getElementById("bb-open-mrs-list");
+  var openMrsShown = "";
+  function renderOpenMrs() {
+    var rows = Array.isArray(data.open_mrs) ? data.open_mrs : [];
+    var sig = JSON.stringify(rows);
+    if (sig === openMrsShown) return;
+    openMrsShown = sig;
+    while (openMrsList.children.length) openMrsList.removeChild(openMrsList.children[0]);
+    rows.forEach(function (m) {
+      var li = el("li", "bb-waiting__row");
+      li.setAttribute("data-open-mr-key", m.key || m.url);
+      li.appendChild(el("span", "bb-waiting__title", (m.repo ? m.repo + ": " : "") + m.title));
+      li.appendChild(el("span", "bb-waiting__why", m.state));
+      appendLinks(li, { pr_url: m.url });
+      openMrsList.appendChild(li);
+    });
+    document.getElementById("bb-open-mrs").hidden = !rows.length;
+  }
+  renderOpenMrs();
 
   /* One record per rendered card, keyed by item key: the card element, the
      item it shows, and that item's signature, so a live update can tell an
@@ -1623,6 +1651,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     renderHeader();
     pruneDrafts();
     renderWaiting();
+    renderOpenMrs();
     syncPages(data.pages);
     Object.keys(cardByKey).forEach(function (k) {
       if (callKeySet[k]) return;
