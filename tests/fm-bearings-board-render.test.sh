@@ -726,9 +726,27 @@ test_a_card_that_refers_to_unlisted_options_says_so() {
   pass "a card that refers to options it does not list says so, and other cards do not"
 }
 
+test_a_card_the_build_flagged_says_what_to_fix() {
+  local home out why
+  home=$(make_home flagged-card)
+  why="missing question (The image check is red on PR 63. is not a question)"
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg w "$why" '[
+    {key:"k1",type:"decision",title:"Runner image PR 63",question:"The image check is red on PR 63.",repo:"r",
+     options:[],allow_freeform:true,problem:$w,free_text:true,no_link:true},
+    {key:"k2",type:"decision",title:"Merge 836",question:"Merge it now?",repo:"r",
+     options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allow_freeform:true,no_link:true}]')")
+  printf '%s' "$out" | jq -e --arg w "$why" '
+    .error == "" and (.captains_call | length) == 2
+      and (.captains_call[0] | contains("needs fixing") and contains($w))
+      and (.captains_call[1] | contains("needs fixing") | not)
+  ' >/dev/null || fail "a card the build flagged did not say so, or a sound card did: $out"
+  pass "a card the build flagged shows what to fix, and other cards do not"
+}
+
 test_board_renders_only_the_captains_call
 test_a_long_title_and_about_render_in_full
 test_a_card_that_refers_to_unlisted_options_says_so
+test_a_card_the_build_flagged_says_what_to_fix
 
 test_the_board_lists_every_decision_for_reordering_before_the_cards() {
   local home out
