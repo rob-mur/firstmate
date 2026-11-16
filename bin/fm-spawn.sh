@@ -452,6 +452,9 @@
 #   FM_TASK_INBOX export every launch carries (the absolute state/<id>.inbox
 #   path the steering doorbell names). Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
+#   Every pane-backed launch also restores the launcher's exact $HOME/.local/bin
+#   PATH entry when the pane PATH lacks it (spawn_local_bin_path_fix), in either
+#   posture; it is never added when the launcher's PATH lacks it.
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
@@ -8151,6 +8154,32 @@ fi
 # launch and the launch-env-allowlist `env -i` wrapper.
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
+# A pane shell's PATH comes from the backend server and its shell startup, not
+# from this launcher, so a user-local tool directory such as ~/.local/bin (where
+# lavish-axi and other operator tools install) can be on the launcher's PATH yet
+# missing in the worker. spawn_local_bin_path_fix prints a POSIX statement that
+# restores it: only when the launcher's PATH holds the exact $HOME/.local/bin
+# entry, only when the destination PATH lacks it, and placed before the first
+# destination entry that follows it on the launcher's PATH (else appended), so
+# the launcher's relative order holds and no existing entry moves or repeats.
+# It is part of the launch command, so it reaches a compound raw launch and the
+# launch-env-allowlist `env -i` wrapper alike.
+spawn_local_bin_path_fix() {
+  local dir after q_dir q_after
+  [ -n "${HOME:-}" ] || return 0
+  dir=${HOME%/}/.local/bin
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) return 0 ;;
+  esac
+  after=":$PATH:"
+  after=${after#*":$dir:"}
+  q_dir=$(shell_quote "$dir")
+  q_after=$(shell_quote ":$after")
+  printf '%s' "case \":\$PATH:\" in *:$q_dir:*) ;; *) _fm_s=$q_after; _fm_r=\$PATH:; _fm_p=; _fm_n=0; _fm_d=0; while [ -n \"\$_fm_r\" ]; do _fm_e=\${_fm_r%%:*}; _fm_r=\${_fm_r#*:}; if [ \"\$_fm_d\" = 0 ]; then case \"\$_fm_s\" in *\":\$_fm_e:\"*) [ \"\$_fm_n\" = 0 ] || _fm_p=\$_fm_p:; _fm_p=\$_fm_p$q_dir; _fm_n=1; _fm_d=1 ;; esac; fi; [ \"\$_fm_n\" = 0 ] || _fm_p=\$_fm_p:; _fm_p=\$_fm_p\$_fm_e; _fm_n=1; done; if [ \"\$_fm_d\" = 0 ]; then [ \"\$_fm_n\" = 0 ] || _fm_p=\$_fm_p:; _fm_p=\$_fm_p$q_dir; fi; export PATH=\"\$_fm_p\"; unset _fm_s _fm_r _fm_p _fm_n _fm_d _fm_e ;; esac"
+}
+LOCAL_BIN_PATH_FIX=$(spawn_local_bin_path_fix)
+[ -z "$LOCAL_BIN_PATH_FIX" ] || LAUNCH="$LOCAL_BIN_PATH_FIX; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
 # own environment, carry it into the launch command text so Claude Code's
 # auto-updater cannot rewrite the shared binary during a live run. Embedding the
