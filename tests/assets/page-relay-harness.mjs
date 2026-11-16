@@ -1,12 +1,20 @@
 // Run a board page's lavish-relay.js inside a simulated board frame, under a
 // small DOM shim with real capture and bubble event dispatch, so the relay's
-// annotate mode can be asserted through the messages it posts to the board.
+// annotate mode and its handling of the page's forms can be asserted through
+// the messages it posts to the board.
 //
 // Usage: node page-relay-harness.mjs <lavish-relay.js> [actions]
 // The page is fixed: main#understand holds h2, p, p, div#answer-box, a button,
 // a link marked data-lavish-action, a plain link, and a span inside a
-// role=button widget. Name an element by its text: heading, first, second,
-// answer, submit, action, link, widget. Comma-separated actions run in order:
+// role=button widget, followed by three forms:
+//   round  form#round: a q1 radio group (picked a) and a notes textarea; its
+//          own submit handler queues tag round-answers, queueKey round, data
+//          {q1, notes}, with the form as the element, like a board page does
+//   quick  form#quick: one input; its handler queues tag quick and sends
+//   plain  form#plain: one input and no handler that queues anything
+// Name an element by its text: heading, first, second, answer, submit,
+// action, link, widget. Timers run on a fake clock that only tick advances.
+// Comma-separated actions run in order:
 //   annotate:on|off   the board says annotate is on or off
 //   stranger:on       another frame (not the board) says annotate is on
 //   click:<name>      click that element; ctrl-click:<name> holds Ctrl
@@ -16,10 +24,20 @@
 //                     shift+Enter, Escape
 //   hotkey            press Ctrl+I on the page
 //   queue|cancel      press the card's Queue or Cancel button
-// Prints { posted, card, prevented, pageClicks }: posted is every message the
-// relay sent the board, card is the open card's quoted text or null,
-// prevented lists the clicks the relay kept from the page, and pageClicks the
-// clicks the page's own handler saw.
+//   pick:<value>      pick that q1 radio in form#round (a change event)
+//   notes:<text>      type text into form#round's notes (an input event)
+//   fill:<form>:<text> type text into the input of form#quick or form#plain
+//   submitform:<form> the captain submits that form with its own button
+//   reset:<form>      the page resets that form
+//   tick:<ms>         advance the fake clock and run the timers now due
+//   leave             the pointer leaves the page's frame
+//   blur              the page's frame loses focus
+// Prints { posted, card, prevented, pageClicks, warning, submits }: posted is
+// every message the relay sent the board, card is the open card's quoted text
+// or null, prevented lists the clicks the relay kept from the page,
+// pageClicks the clicks the page's own handler saw, warning the text of the
+// relay's notice of form changes not queued (null when hidden), and submits
+// how many submit events each form's own handler saw, by form name.
 import { readFileSync } from "node:fs";
 
 const [, , relayPath, actionList = ""] = process.argv;
@@ -29,8 +47,10 @@ class Node {
     this.nodeType = 1; this.tagName = tag.toUpperCase(); this.attributes = { ...attrs };
     this.children = []; this.parentNode = null; this.listeners = []; this._text = text;
     this.style = {}; this.className = ""; this.value = ""; this.type = ""; this.placeholder = "";
-    this.shadowRoot = null; this.host = null;
+    this.shadowRoot = null; this.host = null; this.form = null; this.hidden = false;
   }
+  dispatchEvent(ev) { return !dispatch(this, ev.type, { submitter: ev.submitter }).defaultPrevented; }
+  checkValidity() { return true; }
   get id() { return this.attributes.id || ""; }
   get parentElement() { return this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : null; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
@@ -78,6 +98,17 @@ const named = {
   link: main.appendChild(new Node("a", { href: "y.html" }, "Read more")),
 };
 named.widget = main.appendChild(new Node("div", { role: "button" })).appendChild(new Node("span", {}, "Widget"));
+function field(form, tag, attrs) { const n = form.appendChild(new Node(tag, attrs)); n.form = form; return n; }
+const forms = {
+  round: main.appendChild(new Node("form", { id: "round", "data-lavish-question": "round" })),
+  quick: main.appendChild(new Node("form", { id: "quick" })),
+  plain: main.appendChild(new Node("form", { id: "plain" })),
+};
+const q1 = ["a", "b"].map((v) => { const r = field(forms.round, "input", { name: "q1" }); r.value = v; r.checked = v === "a"; return r; });
+const notes = field(forms.round, "textarea", { name: "notes" });
+field(forms.round, "button", { type: "submit" }).textContent = "Queue all answers";
+const inputs = { quick: field(forms.quick, "input", { name: "quick" }), plain: field(forms.plain, "input", { name: "plain" }) };
+const submits = { round: 0, quick: 0, plain: 0 };
 
 const docListeners = [];
 const winListeners = [];
@@ -90,6 +121,8 @@ Object.defineProperty(globalThis, "navigator", { value: { platform: "Linux x86_6
 globalThis.window = {
   parent: board, innerWidth: 1000, innerHeight: 800, CSS: undefined,
   addEventListener: (type, fn) => winListeners.push({ type, fn }),
+  setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+  clearTimeout: (id) => globalThis.clearTimeout(id),
 };
 globalThis.document = {
   documentElement: html, body,
@@ -99,6 +132,38 @@ globalThis.document = {
 };
 // The page's own handler, which annotate mode must keep from seeing clicks.
 body.addEventListener("click", (ev) => { pageClicks.push(name(ev.target)); });
+// The pages' own form handlers, as a board page writes them.
+forms.round.addEventListener("submit", (ev) => {
+  submits.round++;
+  ev.preventDefault();
+  window.lavish.queuePrompt("answers", { tag: "round-answers", text: "Round answers", element: forms.round,
+    queueKey: "round", data: { q1: q1.find((r) => r.checked).value, notes: notes.value } });
+});
+forms.quick.addEventListener("submit", (ev) => {
+  submits.quick++;
+  ev.preventDefault();
+  window.lavish.queuePrompt(inputs.quick.value, { tag: "quick", element: forms.quick });
+  window.lavish.sendQueuedPrompts();
+});
+forms.plain.addEventListener("submit", (ev) => { submits.plain++; ev.preventDefault(); });
+
+// A fake clock: timers run only when tick advances past them.
+let now = 0;
+let timers = [];
+let timerId = 0;
+globalThis.setTimeout = (fn, ms) => { timers.push({ id: ++timerId, at: now + (ms || 0), fn }); return timerId; };
+globalThis.clearTimeout = (id) => { timers = timers.filter((t) => t.id !== id); };
+function tick(ms) {
+  const end = now + ms;
+  for (;;) {
+    const due = timers.filter((t) => t.at <= end).sort((x, y) => x.at - y.at)[0];
+    if (!due) break;
+    timers = timers.filter((t) => t !== due);
+    now = due.at;
+    due.fn();
+  }
+  now = end;
+}
 
 function name(el) { return Object.keys(named).find((k) => named[k] === el) || el.tagName.toLowerCase(); }
 
@@ -110,7 +175,7 @@ function dispatch(target, type, init = {}) {
   let stopped = false;
   const ev = {
     type, key: init.key || "", ctrlKey: !!init.ctrlKey, metaKey: false, shiftKey: !!init.shiftKey, altKey: false,
-    defaultPrevented: false, target,
+    defaultPrevented: false, target, relatedTarget: init.relatedTarget || null, submitter: init.submitter || null,
     preventDefault() { this.defaultPrevented = true; },
     stopPropagation() { stopped = true; },
   };
@@ -119,10 +184,12 @@ function dispatch(target, type, init = {}) {
   for (const l of docListeners) if (l.type === type && l.capture && !stopped) l.fn(ev);
   for (let i = path.length - 1; i >= 0 && !stopped; i--) {
     ev.target = outside(i);
+    ev.currentTarget = path[i];
     for (const l of path[i].listeners) if (l.type === type && l.capture) l.fn(ev);
   }
   for (let i = 0; i < path.length && !stopped; i++) {
     ev.target = outside(i);
+    ev.currentTarget = path[i];
     for (const l of path[i].listeners) if (l.type === type && !l.capture) l.fn(ev);
   }
   ev.target = outside(path.length);
@@ -136,6 +203,11 @@ const host = () => html.children.find((c) => c.attributes["data-lavish-ui"] !== 
 const card = () => { const h = host(); return h && h.shadowRoot ? h.shadowRoot.children.find((c) => c.className === "card") || null : null; };
 const cardButton = (label) => card().children[2].children.find((b) => b.textContent === label);
 const message = (source, data) => { for (const l of winListeners) if (l.type === "message") l.fn({ source, data }); };
+const warning = () => {
+  const h = host();
+  const box = h && h.shadowRoot ? h.shadowRoot.children.find((c) => c.className === "unsent") : null;
+  return box && !box.hidden ? box.textContent : null;
+};
 const click = (el, init) => {
   const ev = dispatch(el, "click", init);
   if (ev.defaultPrevented) prevented.push(name(el));
@@ -161,6 +233,23 @@ for (const act of actionList.split(",").filter(Boolean)) {
   } else if (verb === "hotkey") dispatch(body, "keydown", { key: "i", ctrlKey: true });
   else if (verb === "queue") dispatch(cardButton("Queue"), "click");
   else if (verb === "cancel") dispatch(cardButton("Cancel"), "click");
+  else if (verb === "pick") {
+    const r = q1.find((x) => x.value === arg);
+    q1.forEach((x) => { x.checked = x === r; });
+    dispatch(r, "change");
+  } else if (verb === "notes") {
+    notes.value = arg;
+    dispatch(notes, "input");
+  } else if (verb === "fill") {
+    const [form, text] = arg.split(":");
+    inputs[form].value = text;
+    dispatch(inputs[form], "input");
+  } else if (verb === "submitform") dispatch(forms[arg], "submit");
+  else if (verb === "reset") dispatch(forms[arg], "reset");
+  else if (verb === "tick") tick(Number(arg));
+  else if (verb === "leave") dispatch(html, "mouseout", { relatedTarget: null });
+  else if (verb === "blur") { for (const l of winListeners) if (l.type === "blur") l.fn({ target: window }); }
   else throw new Error("unknown action " + act);
 }
-process.stdout.write(JSON.stringify({ posted, card: card() ? card().children[0].textContent : null, prevented, pageClicks }) + "\n");
+process.stdout.write(JSON.stringify({ posted, card: card() ? card().children[0].textContent : null, prevented, pageClicks,
+  warning: warning(), submits }) + "\n");

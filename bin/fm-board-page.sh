@@ -52,6 +52,17 @@
 #          itself, because Lavish's annotate mode cannot reach into a page
 #          frame; it follows the board's mode, and Ctrl/Cmd+I in the page
 #          toggles it.
+#          A form the captain changes is queued by the relay itself, so a note
+#          or Lavish's Send never leaves the form's answers behind: before any
+#          send or end the page asks for, a second after the last change, and
+#          when the pointer or focus leaves the page, it fires a submit event
+#          at the form (no navigation) and the page's own submit handler
+#          queues it under its own tag and queueKey. That handler must
+#          therefore be safe to run again, and should queue with a queueKey so
+#          a later run replaces the earlier action; a send or end it asks for
+#          during the relay's run is dropped. A changed form whose handler
+#          queues nothing, or that is not valid, is flagged in the page and on
+#          the board instead.
 #          Printed actions are moved to the page's handled folder, so each is
 #          delivered once. Actions already waiting are delivered before an
 #          ended status. Without --timeout-s it waits until one arrives.

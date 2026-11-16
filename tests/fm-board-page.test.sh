@@ -367,6 +367,77 @@ test_relay_annotate_mode_spares_controls_and_toggles_from_the_page() {
   pass "annotate mode spares controls and links, its card behaves like Lavish's, and Ctrl+I toggles it"
 }
 
+# A page form queues its answers only from its own submit button, while a note
+# and Lavish's Send go straight through, so a captain who answered the form,
+# left a note, and sent lost every form answer. The relay now queues a form
+# the captain changed through the page's own submit handler, under the page's
+# own tag and queueKey, before any send.
+form_answer() {  # <relay output> -> the round-answers prompts the relay posted
+  printf '%s' "$1" | jq -c '[.posted[] | select(.type == "fm-board-page:queuePrompt" and .opts.tag == "round-answers")
+    | {queueKey: .opts.queueKey, data: .opts.data}]'
+}
+
+test_relay_queues_changed_form_answers_before_a_note_is_sent() {
+  local out
+  command -v node >/dev/null 2>&1 || { printf 'ok - skip: node not found\n'; return; }
+  out=$(relay "pick:b,notes:keep it,annotate:on,click:second,type:too vague,key:ctrl+Enter")
+  printf '%s' "$out" | jq -e '
+    ([.posted[] | .type + ":" + (.opts.tag // "")] == [
+      "fm-board-page:queuePrompt:annotation",
+      "fm-board-page:queuePrompt:round-answers",
+      "fm-board-page:sendQueuedPrompts:"])
+      and (.posted[1].opts | .queueKey == "round" and .data == {q1: "b", notes: "keep it"})
+      and .submits.round == 1 and .warning == null
+  ' >/dev/null || fail "a note sent with Ctrl+Enter left the changed form answers behind: $out"
+  out=$(relay "pick:b")
+  printf '%s' "$out" | jq -e '.posted == [] and .submits.round == 0' >/dev/null \
+    || fail "the relay queued a form answer while the captain was still answering: $out"
+  pass "a note sent from the page carries the changed form answers with it"
+}
+
+# Lavish's own Send is outside the page, so the relay queues a changed form
+# when the captain stops changing it, leaves the page, or the page loses focus,
+# and never queues it twice for one change.
+test_relay_queues_changed_form_answers_before_lavish_send_can_be_pressed() {
+  local out want='[{"queueKey":"round","data":{"q1":"b","notes":""}}]'
+  command -v node >/dev/null 2>&1 || { printf 'ok - skip: node not found\n'; return; }
+  for steps in "pick:b,leave" "pick:b,blur" "pick:b,tick:1500" "pick:b,tick:1500,leave,blur" "pick:b,submitform:round,leave,tick:1500"; do
+    out=$(relay "$steps")
+    assert_equals "$want" "$(form_answer "$out")" "the changed form was not queued exactly once after $steps: $out"
+    printf '%s' "$out" | jq -e '.warning == null and ([.posted[] | select(.type != "fm-board-page:queuePrompt")] == [])' >/dev/null \
+      || fail "queueing the changed form after $steps sent something or warned: $out"
+  done
+  out=$(relay "leave,blur,tick:5000")
+  printf '%s' "$out" | jq -e '.posted == [] and .submits.round == 0' >/dev/null \
+    || fail "the relay queued a form nobody changed: $out"
+  out=$(relay "pick:b,tick:1500,notes:later,leave")
+  assert_equals '[{"queueKey":"round","data":{"q1":"b","notes":""}},{"queueKey":"round","data":{"q1":"b","notes":"later"}}]' \
+    "$(form_answer "$out")" "a later change was not queued again under the same key: $out"
+  out=$(relay "fill:quick:go,tick:1500")
+  printf '%s' "$out" | jq -e '
+    ([.posted[] | .type + ":" + (.opts.tag // "")] == ["fm-board-page:queuePrompt:quick"]) and .submits.quick == 1
+  ' >/dev/null || fail "queueing a changed form ran its send as well: $out"
+  pass "a changed form is queued once before Lavish's Send can be pressed, and never sent by the relay"
+}
+
+# A form whose own handler queues nothing cannot be queued for the captain, so
+# the page and the board both say its changes are not queued.
+test_relay_warns_about_a_changed_form_it_could_not_queue() {
+  local out
+  command -v node >/dev/null 2>&1 || { printf 'ok - skip: node not found\n'; return; }
+  out=$(relay "fill:plain:x,tick:2000")
+  printf '%s' "$out" | jq -e '
+    .posted == [{type: "fm-board-page:formsUnsent", count: 1}]
+      and (.warning | test("not queued")) and .submits.plain == 1
+  ' >/dev/null || fail "a changed form the page did not queue raised no warning: $out"
+  out=$(relay "fill:plain:x,tick:2000,reset:plain")
+  printf '%s' "$out" | jq -e '
+    .posted == [{type: "fm-board-page:formsUnsent", count: 1}, {type: "fm-board-page:formsUnsent", count: 0}]
+      and .warning == null
+  ' >/dev/null || fail "resetting the form did not clear the warning: $out"
+  pass "a changed form the page does not queue is flagged in the page and on the board"
+}
+
 fm_test_run \
   test_open_registers_a_page_and_refreshes_the_board \
   test_open_records_the_sessions_a_page_replaces \
@@ -384,4 +455,7 @@ fm_test_run \
   test_reply_refused_by_lavish_carries_its_reason \
   test_install_writes_a_command_bound_to_this_home \
   test_relay_annotates_page_elements_while_the_board_says_annotate_is_on \
-  test_relay_annotate_mode_spares_controls_and_toggles_from_the_page
+  test_relay_annotate_mode_spares_controls_and_toggles_from_the_page \
+  test_relay_queues_changed_form_answers_before_a_note_is_sent \
+  test_relay_queues_changed_form_answers_before_lavish_send_can_be_pressed \
+  test_relay_warns_about_a_changed_form_it_could_not_queue
