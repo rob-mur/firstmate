@@ -1709,6 +1709,73 @@ EOF
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
+# A mate that holds a call through this script can also raise the same call on
+# its own status stream under the bare task id. Settling the hold must close that
+# bare key on the parent channel too, or the settled call stays open on main's
+# board; a key the mate never raised, or one it already closed, gets no line.
+test_secondmate_answer_closes_the_mates_own_task_key() {
+  local parent mate fakebin channel decision open
+  parent=$(make_home parent-own-key)
+  mate="$TMP_ROOT/own-key-mate-home"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  fm_test_tasks_toml "$mate/.tasks.toml"
+  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
+  printf 'own-key-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  fakebin=$(fm_fakebin "$mate")
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  channel="$parent/state/own-key-mate.status"
+  decision="$mate/decision.txt"
+
+  run_captain "$mate" hold tier-call --title "Choose the test tiers" \
+    --reason "tier choice pending" --repo sample >/dev/null || fail "tier hold failed"
+  printf 'needs-decision [key=tier-call] [at=%s]: mate raised the tier call\n' "$(date +%s)" >> "$channel"
+  printf 'needs-decision [key=other-call] [at=%s]: an unrelated mate call\n' "$(date +%s)" >> "$channel"
+  printf 'go with two tiers\n' > "$decision"
+  run_captain "$mate" answer tier-call --decision-file "$decision" --release >/dev/null \
+    || fail "tier release answer failed"
+  open=$(bash -c '. "$1"; status_open_decisions "$2" secondmate' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$channel" | cut -f1)
+  printf '%s\n' "$open" | grep -qx 'tier-call' \
+    && fail "the settled hold left the mate's own key open: $(cat "$channel")"
+  printf '%s\n' "$open" | grep -qx 'captain-hold-tier-call-1' \
+    && fail "the settled hold left its own parent decision open: $(cat "$channel")"
+  printf '%s\n' "$open" | grep -qx 'other-call' \
+    || fail "an unrelated mate decision was closed: $(cat "$channel")"
+  run_captain "$mate" answer tier-call --decision-file "$decision" --release >/dev/null \
+    || fail "idempotent tier release retry failed"
+  [ "$(grep -c 'resolved \[key=tier-call\]' "$channel")" = 1 ] \
+    || fail "an answer retry duplicated the bare-key resolution: $(cat "$channel")"
+
+  run_captain "$mate" hold tier-call --reason "second tier choice" >/dev/null \
+    || fail "tier re-hold failed"
+  printf 'needs-decision [key=tier-call] [at=%s]: mate raised the tier call\n' "$(date +%s)" >> "$channel"
+  printf '%s\t%s\t\n' tier-call 'three tiers' \
+    | run_captain "$mate" answers --source "own key fixture" >/dev/null \
+    || fail "batch tier answer failed"
+  open=$(bash -c '. "$1"; status_open_decisions "$2" secondmate' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$channel" | cut -f1)
+  printf '%s\n' "$open" | grep -qx 'tier-call' \
+    && fail "the second settled hold left the re-raised key open: $(cat "$channel")"
+  [ "$(grep -c 'resolved \[key=tier-call\]' "$channel")" = 2 ] \
+    || fail "the re-raised key did not get exactly one more resolution: $(cat "$channel")"
+
+  run_captain "$mate" hold quiet-call --title "Choose the quiet option" \
+    --reason "quiet choice pending" --repo sample >/dev/null || fail "quiet hold failed"
+  run_captain "$mate" answer quiet-call --decision-file "$decision" >/dev/null \
+    || fail "quiet answer failed"
+  assert_no_grep '[key=quiet-call]' "$channel" "a key the mate never raised got a resolution"
+  pass "settling a mate's hold closes the mate's own bare task key on the parent channel"
+}
+
 test_hold_and_answer_republish_the_home_summary() {
   local home decision before
   home=$(make_home summary-refresh)
@@ -5238,6 +5305,7 @@ test_send_resolve_key_refuses_over_cap_before_sending
 test_full_answer_replay_matches_a_512_cut_record
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
+test_secondmate_answer_closes_the_mates_own_task_key
 test_hold_and_answer_republish_the_home_summary
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time

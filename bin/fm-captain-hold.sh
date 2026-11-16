@@ -246,7 +246,10 @@
 # <n> is the count of resolution records the body already carries plus one, so
 # a released and re-held task opens and closes a distinct parent decision with
 # no new persisted state, and an exact retry republishes the same line, which
-# the channel deduplicates. A main home has no channel and publishes nothing.
+# the channel deduplicates. When the mate also raised the call on the channel
+# under the bare task id, the answer closes that key too with
+# `resolved [key=<task>]`, but only while it is still open there.
+# A main home has no channel and publishes nothing.
 # The hold or answer is already durable in the backlog, so a channel that
 # cannot be written is reported as `actionable:` on stderr rather than undoing
 # the record; bin/fm-inactive-reconcile.sh's diagnostics name a broken binding.
@@ -290,6 +293,28 @@ publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
     0|1) PARENT_HOLD_PUBLISHED=1 ;;
     *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
   esac
+  [ "$verb" = resolved ] && [ "$rc" = 0 ] || return 0
+  publish_parent_task_key_resolution "$id" "$occurrence" "$note"
+}
+
+# Close the mate's own decision keyed by the bare task id when one is still
+# open on the parent channel. A mate model that holds a call through this
+# script often raises that call itself as `needs-decision [key=<task>]`, and
+# only `resolved [key=<task>]` closes it there: a secondmate's later done line
+# does not, so without this the settled call stays open on the parent board.
+# A key the mate never raised, or already closed, gets no line. The occurrence
+# in the note keeps a re-raised key's later close distinct from the first under
+# the channel's retry deduplication, while an exact retry finds the key closed.
+publish_parent_task_key_resolution() {  # <task-id> <occurrence> <note>
+  local id=$1 occurrence=$2 note=$3 dest rc=0
+  dest=$(fm_parent_channel_destination "$FM_HOME" "$STATE") || return 0
+  [ -f "$dest" ] || return 0
+  status_open_decisions "$dest" secondmate | cut -f1 | grep -Fxq -- "$id" || return 0
+  fm_parent_channel_report "$FM_HOME" "$STATE" \
+    "resolved [key=$id]: captain hold $id (captain-hold-$id-$occurrence): $(fm_parent_channel_clean_note "$note")" || rc=$?
+  [ "$rc" = 0 ] && return 0
+  PARENT_HOLD_PUBLISHED=0
+  printf 'actionable: task %s was answered in this home but its own parent decision was not closed (rc=%s)\n' "$id" "$rc" >&2
 }
 
 CAPTAIN_META_LOCK=
