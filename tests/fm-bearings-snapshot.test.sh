@@ -3884,6 +3884,33 @@ test_a_board_answer_from_another_page_is_ignored() {
   pass "only answers captured from the bearings board hand a card off"
 }
 
+# The captain sends a card back with "reconcile"; firstmate re-checks and keeps
+# the call open with a reconcile note. The hold-set stamp keeps its first date,
+# so only the reconciled stamp says the call was raised again.
+test_a_reconciled_re_hold_raises_the_card_again() {
+  local home fakebin json
+  home=$(make_home board-reconciled); write_board_answer_fixture "$home"
+  write_board_result "$home" reconcile 1794238000 "board-call:reconcile:the links are missing"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "board-call" "$(handed_by_board "$json")" "a reconcile answer did not send the card back"
+  printf '%s\n' '' '  Captain hold reconciled: 2026-11-09T15:10:00Z' \
+    '  Reconcile request: 2026-11-09T15:00:00Z | an older capture | note digest: 0' \
+    '  Re-checked before the answer.' > "$home/older-note"
+  sed -i '/^  Captain hold set: 2026-11-09T14:53:20Z$/r '"$home/older-note" "$home/data/backlog.md"
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "board-call" "$(handed_by_board "$json")" "a re-hold older than the board answer raised the card"
+  printf '%s\n' '' '  Captain hold reconciled: 2026-11-09T15:43:20Z' \
+    '  Reconcile request: 2026-11-09T15:26:39Z | the captured board answer | note digest: 0' \
+    '  Re-held with the missing links.' > "$home/newer-note"
+  sed -i '/^  Re-checked before the answer\.$/r '"$home/newer-note" "$home/data/backlog.md"
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "" "$(handed_by_board "$json")" "a re-hold newer than the board answer stayed answered"
+  printf '%s' "$json" | jq -e '.decisions_open[] | select(.key == "board-call") | .handed_at == null' >/dev/null \
+    || fail "a reconciled re-hold still reads as handed off: $json"
+  pass "a reconciled re-hold newer than the captain's board answer raises the card again"
+}
+
 test_a_hold_gains_the_pr_link_its_home_recorded() {
   local home fakebin json
   home=$(make_home hold-pr-link); write_fixture "$home"
@@ -3898,6 +3925,29 @@ test_a_hold_gains_the_pr_link_its_home_recorded() {
   assert_equals "null" "$(printf '%s' "$json" | jq -r '.decisions_open[] | select(.key == "other-call") | .pr_url')" \
     "a hold naming a PR no record has gained a link"
   pass "a hold that names a PR its home recorded gains that PR's link, and no other"
+}
+
+# A hold recorded with no link asks about something its origin's PR does not
+# cover, so it never takes that PR as its own link.
+test_a_no_link_hold_does_not_take_its_origins_pr() {
+  local home fakebin json
+  home=$(make_home hold-no-link); write_fixture "$home"
+  sed -i '/^## Queued/a\
+- [ ] linked-call - Clean up after the ship (repo: firstmate) (kind: captain) (hold: delete the old jobs?) (hold-kind: captain)\
+  Captain hold set: 2026-11-09T14:53:20Z\
+  Captain hold origin: ship-task\
+- [ ] bare-call - Clean up after the ship (repo: firstmate) (kind: captain) (hold: delete the old jobs?) (hold-kind: captain)\
+  Captain hold set: 2026-11-09T14:53:20Z\
+  Captain hold origin: ship-task\
+  Captain hold no link: yes' "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "https://github.com/kunchenguid/firstmate/pull/9" \
+    "$(printf '%s' "$json" | jq -r '.decisions_open[] | select(.key == "linked-call") | .pr_url')" \
+    "a hold did not gain the PR its origin recorded"
+  assert_equals "null" "$(printf '%s' "$json" | jq -r '.decisions_open[] | select(.key == "bare-call") | .pr_url')" \
+    "a no-link hold took its origin's PR"
+  pass "a hold recorded with no link does not take its origin's PR"
 }
 
 fm_test_run \
@@ -3977,4 +4027,6 @@ fm_test_run \
   test_a_question_hold_in_a_hidden_bucket_still_reaches_the_board \
   test_a_board_answer_hands_off_every_kind_of_card_until_it_is_raised_again \
   test_a_board_answer_from_another_page_is_ignored \
-  test_a_hold_gains_the_pr_link_its_home_recorded
+  test_a_reconciled_re_hold_raises_the_card_again \
+  test_a_hold_gains_the_pr_link_its_home_recorded \
+  test_a_no_link_hold_does_not_take_its_origins_pr
