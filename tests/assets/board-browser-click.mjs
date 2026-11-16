@@ -10,14 +10,17 @@
 //   page     press the first in-place page button on the shown card
 //   max      press the shown page's full screen button
 //   home     press the bearings header
+//   rebuild  run the shell command in BOARD_REBUILD (the agent rebuilding the
+//            board after a Send), then wait for the board's data poll
 //   view     record the view now (see below)
 //
 // Prints one JSON object: {views:[...], reloads, tabs, errors}. Each view is
-// {page, max, main, focus}: whether the page view is shown and full screen,
-// whether the board's main view is shown, and the focused element's id ("" for
-// the page body). reloads counts main-frame navigations after the first load,
+// {page, max, main, list, deck, cards, focus}: whether the page view is shown
+// and full screen, whether the board's main view is shown, whether the priority
+// list or the card deck is on screen, how many decisions the board holds, and
+// the focused element's id ("" for the page body). reloads counts main-frame navigations after the first load,
 // and tabs counts the page targets the browser has open at the end.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -115,12 +118,21 @@ try {
     } else if (step === "page") await press("button[data-board-page]");
     else if (step === "max") await press("#bb-page-max");
     else if (step === "home") await press("#bb-brand");
+    else if (step === "rebuild") {
+      const r = spawnSync("/bin/sh", ["-c", process.env.BOARD_REBUILD || "false"], { stdio: "ignore" });
+      if (r.status !== 0) throw new Error("the board rebuild failed");
+      // The board reads its data file every 3 seconds.
+      await sleep(4500);
+    }
     else if (step === "view") {
       views.push(await evaluate(`(() => {
         const pv = document.getElementById("bb-pageview");
         const act = document.activeElement;
         return { page: !pv.hidden, max: pv.classList.contains("is-max"),
           main: !document.querySelector(".bb-main").hidden,
+          list: !!document.getElementById("bb-order-go").getClientRects().length,
+          deck: !!document.getElementById("bb-callwrap").getClientRects().length,
+          cards: (window.FM_BEARINGS_BOARD_DATA.captains_call || []).length,
           focus: act && act !== document.body ? (act.id || act.tagName.toLowerCase()) : "" };
       })()`));
     } else throw new Error(`unknown step ${step}`);
