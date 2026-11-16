@@ -372,6 +372,8 @@ for (const act of actionList.split(",").filter(Boolean)) {
     snaps.push(frames().map((f) => ({ serial: f.serial, src: f.src, parent: f.parentNode?.id ?? "", hidden: f.hidden })));
   } else if (name === "reorder") {
     byId.get("bb-reorder").fire("click");
+  } else if (name === "home") {
+    byId.get("bb-brand").fire("click");
   } else if (name === "annotate") {
     post({ type: "lavish:setAnnotationMode", enabled: arg === "on" });
   } else if (name === "frameload") {

@@ -665,8 +665,7 @@ test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh() {
     and (.calls | map(select(.tag == "choice")) | all(.prompt | test("priority [123] of 3")))
     and (.calls | map(select(.tag == "choice")) | all(.data.schema == "fm-bearings-answer.v1"))
   ' >/dev/null || fail "answers did not carry the chosen order: $out"
-  # A new tab keeps the order, goes straight to the cards, and the reorder
-  # control is held while answers are queued.
+  # A new tab keeps the order and goes straight to the cards.
   rm -f "$home/storage.json.session.json"
   out=$(run_board "$home" "load")
   printf '%s' "$out" | jq -e '
@@ -693,7 +692,40 @@ test_the_order_survives_a_refresh_without_browser_storage() {
   pass "the chosen order is restored through Lavish's form state when storage is blocked"
 }
 
+# Answering never locks the list away: Reorder stays usable while an answer is
+# queued and after it is sent, so the captain can always go back to the list,
+# and the answers already given keep their payload.
+test_reorder_stays_usable_after_answers_are_queued_and_sent() {
+  local home out
+  home=$(make_home reorder-after-answer)
+  build_call_board "$home" '["k1","k2","k3"]'
+  out=$(run_board "$home" "go,type:k1,submit:k1")
+  printf '%s' "$out" | jq -e '
+    (.cards[] | select(.key == "k1") | .queued) and (.order.reorderDisabled | not)
+  ' >/dev/null || fail "Reorder was greyed out while an answer was queued: $out"
+  home=$(make_home reorder-after-send)
+  build_call_board "$home" '["k1","k2","k3"]'
+  run_board "$home" "go,type:k1,submit:k1" >/dev/null
+  out=$(run_board "$home" "load,send,reorder")
+  printf '%s' "$out" | jq -e '
+    (.cards[] | select(.key == "k1") | .state) == "sent"
+      and .order.stepShown and (.order.deckShown | not) and (.order.reorderDisabled | not)
+      and .reloads == [] and .opens == []
+  ' >/dev/null || fail "Reorder did not return to the list after an answer was sent: $out"
+  home=$(make_home reorder-after-answer-move)
+  build_call_board "$home" '["k1","k2","k3"]'
+  out=$(run_board "$home" "go,type:k1,submit:k1,reorder,down:k1,go")
+  printf '%s' "$out" | jq -e '
+    .order.list == ["k2","k1","k3"] and (.cards | map(.key)) == ["k2","k1","k3"]
+      and ([.calls[] | select(.data.schema == "fm-bearings-priority.v1") | .data.keys] | last) == ["k2","k1","k3"]
+      and ([.calls[] | select(.tag == "choice")] | length) == 1
+      and ([.calls[] | select(.tag == "choice")][0].data | .schema == "fm-bearings-answer.v1" and .question == "k1" and .order == 1)
+  ' >/dev/null || fail "a reorder after answering did not take or changed the answer already given: $out"
+  pass "Reorder stays usable after answers are queued and sent and returns to the list"
+}
+
 test_the_board_lists_every_decision_for_reordering_before_the_cards
+test_reorder_stays_usable_after_answers_are_queued_and_sent
 test_repeated_down_on_the_top_decision_walks_the_list
 test_the_chosen_order_travels_with_the_answers_and_survives_a_refresh
 test_the_order_survives_a_refresh_without_browser_storage
@@ -922,20 +954,51 @@ test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
 
 test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
 
-test_the_bearings_header_links_back_to_the_board() {
-  local home page
+# The header brand returns to the board's home view in place from every view:
+# the cards, a shown page, and full screen. It is a native button, which
+# Lavish annotate mode lets act, never a link that reloads the frame.
+test_the_bearings_header_returns_to_the_board_home() {
+  local home page out
   home=$(make_home headerlink)
-  build_call_board "$home" '["k1"]'
+  build_call_board "$home" '["k1","k2"]'
   page="$home/.lavish/bearings-board.html"
   [ -f "$page" ] || fail "the board page was not built"
-  # The header brand is a real link to the stable board page, so a page opened
-  # from the board returns to it on click.
-  tr '\n' ' ' < "$page" | grep -Eq '<header[^>]*>[[:space:]]*<div[^>]*>[[:space:]]*<a [^>]*href="bearings-board\.html"[^>]*>.*<span class="bb-brand__wm">bearings</span>[[:space:]]*</a>' \
-    || fail "the bearings header is not a link back to the board"
-  pass "the bearings header links back to the board page"
+  tr '\n' ' ' < "$page" | grep -Eq '<header[^>]*>[[:space:]]*<div[^>]*>[[:space:]]*<button type="button" [^>]*id="bb-brand"[^>]*>.*<span class="bb-brand__wm">bearings</span>[[:space:]]*</button>' \
+    || fail "the bearings header is not a native button"
+  if grep -Eq '<a [^>]*class="bb-brand"' "$page"; then fail "the bearings header is still a link"; fi
+  out=$(run_board "$home" "go,type:k1,submit:k1,home")
+  printf '%s' "$out" | jq -e '
+    .order.stepShown and (.order.deckShown | not) and (.pageView.shown | not)
+      and .reloads == [] and .opens == []
+  ' >/dev/null || fail "the bearings header did not return from the cards to the list: $out"
+
+  home=$(make_home headerlink-page)
+  page=$(register_page "$home" understand-mr-872 "Understand MR 872")
+  printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$page" > "$home/lavish-sessions"
+  render_card_links "$home" '[{url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"}]' >/dev/null
+  for via in "" ",max"; do
+    out=$(run_board "$home" "go,page:mr-872$via,home")
+    printf '%s' "$out" | jq -e '
+      (.pageView.shown | not) and (.pageView.max | not) and .order.deckShown
+        and .reloads == [] and .opens == []
+    ' >/dev/null || fail "the bearings header did not return from a shown page${via:+ in full screen}: $out"
+  done
+  jq '.captains_call += [.captains_call[0] | .key = "mr-873" | .title = "MR 873" | .links = []]' \
+    "$home/payload.json" > "$home/payload.next" && mv "$home/payload.next" "$home/payload.json"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$home/payload.json" >/dev/null || fail "the two-card board did not build"
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(run_board "$home" "go,page:mr-872,max,home")
+  printf '%s' "$out" | jq -e '
+    (.pageView.shown | not) and (.pageView.max | not)
+      and .order.stepShown and (.order.deckShown | not)
+      and .reloads == [] and .opens == []
+  ' >/dev/null || fail "the bearings header did not return from a full-screen page to the list: $out"
+  pass "the bearings header returns to the board home from the cards, a page, and full screen"
 }
 
-test_the_bearings_header_links_back_to_the_board
+test_the_bearings_header_returns_to_the_board_home
 
 test_card_links_wrap_and_the_about_text_is_readable_and_unclipped() {
   local home page css
