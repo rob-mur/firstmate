@@ -106,7 +106,9 @@
 # EVERY CARD STATES ITS DECISION. After the hygiene drop above and before the
 # board is touched, build checks that each Captain's Call card says
 # what the captain is deciding: a card needs a prompt that asks - its
-# `question` or `decide` carries a `?`, or its title does - and a way to answer
+# `question` or `decide` carries a `?`, or its title does (for a `from_status`
+# card only when it has no `question` or `decide`, since its title may come from
+# an option or body sentence that asks) - and a way to answer
 # it, at least one option of its own besides the injected reconcile choice or a
 # free-text answer. A card whose options include `done` and `not-done` asks
 # for an in-person action, so its prompt may be an imperative sentence. A card
@@ -464,8 +466,8 @@ undecided_cards() {  # <data.json>
     | ((.links // [] | length) > 0 or ((.pr_url // "") | length) > 0 or .no_link == true) as $linked
     | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
          then "question (no question or decide prompt, and the title is not a question)"
-         elif ($prompts | length) > 0 and (any($prompts[]; asks) | not) and (.title | asks | not)
-              and ($action | not)
+         elif ($prompts | length) > 0 and (any($prompts[]; asks) | not)
+              and ($raised or (.title | asks | not)) and ($action | not)
          then "question (\($prompts[0] | if length > 80 then .[:79] + "…" else . end) is not a question)"
          else empty end),
         (if (.options | length) == 0 and .allow_freeform != true
