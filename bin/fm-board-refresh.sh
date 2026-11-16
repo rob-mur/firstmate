@@ -156,18 +156,9 @@ log_once() {
 
 # Make lavish-axi reachable for the build, or say it is not. A detached
 # refresher inherits the PATH of whatever kicked it, which may lack the tool.
-lavish_reachable() {
-  local found dir
-  if found=$(command -v lavish-axi 2>/dev/null) && [ -n "$found" ]; then
-    dir=$(dirname "$found")
-    [ "$(cat "$LAVISH_DIR" 2>/dev/null)" = "$dir" ] || printf '%s\n' "$dir" >"$LAVISH_DIR"
-    return 0
-  fi
-  dir=$(cat "$LAVISH_DIR" 2>/dev/null) || return 1
-  [ -n "$dir" ] && [ -x "$dir/lavish-axi" ] || return 1
-  PATH="$PATH:$dir"
-  export PATH
-}
+# shellcheck source=bin/fm-lavish-path-lib.sh
+. "$SCRIPT_DIR/fm-lavish-path-lib.sh"
+lavish_reachable() { fm_lavish_reachable "$LAVISH_DIR"; }
 
 # A digest of every local file the payload reads; see the header for the list.
 input_signature() {
