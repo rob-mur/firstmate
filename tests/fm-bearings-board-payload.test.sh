@@ -518,6 +518,47 @@ test_the_priority_digest_is_bounded_and_silent_when_unset() {
   pass "the priority digest is bounded and silent when unset"
 }
 
+# A captain hold whose time gate has passed is back on the captain: it is a
+# Captain's Call card again (never dropped, never waiting, never charted), and
+# when its reason does not ask, the card asks whether it is still waiting so
+# the build still shows it. A hold dated in the future stays charted.
+test_a_lapsed_time_gate_returns_the_hold_to_captains_call() {
+  local snap p out
+  write_snapshot "$TMP_ROOT/snap.json"
+  snap="$TMP_ROOT/lapsed.json"
+  jq '.decisions_open = [
+        {id: "lapsed-wait", key: "lapsed-wait", verb: "captain-hold", title: "Restore staging",
+         reason: "Waiting on devops to grant restore access; then restore the snapshot",
+         hold_until: "2020-01-01", hold_bucket: "live", owner: "(main)"},
+        {id: "lapsed-ask", key: "lapsed-ask", verb: "captain-hold", title: "Pick rollout",
+         reason: "Which rollout should we use?",
+         hold_until: "2020-01-01", hold_bucket: "live", owner: "(main)",
+         choices: {options: [{value: "a", label: "Canary"}, {value: "b", label: "Big bang"}],
+                   links: [], free_text: false, no_link: true}},
+        {id: "mate/lapsed-mate", key: "lapsed-mate", verb: "captain-hold", title: "Mate wait",
+         reason: "parked until devops replies", hold_until: "2020-01-01", owner: "mate"},
+        {id: "later", key: "later", verb: "captain-hold", title: "Later",
+         reason: "Waiting on devops", hold_until: "2999-01-01", hold_bucket: "dated", owner: "(main)"}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "lapsed-wait,lapsed-ask,lapsed-mate" "$(jq -r '[.captains_call[] | select(.key | startswith("lapsed")) | .key] | join(",")' <<<"$p")" \
+    "a hold whose time gate passed is a Captain's Call card"
+  assert_equals "" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "a lapsed hold is not waiting"
+  assert_equals "" "$(jq -r '[.charted[] | select(.id | startswith("lapsed") or startswith("mate-lapsed")) | .id] | join(",")' <<<"$p")" \
+    "a lapsed hold is not charted"
+  assert_equals "later|until 2999-01-01: Waiting on devops" "$(jq -r '.charted[] | select(.id == "later") | "\(.id)|\(.reason)"' <<<"$p")" \
+    "a hold dated in the future is still charted with its date"
+  assert_contains "$(jq -r '.captains_call[] | select(.key == "lapsed-wait") | .question' <<<"$p")" "2020-01-01" \
+    "a lapsed card that does not ask names its passed date in its question"
+  assert_equals "Which rollout should we use?|a,b" "$(jq -r '.captains_call[] | select(.key == "lapsed-ask") | "\(.question)|\([.options[].value] | join(","))"' <<<"$p")" \
+    "a lapsed hold that asks keeps its own question and recorded choices"
+  printf '%s\n' "$p" > "$TMP_ROOT/lapsed-payload.json"
+  validates "$TMP_ROOT/lapsed-payload.json" || fail "a payload with lapsed hold cards did not satisfy the board validator"
+  out=$(build_checks "$TMP_ROOT/lapsed-payload.json")
+  assert_not_contains "$out" "undecided-card: lapsed" "the build refused a lapsed hold card: $out"
+  pass "a hold whose time gate passed returns to Captain's Call and a future one stays charted"
+}
+
 test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards() {
   local snap="$TMP_ROOT/wait-snap.json" p
   write_snapshot "$TMP_ROOT/snap.json"
@@ -553,10 +594,10 @@ test_a_released_hold_is_not_a_decision_card() {
         {id: "r5", key: "r5", verb: "captain-hold", title: "Active", reason: "Pick the name", held: "yes", owner: "(main)"}]' \
     "$TMP_ROOT/snap.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
-  assert_equals "r5" "$(jq -r '[.captains_call[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "only an active hold stays a decision card"
+  assert_equals "r1,r5" "$(jq -r '[.captains_call[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "an active hold and a lapsed dated hold stay decision cards"
   assert_equals "" "$(jq -r '[.waiting[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "a hold dated in the future is not waiting"
   assert_equals "r4|false|until 2999-01-01: Pick the plan" "$(jq -r '.charted[] | select(.id == "r4") | "\(.id)|\(.dispatchable)|\(.reason)"' <<<"$p")" "a hold dated in the future is charted next with its date, never a card"
-  assert_equals "0" "$(jq -r '[.. | objects | select(.key? == "r1" or .key? == "r2" or .key? == "r3")] | length' <<<"$p")" "a released hold appears nowhere on the board"
+  assert_equals "0" "$(jq -r '[.. | objects | select(.key? == "r2" or .key? == "r3")] | length' <<<"$p")" "a released hold appears nowhere on the board"
   pass "a released hold does not render as a decision card"
 }
 
@@ -1325,6 +1366,7 @@ fm_test_run \
   test_the_priority_digest_is_bounded_and_silent_when_unset \
   test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards \
   test_a_released_hold_is_not_a_decision_card \
+  test_a_lapsed_time_gate_returns_the_hold_to_captains_call \
   test_every_question_card_gets_real_default_choices \
   test_a_task_status_question_becomes_a_card_and_a_wait_a_waiting_row \
   test_urls_in_a_question_become_card_links \
