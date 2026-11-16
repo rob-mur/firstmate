@@ -82,9 +82,11 @@ echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
   # glab records every call too, so a test can prove the default path never
-  # reaches GitLab. It serves three open MRs the captain authored: !870 (a task
-  # records its URL), !880 (no task covers it) and !8 (no task covers it; its URL
-  # is a prefix of !870's and !880's, so only an exact match may cover it).
+  # reaches GitLab. It serves four open MRs the captain authored: !870 (a task
+  # records its URL), !880 (no task covers it), !8 (no task covers it; its URL
+  # is a prefix of !870's and !880's, so only an exact match may cover it) and
+  # keeper!1 (its project 619 is archived, so it is not really open). Project 7
+  # answers 404, so its archived state is unknown and its MR stays.
   cat > "$fb/glab" <<'SH'
 #!/usr/bin/env bash
 echo "glab $*" >> "$NET_LOG"
@@ -104,9 +106,12 @@ case "$path" in
     cat <<'JSON'
 [{"iid":870,"project_id":42,"title":"APP-5556 covered change","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/870","references":{"full":"grp/app/aegis!870"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-10T09:00:00Z"},
  {"iid":880,"project_id":42,"title":"Bump the dependencies","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880","references":{"full":"grp/app/aegis!880"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T08:30:00Z"},
- {"iid":8,"project_id":7,"title":"Draft keycloak realm","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/8","references":{"full":"grp/app/aegis!8"},"draft":true,"detailed_merge_status":"discussions_not_resolved","has_conflicts":false,"blocking_discussions_resolved":false,"updated_at":"2026-07-01T12:00:00Z"}]
+ {"iid":8,"project_id":7,"title":"Draft keycloak realm","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/8","references":{"full":"grp/app/aegis!8"},"draft":true,"detailed_merge_status":"discussions_not_resolved","has_conflicts":false,"blocking_discussions_resolved":false,"updated_at":"2026-07-01T12:00:00Z"},
+ {"iid":1,"project_id":619,"title":"Old keeper change","web_url":"https://gitlab.example.com/grp/app/keeper/-/merge_requests/1","references":{"full":"grp/app/keeper!1"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T17:00:00Z"}]
 JSON
     ;;
+  projects/42) echo '{"id":42,"archived":false}' ;;
+  projects/619) echo '{"id":619,"archived":true}' ;;
   projects/42/merge_requests/880) echo '{"iid":880,"head_pipeline":{"status":"success"}}' ;;
   projects/42/merge_requests/880/approvals) echo '{"approved":false,"approvals_left":1,"approved_by":[]}' ;;
   projects/7/merge_requests/8) echo '{"iid":8,"head_pipeline":null}' ;;
@@ -1599,6 +1604,25 @@ test_live_board_payload_carries_the_open_mrs() {
   ! grep -q glab "$home/net.log" || fail "FM_BEARINGS_BOARD_MR_CHECK=0 must make no GitLab call: $(cat "$home/net.log")"
   printf '%s' "$out" | jq -e 'has("open_mrs") | not' >/dev/null || fail "no MR check, no open_mrs: $out"
   pass "a live board payload carries the open MRs unless the check is off"
+}
+
+# GitLab keeps an MR "opened" after its project is archived, and the list
+# filter for that is not honoured everywhere, so the snapshot asks the project
+# API once per project and drops an MR whose project is archived. A project it
+# cannot read keeps its MRs: a failed check never hides a real MR.
+test_include_mrs_drops_archived_project_mrs() {
+  local home fakebin json
+  home=$(make_home mrs-archived); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --include-mrs --json 2>/dev/null) || fail "--include-mrs run failed"
+  printf '%s' "$json" | jq -e '
+    ([.open_mrs[].url] | index("https://gitlab.example.com/grp/app/keeper/-/merge_requests/1")) == null
+    and ([.open_mrs[].key] | index("mr-7-8")) != null
+  ' >/dev/null || fail "an archived project's MR must be dropped and an unreadable project's kept: $json"
+  [ "$(grep -c 'projects/619$' "$home/net.log")" = 1 ] || fail "one project call per project: $(cat "$home/net.log")"
+  [ "$(grep -c 'projects/42$' "$home/net.log")" = 1 ] || fail "one project call per project: $(cat "$home/net.log")"
+  ! grep -q 'projects/619/merge_requests' "$home/net.log" || fail "an archived project's MR needs no detail call"
+  pass "an MR whose project is archived is dropped; an unreadable project keeps its MRs"
 }
 
 # A glab failure, a hang, a missing glab or no host never breaks the snapshot: the
@@ -3867,6 +3891,7 @@ fm_test_run \
   test_include_prs_is_the_only_fetch_path \
   test_include_mrs_lists_only_uncovered_mrs \
   test_include_mrs_covers_by_task_meta_and_reference \
+  test_include_mrs_drops_archived_project_mrs \
   test_include_mrs_failure_degrades \
   test_live_board_payload_carries_the_open_mrs \
   test_include_prs_maps_custom_branch_prefix_to_task \
