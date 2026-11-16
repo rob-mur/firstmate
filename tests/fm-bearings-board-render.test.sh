@@ -1118,8 +1118,9 @@ test_open_mrs_render_as_information_rows_with_their_full_url() {
 test_open_mrs_render_as_information_rows_with_their_full_url
 
 # The header brand returns to the board's home view in place from every view:
-# the cards, a shown page, and full screen. It is a native button, which
-# Lavish annotate mode lets act, never a link that reloads the frame.
+# the cards, a shown page, and full screen. Home is the priority list whenever a
+# decision waits, even a single one. It is a native button, which Lavish
+# annotate mode lets act, never a link that reloads the frame.
 test_the_bearings_header_returns_to_the_board_home() {
   local home page out
   home=$(make_home headerlink)
@@ -1142,9 +1143,10 @@ test_the_bearings_header_returns_to_the_board_home() {
   for via in "" ",max"; do
     out=$(run_board "$home" "go,page:mr-872$via,home")
     printf '%s' "$out" | jq -e '
-      (.pageView.shown | not) and (.pageView.max | not) and .order.deckShown
+      (.pageView.shown | not) and (.pageView.max | not)
+        and .order.stepShown and (.order.deckShown | not)
         and .reloads == [] and .opens == []
-    ' >/dev/null || fail "the bearings header did not return from a shown page${via:+ in full screen}: $out"
+    ' >/dev/null || fail "the bearings header did not return from a shown page${via:+ in full screen} to the list of one decision: $out"
   done
   jq '.captains_call += [.captains_call[0] | .key = "mr-873" | .title = "MR 873" | .links = []]' \
     "$home/payload.json" > "$home/payload.next" && mv "$home/payload.next" "$home/payload.json"
