@@ -951,22 +951,29 @@ task_json_row() {  # <captured-meta> <id>
   # reconciled against the crew LIFECYCLE, which only clears a stale decision the
   # crew has provably moved past. Two lifecycle signals clear it, neither of which
   # reads any report content:
-  #   - a live activity read (run-step or busy pane) that is working/done, so a
-  #     crew that resumed past a gate is not still reported as parked; and
+  #   - a live activity read that says working, so a crew that resumed past a
+  #     gate is not still reported as parked. A run-step read clears every open
+  #     decision. A busy pane read clears only an unkeyed one: a pane is busy
+  #     for any short turn, such as a parked worker woken for seconds by its own
+  #     background wait, and a keyed decision stays open until a resolved line
+  #     with its key lands, so a busy pane never drops it; and
   #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
   #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
   #     report POINTER, never as a reopened pending decision.
   # Secondmates are excluded from lifecycle clearing: they are persistent and
   # multiplex many concerns onto one stream, so activity on one concern must
-  # never clear another concern's keyed decision. A parked/blocked state, or a
-  # non-authoritative status-log/none read on a still-live task, keeps the fold's
-  # open decision surfacing.
+  # never clear another concern's keyed decision. A parked/blocked state, an
+  # unknown read from any source, or a non-authoritative status-log/none read on
+  # a still-live task, keeps the fold's open decision surfacing.
   open_decisions_tsv=$(<"$SNAPSHOT_TASK_DIR/$id.open-decisions") || return 1
-  if [ "$kind" != secondmate ] && \
-     { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-         && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-       || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
-    open_decisions_tsv=""
+  if [ "$kind" != secondmate ] && [ -n "$open_decisions_tsv" ]; then
+    case "$current_state:$current_source" in
+      done:*|failed:*|working:run-step) open_decisions_tsv="" ;;
+      working:pane)
+        # The fold names an unkeyed decision "default" (_fm_decision_key).
+        open_decisions_tsv=$(printf '%s\n' "$open_decisions_tsv" \
+          | awk -F '\t' '$1 != "default"') || open_decisions_tsv="" ;;
+    esac
   fi
   # A decision the captain already answered on its captain call is not still
   # waiting on the captain, so it never surfaces as one (owner of the match:

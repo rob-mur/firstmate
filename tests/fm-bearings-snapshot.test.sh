@@ -536,10 +536,13 @@ test_active_child_overrides_old_parent_event() {
 ## Done
 - [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
 EOF
+  # The child is busy past an unkeyed question, which a busy read clears. A keyed
+  # question would stay open until its resolved line (tests/fm-fleet-snapshot-view).
   fm_write_meta "$mate/state/phase8.meta" \
     "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
-  printf 'working [key=phase8]: implementing Phase 8 parity\nneeds-decision [key=release]: choose release A or B\n' \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" phase8 busy
+  printf 'working [key=phase8]: implementing Phase 8 parity\nneeds-decision: choose release A or B\n' \
     > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
@@ -3624,6 +3627,23 @@ test_supplied_secondmate_questions_and_legacy_optional_fields() {
 # secondmate home, is a question for the captain: it reaches decisions_open as a
 # status-sourced row with a unique board key and the routing fields an answer needs.
 # Keys reserved for relays and hold mirrors never become cards.
+# A worker parked at a keyed question can run a short turn, such as its own
+# background wait waking it, and a board build that reads it then sees a busy
+# pane. Its card stays on Captain's Call through that turn.
+test_busy_keyed_question_stays_on_captains_call() {
+  local home fakebin json
+  home=$(make_home busy-keyed-question); write_fixture "$home"
+  record_claude_state "$home/state" ship-task busy
+  printf 'needs-decision [key=board-review]: is the plan on the board page the plan?\n' \
+    > "$home/state/ship-task.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .decisions_open | any(.[]; .key == "status.ship-task.board-review" and .source == "status")
+  ' >/dev/null || fail "a busy worker's keyed question left Captain's Call: $json"
+  pass "a busy worker's keyed question stays on Captain's Call"
+}
+
 test_status_questions_reach_decisions_open_with_routing_fields() {
   local home fakebin json
   home=$(make_home status-questions); write_fixture "$home"
@@ -3956,6 +3976,7 @@ fm_test_run \
   test_per_repository_pr_cap_is_disclosed \
   test_projection_and_toon_fail_closed \
   test_status_questions_reach_decisions_open_with_routing_fields \
+  test_busy_keyed_question_stays_on_captains_call \
   test_secondmate_questions_from_the_parent_log_survive_an_invalid_home \
   test_a_relayed_child_question_is_one_board_card \
   test_a_ready_review_page_is_a_board_row \
