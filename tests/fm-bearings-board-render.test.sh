@@ -1254,6 +1254,20 @@ test_new_board_code_reaches_the_open_page_only_while_the_reader_is_idle() {
   pass "new board code reaches the open page without rewriting it, only while the reader is idle"
 }
 
+# A click on the bearings header leaves focus on that button, as a browser
+# click does, so a board brought home by its header must still count as idle
+# and take new board code rather than keep the old code until the next click.
+test_the_header_click_does_not_keep_new_board_code_out() {
+  local home out run
+  home=$(make_home code-home)
+  build_call_board "$home" '["k1","k2","k3"]'
+  run="FM_BEARINGS_BOARD_TEMPLATE=$(printf '%q' "$(variant_template "$home" code)") $(rebuild_command "$home" '.')"
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "open:k2,home,run,poll")
+  printf '%s' "$out" | jq -e '.order.stepShown and .reloads == ["location.reload"]' >/dev/null \
+    || fail "a board brought home by its header did not take new board code: $out"
+  pass "a board brought home by its header still takes new board code"
+}
+
 test_a_markup_change_rewrites_the_page() {
   local home before
   home=$(make_home markup)
@@ -1303,5 +1317,6 @@ test_a_click_or_tap_on_a_waiting_row_expands_it_in_place() {
 }
 
 test_new_board_code_reaches_the_open_page_only_while_the_reader_is_idle
+test_the_header_click_does_not_keep_new_board_code_out
 test_a_markup_change_rewrites_the_page
 test_a_click_or_tap_on_a_waiting_row_expands_it_in_place
