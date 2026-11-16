@@ -687,6 +687,24 @@ test_a_home_replaces_a_refresher_another_code_root_left_running() {
   pass "a home's own code replaces a refresher another code root left running for it, and no other"
 }
 
+# The captain reads the board while away instead of chat, so an active away
+# window must not freeze it. A chat bearings read still asks for the return first.
+test_the_board_rebuilds_during_an_active_away_window() {
+  local home rc=0
+  home=$(make_home away)
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  printf 'mode=away\n' > "$home/state/.afk"
+  printf 'entered_epoch=1\n' > "$home/state/.afk-contract"
+  add_task "$home" t1
+  in_home "$home" "$REFRESH" || fail "the refresh failed during an active away window: $(tail -3 "$home/state/.board-refresh.log")"
+  [ "$(rebuilt_count "$home")" = 2 ] || fail "the board was not rebuilt during an active away window"
+  grep -q 't1' "$home/.lavish/bearings-board.data.js" || fail "the board built during the away window misses the new task"
+  in_home "$home" "$ROOT/bin/fm-bearings-snapshot.sh" --json >/dev/null 2>&1 || rc=$?
+  assert_equals "3" "$rc" "a chat bearings read did not still ask for the return first"
+  pass "the board rebuilds during an active away window while a chat bearings read still refuses"
+}
+
 fm_test_run \
   test_a_home_without_a_board_is_left_alone \
   test_the_board_is_rebuilt_only_when_fleet_state_changes \
@@ -710,4 +728,5 @@ fm_test_run \
   test_a_secondmate_change_refreshes_the_parent_board \
   test_new_board_code_is_installed_with_an_unchanged_fleet \
   test_a_home_board_is_built_by_its_own_code_whoever_asks \
-  test_a_home_replaces_a_refresher_another_code_root_left_running
+  test_a_home_replaces_a_refresher_another_code_root_left_running \
+  test_the_board_rebuilds_during_an_active_away_window
