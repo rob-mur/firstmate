@@ -626,12 +626,55 @@ test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent()
   pass "annotate mode reaches in-place pages and each page note reaches that page's agent"
 }
 
+# A decision answered on its Lavish page stays page-only when that page is in
+# the board, and otherwise shows its question, why its choices are missing, and
+# a free-text answer, so it is still answered from the board.
+test_a_page_backed_decision_is_answered_on_the_board_when_its_page_is_not_there() {
+  local home data understand out
+  home=$(make_home off-board)
+  data="$home/payload.json"
+  understand=$(register_page "$home" grill-round "Grilling round")
+  printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$understand" > "$home/lavish-sessions"
+  jq -n '
+    def paged($key; $sid): {key:$key, type:"decision", title:("mate: " + $key), repo:null,
+      options:[], allow_freeform:false,
+      links:[{url:("http://dev-1.tailf848b0.ts.net:4387/session/" + $sid), label:"Lavish page"}],
+      off_board:{question:("Which tiers for " + $key + "?"), about:"Fifteen questions.",
+        allow_freeform:true, freeform_hint:"answer in your own words",
+        malformed:"Its choices are on its Lavish page, which the board does not show; answer in your own words."}};
+    {schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
+     captains_call:[paged("in-board"; "aaaa1111"), paged("off-board"; "eeee5555")]}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "a payload with off-board fields did not build"
+  require_listener_reached_poll "$home"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") || fail "the built board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.call | length) == 2
+      and .call[0].pages == [{page:"grill-round", text:"Lavish page"}]
+      and (.captains_call[0] | (contains("Which tiers") or contains("options missing")) | not)
+      and .call[1].notes == ["Lavish page - not in the board yet"]
+      and (.captains_call[1] | contains("Which tiers for off-board?") and contains("options missing")
+           and contains("which the board does not show"))
+  ' >/dev/null || fail "a page-backed decision did not follow whether its page is in the board: $out"
+  sed 's/^[^{]*//; s/;$//' "$home/.lavish/bearings-board.data.js" | jq -e '
+    (.captains_call | map(has("off_board")) | any | not)
+      and (.captains_call[0].allow_freeform == false)
+      and (.captains_call[1] | .allow_freeform == true and .freeform_hint == "answer in your own words")
+  ' >/dev/null || fail "the board data did not settle the off-board fields: $(cat "$home/.lavish/bearings-board.data.js")"
+  pass "a page-backed decision is answered on the board when its page is not there, and on its page when it is"
+}
+
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
 test_every_card_type_renders_its_links
 test_every_card_link_opens_in_annotate_mode
 test_a_registered_page_link_opens_in_the_board
 test_an_unregistered_page_link_says_it_is_not_in_the_board
 test_an_ended_session_link_opens_the_page_that_replaces_it
+test_a_page_backed_decision_is_answered_on_the_board_when_its_page_is_not_there
 test_reconcile_renders_apart_from_the_full_options
 test_a_card_page_button_shows_the_page_in_place
 test_full_screen_keeps_the_same_page_frame
