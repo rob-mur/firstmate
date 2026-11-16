@@ -328,6 +328,89 @@ test_the_generators_own_cards_pass_the_build_decision_check() {
   pass "a pending contribution and a review page build cleanly, and an authored non-question hold is still refused"
 }
 
+# A hold that recorded its choices and links (fm-captain-hold.sh hold --option
+# and --link) shows exactly those on its card, a page:<id> link as a board page,
+# and every board item carries the context it expands to show in place.
+test_a_hold_with_recorded_options_and_links_puts_them_on_its_card() {
+  local snap p out
+  snap="$TMP_ROOT/snap-recorded.json"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.decisions_open = [
+        {id: "cd-grill", key: "cd-grill", verb: "captain-hold", owner: "(main)",
+         title_full: "Pick the CD grill outcome",
+         reason_full: "Which grill outcome do we keep? (1) keep both (2) drop the second",
+         choices: {options: [{value: "keep", label: "Keep both"}, {value: "drop", label: "Drop the second"}],
+                   links: [{target: "page:cd-697-698-grill", label: "Grill page"},
+                           {target: "https://github.com/acme/alpha/pull/9", label: ""}],
+                   free_text: false, no_link: false},
+         answers: [{at: "2026-11-10T09:00:00Z", mode: "captain", text: "keep it parked until Friday"}],
+         notes: ["Grill ran on both MRs."],
+         report_path: "data/cd-grill/report.md"},
+        {id: "wait-x", key: "wait-x", verb: "captain-hold", owner: "(main)",
+         title_full: "Relock uv", reason_full: "captain parked: wait for the upstream release",
+         answers: [{at: "2026-11-01T08:00:00Z", mode: "captain", text: "park it until upstream ships"}],
+         notes: ["Relock after uv 0.9."]}]
+      | .gates = [{id: "plain-queued", title: "A queued item", blocked_by: "-", reason: "-", owner: "(main)",
+                   filed: "2026-10-30", title_full: "A queued item in full", reason_full: null,
+                   answers: [], notes: ["Start after the audit."], report_path: null}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals '[{"label":"Keep both","value":"keep"},{"label":"Drop the second","value":"drop"}]' \
+    "$(jq -cS '[.captains_call[] | select(.key == "cd-grill") | .options[]]' <<<"$p")" \
+    "the card did not offer the recorded options as its choices"
+  assert_equals '[{"label":"Grill page","page":"cd-697-698-grill"},{"label":"PR 9","url":"https://github.com/acme/alpha/pull/9"}]' \
+    "$(jq -cS '[.captains_call[] | select(.key == "cd-grill") | .links[]]' <<<"$p")" \
+    "the card did not carry the recorded links with the page link first"
+  assert_equals '{"answers":[{"at":"2026-11-10T09:00:00Z","mode":"captain","text":"keep it parked until Friday"}],"notes":["Grill ran on both MRs."],"reason":"Which grill outcome do we keep? (1) keep both (2) drop the second","report":"data/cd-grill/report.md","task":"cd-grill"}' \
+    "$(jq -cS '.captains_call[] | select(.key == "cd-grill") | .context' <<<"$p")" \
+    "the card did not carry its context"
+  assert_equals '{"answers":[{"at":"2026-11-01T08:00:00Z","mode":"captain","text":"park it until upstream ships"}],"notes":["Relock after uv 0.9."],"reason":"captain parked: wait for the upstream release","task":"wait-x"}' \
+    "$(jq -cS '.waiting[] | select(.key == "wait-x") | .context' <<<"$p")" \
+    "the waiting row did not carry its context"
+  assert_equals '{"notes":["Start after the audit."],"task":"plain-queued"}' \
+    "$(jq -cS '.charted[] | select(.id == "plain-queued") | .context' <<<"$p")" \
+    "the charted row did not carry its context"
+  printf '%s\n' "$p" > "$TMP_ROOT/recorded.json"
+  validates "$TMP_ROOT/recorded.json" || fail "a payload with recorded options, page links and context did not validate"
+  out=$(build_checks "$TMP_ROOT/recorded.json")
+  assert_not_contains "$out" "undecided-card" "the build refused a card with recorded options and links: $out"
+  pass "a hold's recorded options and links are its card's choices and links, and every item carries its context"
+}
+
+# A hold with no recorded options, or with no link, is refused by key naming
+# what to add; a declared free-text question with --no-link builds.
+test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add() {
+  local snap p out
+  snap="$TMP_ROOT/snap-unrecorded.json"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.decisions_open = [
+        {id: "alpha-fix", key: "alpha-fix", verb: "captain-hold", owner: "(main)",
+         title: "Pick the alpha retry policy", reason: "Which retry policy? (1) fast (2) slow"},
+        {id: "no-link", key: "no-link", verb: "captain-hold", owner: "(main)",
+         title: "Pick a name", reason: "Which name do we use?",
+         choices: {options: [{value: "a", label: "Name A"}, {value: "b", label: "Name B"}], links: [],
+                   free_text: false, no_link: false}},
+        {id: "opted-out", key: "opted-out", verb: "captain-hold", owner: "(main)",
+         title: "Say what you remember", reason: "What did we agree about the relock?",
+         choices: {options: [], links: [], free_text: true, no_link: true}}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/unrecorded.json"
+  validates "$TMP_ROOT/unrecorded.json" || fail "the payload did not satisfy the validator"
+  out=$(build_checks "$TMP_ROOT/unrecorded.json")
+  assert_contains "$out" "undecided-card: alpha-fix: missing options" \
+    "a hold with no recorded options was not refused: $out"
+  assert_not_contains "$out" "undecided-card: alpha-fix: missing link" \
+    "a hold whose task recorded a PR was refused for a link: $out"
+  assert_contains "$out" "undecided-card: no-link: missing link" \
+    "a hold with no link was not refused: $out"
+  assert_not_contains "$out" "undecided-card: no-link: missing options" \
+    "a hold with recorded options was refused for options: $out"
+  assert_not_contains "$out" "undecided-card: opted-out" \
+    "a declared free-text question with no link was refused: $out"
+  pass "a hold missing recorded options or a link is refused by key, and the explicit opt-outs build"
+}
+
 test_cards_carry_links_and_a_non_held_credential_card_survives() {
   local snap copy p
   snap="$TMP_ROOT/snap.json"
@@ -1166,6 +1249,8 @@ fm_test_run \
   test_copy_overlay_cannot_change_the_payload_shape \
   test_an_unheld_captain_contribution_becomes_a_link_card \
   test_the_generators_own_cards_pass_the_build_decision_check \
+  test_a_hold_with_recorded_options_and_links_puts_them_on_its_card \
+  test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
   test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
   test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably \

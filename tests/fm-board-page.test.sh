@@ -95,6 +95,25 @@ test_open_records_the_sessions_a_page_replaces() {
   pass "open records each replaced Lavish session by id and keeps them across reopens"
 }
 
+# A page about a backlog task records that task, so the board links the task's
+# card and context to the page; a reopen without --task keeps it.
+test_open_records_the_task_a_page_is_about() {
+  local home rec
+  home=$(make_home task)
+  show "$home" cd-697-698-grill --title "CD grill" --task cd-grill >/dev/null \
+    || fail "open with a task failed"
+  rec="$home/state/pages/cd-697-698-grill/page.json"
+  assert_equals '"cd-grill"' "$(jq -c .task "$rec")" "open did not record the task"
+  show "$home" cd-697-698-grill --title "CD grill again" >/dev/null || fail "reopen without --task failed"
+  assert_equals '"cd-grill"' "$(jq -c .task "$rec")" "reopen without --task dropped the task"
+  show "$home" cd-697-698-grill --title "CD grill" --task 'not a task id' >/dev/null 2>&1 \
+    && fail "open accepted a task that is not a task id"
+  assert_equals '"cd-grill"' "$(jq -c .task "$rec")" "a refused --task changed the recorded task"
+  show "$home" plain --title "Plain" >/dev/null || fail "open without a task failed"
+  assert_equals 'null' "$(jq -c .task "$home/state/pages/plain/page.json")" "a page with no task recorded one"
+  pass "open records the task a page is about, keeps it on reopen, and refuses a bad one"
+}
+
 test_open_without_a_board_exits_3() {
   local home rc
   home=$(make_home noboard --no-board)
@@ -441,6 +460,7 @@ test_relay_warns_about_a_changed_form_it_could_not_queue() {
 fm_test_run \
   test_open_registers_a_page_and_refreshes_the_board \
   test_open_records_the_sessions_a_page_replaces \
+  test_open_records_the_task_a_page_is_about \
   test_open_without_a_board_exits_3 \
   test_a_secondmate_page_goes_on_its_parent_board \
   test_bad_page_ids_are_refused \
