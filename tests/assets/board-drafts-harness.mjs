@@ -21,6 +21,8 @@
 //   dispatch        press the dispatch button
 //   load            frame load: restore review state, then report queued anchors
 //   send            the chrome sends every queued prompt, then reports anchors
+//                   (the board's own send call does the same in ok mode and
+//                   is counted in sends)
 //   up:<key>        press the move-up button on that key's row in the order list
 //   down:<key>      press the move-down button on that key's row
 //   go              press "Start answering" on the order step
@@ -39,6 +41,10 @@
 //   frameload:<id>  the in-place page <id> finishes loading in its frame
 //   annotation:<id> the in-place page <id>'s relay passes up an annotation of
 //                   its element p#why ("Why this change") with the note "unclear"
+//   pageform:<id>   the in-place page <id>'s relay passes up its form's answer
+//                   (tag round-answers, queueKey round, data {q1:"a"})
+//   pagesend:<id>   the in-place page <id>'s relay asks to send the queue
+//   unsentsend      press the send button in the shown page's unsent notice
 //   pagetoggle:<id> the in-place page <id>'s relay asks to toggle annotate mode
 //   stranger        an unknown frame passes up an annotation
 //   chrome:<mode>   the simulated Lavish from now on: ok (queues and reports
@@ -56,9 +62,11 @@
 // The page's data file is read from beside <built-board.html> each time the
 // page loads it, so a rebuild between polls is seen by the next poll.
 // Prints { cards, storage, calls, queue, anchors, ids, order, stack, reloads,
-//   opens, pageView, snaps, framePosts, keys, errors, boot, polls, rows }; each card
+//   opens, pageView, snaps, framePosts, keys, errors, boot, polls, rows, sends,
+//   pageUnsent }; each card
 //   also carries error {shown, text} from the box beside its answer, errors
-//   has the priority's and the page view's boxes, boot is the load problem
+//   has the priority's and the page view's boxes, pageUnsent is the page
+//   view's notice of an answer queued but not sent ({shown, text}), boot is the load problem
 //   the page shows while it waits for its data ({shown, text}), and polls
 //   counts the page's live intervals; opens lists every url the
 //   page asked to open elsewhere, framePosts every message the board sent
@@ -251,7 +259,14 @@ globalThis.window = {
 // element's question; the same key replaces the unsent entry.
 let chromeMode = process.env.CHROME_MODE || "ok";
 const dropped = [];
+let sends = 0;
 const lavish = {
+  sendQueuedPrompts: () => {
+    sends++;
+    if (chromeMode !== "ok") return;
+    session.queue = {};
+    setTimeout(() => anchors(false));
+  },
   queuePrompt: (prompt, opts) => {
     if (chromeMode === "throws") throw new Error("queue refused");
     const anchor = anchorFor(opts.element);
@@ -383,9 +398,15 @@ for (const act of actionList.split(",").filter(Boolean)) {
     post({ type: "lavish:setAnnotationMode", enabled: arg === "on" });
   } else if (name === "frameload") {
     iframes.find((f) => pageOf(f) === arg).fire("load");
-  } else if (name === "annotation" || name === "pagetoggle" || name === "stranger") {
+  } else if (name === "unsentsend") {
+    byId.get("bb-page-unsent").querySelector("button").fire("click");
+    flush();
+  } else if (["annotation", "pagetoggle", "stranger", "pageform", "pagesend"].includes(name)) {
     const source = name === "stranger" ? {} : iframes.find((f) => pageOf(f) === arg).contentWindow;
     const data = name === "pagetoggle" ? { type: "fm-board-page:toggleAnnotate", prompt: "", opts: {} }
+      : name === "pagesend" ? { type: "fm-board-page:sendQueuedPrompts", prompt: "", opts: {} }
+      : name === "pageform" ? { type: "fm-board-page:queuePrompt", prompt: "answers", opts: { tag: "round-answers",
+          text: "Round answers", queueKey: "round", data: { q1: "a" } } }
       : { type: "fm-board-page:queuePrompt", prompt: "unclear", opts: { tag: "annotation", text: "Why this change",
           data: { selector: "p#why", id: "why", tag: "p", text: "Why this change" } } };
     for (const fn of listeners) fn({ data, source });
@@ -403,9 +424,9 @@ session.review = controls().map((c) => ({
 }));
 writeFileSync(sessionPath, JSON.stringify(session));
 
-const errorOf = (box) => ({
+const errorOf = (box, textClass = ".bb-submit-error__text") => ({
   shown: !!box && box.classList.contains("is-visible"),
-  text: box?.querySelector(".bb-submit-error__text")?.textContent ?? "",
+  text: box?.querySelector(textClass)?.textContent ?? "",
 });
 const loadNote = (bySel.get(".bb-main")?.children || []).find((c) => c.id === "bb-load-problem");
 const cards = forms().map((f) => ({
@@ -435,6 +456,8 @@ process.stdout.write(JSON.stringify({
   polls: intervals.length,
   dropped: dropped.length,
   errors: { priority: errorOf(get("bb-priority-error")), page: errorOf(get("bb-page-error")) },
+  sends,
+  pageUnsent: errorOf(get("bb-page-unsent"), ".bb-page-unsent__text"),
   boot: { shown: !!loadNote, text: loadNote?.textContent ?? "" },
   sub: get("bb-call-sub").textContent,
   order: {
