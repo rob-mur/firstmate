@@ -157,7 +157,7 @@ build_call_board() {  # <home> <keys-json> [charted-json] [underway-json]
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, underway:$underway, landed:[], charted:$charted, charted_more:0, charted_warning_more:0,
     captains_call:[$keys[] | {key:., type:"decision", title:("Card " + .), repo:"r",
-      about:"a", decide:"d", allow_freeform:true,
+      about:"a", decide:"Pick one?", allow_freeform:true,
       options:[{value:"a",label:"A"},{value:"b",label:"B"}]}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -296,12 +296,12 @@ test_every_card_type_renders_its_links() {
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
     captains_call:[
-      {key:"held-decision", type:"decision", title:"A held decision", repo:"r", about:"a",
+      {key:"held-decision", type:"decision", title:"A held decision", question:"Take the held option?", repo:"r", about:"a",
        options:[], allow_freeform:true, pr_url:"https://example.test/o/r/pull/7",
        links:[{url:"https://example.test/o/r/issues/3", label:"Issue"}]},
       {key:"merge.some-task", type:"merge", title:"A merge", repo:"r", risk:"low",
        options:[{value:"merge",label:"Merge now"}], pr_url:"https://example.test/o/r/pull/9"},
-      {key:"unheld-credential", type:"credential", title:"A credential", repo:"r",
+      {key:"unheld-credential", type:"credential", title:"A credential", question:"Is the console login renewed?", repo:"r",
        options:[{value:"done",label:"Done"}],
        links:[{url:"https://example.test/console"},
               {url:"https://example.test/mr/3", label:"Merge request"}]}]}' > "$data"
@@ -336,7 +336,7 @@ test_every_card_link_opens_in_annotate_mode() {
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
     captains_call:[
-      {key:"held-decision", type:"decision", title:"A held decision", repo:"r", about:"a",
+      {key:"held-decision", type:"decision", title:"A held decision", question:"Take the held option?", repo:"r", about:"a",
        options:[], allow_freeform:true, pr_url:"https://example.test/o/r/pull/7",
        links:[{url:"https://example.test/console", label:"Console"}]}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
@@ -374,7 +374,7 @@ render_card_links() {  # <home> <links-jq> [options-jq]
   jq -n --argjson links "$links" --argjson options "$options" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
-    captains_call:[{key:"mr-872", type:"decision", title:"MR 872", repo:"r", about:"a",
+    captains_call:[{key:"mr-872", type:"decision", title:"MR 872", question:"Approve MR 872?", repo:"r", about:"a",
       options:$options, allow_freeform:true, pr_url:"https://example.test/o/r/merge_requests/872",
       links:$links}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
@@ -615,7 +615,7 @@ test_board_renders_only_the_captains_call() {
   out=$(render_board "$home" \
     '[{"id":"u1","name":"Underway one","repo":"r","state":"working","doing":"x","kind":"task"}]' \
     '[{"id":"c1","repo":"r","title":"Charted one","reason":"queued","dispatchable":true}]' 0 0 \
-    '[{"key":"k1","type":"decision","title":"Decide","repo":"r","options":[],"allow_freeform":true}]')
+    '[{"key":"k1","type":"decision","title":"Decide","question":"Go ahead?","repo":"r","options":[],"allow_freeform":true}]')
   printf '%s' "$out" | jq -e '
     .error == "" and (.captains_call | length) == 1
       and .stats == [] and .underway == [] and .charted == []
@@ -632,7 +632,7 @@ test_a_long_title_and_about_render_in_full() {
   title=$(printf 'T%.0s' $(seq 1 200))
   about=$(printf 'A%.0s' $(seq 1 400))
   out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg t "$title" --arg a "$about" \
-    '[{key:"k1",type:"decision",title:$t,about:$a,repo:"r",options:[],allow_freeform:true}]')")
+    '[{key:"k1",type:"decision",title:$t,question:"Go ahead?",about:$a,repo:"r",options:[],allow_freeform:true}]')")
   printf '%s' "$out" | jq -e --arg t "$title" --arg a "$about" '
     .error == "" and (.captains_call[0] | contains($t) and contains($a))
   ' >/dev/null || fail "a long title or about was cut: $out"
