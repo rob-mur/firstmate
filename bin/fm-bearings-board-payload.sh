@@ -11,8 +11,9 @@
 #   fm-bearings-board-payload.sh [--snapshot <file|->] [--copy <file>] [--include-prs]
 #
 # The payload goes to stdout. With no --snapshot the script runs
-# `fm-bearings-snapshot.sh --json --all-decisions --include-mrs` itself
-# (--include-prs is passed through; FM_BEARINGS_BOARD_MR_CHECK=0 drops
+# `fm-bearings-snapshot.sh --json --all-decisions --during-away --include-mrs`
+# itself (--during-away keeps the board building while the captain is away;
+# --include-prs is passed through; FM_BEARINGS_BOARD_MR_CHECK=0 drops
 # --include-mrs, so the build makes no GitLab call), so every open captain hold - live, blocked, dated, or aged, past the
 # snapshot's decision cap - yields at most one card, waiting row, or dated charted
 # row; with --snapshot it reads that JSON from the file or stdin instead.
@@ -201,7 +202,7 @@ done
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 
 if [ -z "$SNAPSHOT" ]; then
-  set -- --json --all-decisions
+  set -- --json --all-decisions --during-away
   [ "$INCLUDE_PRS" = 0 ] || set -- "$@" --include-prs
   [ "${FM_BEARINGS_BOARD_MR_CHECK:-1}" = 0 ] || set -- "$@" --include-mrs
   SNAP_JSON=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" "$@") || fail "snapshot failed"
