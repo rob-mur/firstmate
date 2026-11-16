@@ -1156,6 +1156,38 @@ test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
 
 test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question
 
+# The captain's open MRs no task covers render as information rows - title,
+# one state line and the full URL - apart from Captain's Call, and the group
+# hides when there are none.
+test_open_mrs_render_as_information_rows_with_their_full_url() {
+  local home out data url
+  home=$(make_home openmrs)
+  build_call_board "$home" '["k1"]'
+  data="$home/payload.json"
+  url="https://gitlab.example.com/grp/app/aegis/-/merge_requests/880"
+  jq --arg url "$url" '.open_mrs = [{key:"mr-42-880", repo:"aegis", title:"Bump the dependencies", url:$url,
+        state:"mergeable, CI passing, 0 approvals, threads resolved, last activity 2026-07-11"}]' \
+    "$data" > "$data.new" && mv "$data.new" "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board with open MRs did not build"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") || fail "the board could not be rendered"
+  printf '%s' "$out" | jq -e --arg url "$url" '
+    .error == "" and .open_mrs.shown
+      and (.open_mrs.rows | length) == 1
+      and (.open_mrs.rows[0].text | contains("aegis: Bump the dependencies")
+           and contains("mergeable, CI passing, 0 approvals, threads resolved, last activity 2026-07-11"))
+      and .open_mrs.rows[0].links == [{href:$url, text:$url}]
+      and (.captains_call | length) == 1
+      and (.captains_call[0] | contains("Bump the dependencies") | not)
+  ' >/dev/null || fail "the open MRs did not render as information rows: $out"
+  out=$(render_board "$home" '[]' '[]' 0 0 '[]')
+  printf '%s' "$out" | jq -e '.open_mrs.shown | not' >/dev/null || fail "an empty open-MR group was shown: $out"
+  pass "open MRs no task covers render as information rows with their full URL"
+}
+
+test_open_mrs_render_as_information_rows_with_their_full_url
+
 # The header brand returns to the board's home view in place from every view:
 # the cards, a shown page, and full screen. It is a native button, which
 # Lavish annotate mode lets act, never a link that reloads the frame.
