@@ -125,7 +125,8 @@ a { color: inherit; text-decoration: none; }
   max-width: var(--container-app); margin: 0 auto; padding: 0 28px; height: 64px;
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
 }
-.bb-brand { display: inline-flex; align-items: center; gap: 12px; color: inherit; text-decoration: none; cursor: pointer; }
+.bb-brand { display: inline-flex; align-items: center; gap: 12px; color: inherit; text-decoration: none; cursor: pointer;
+  background: none; border: 0; padding: 0; margin: 0; font: inherit; }
 .bb-brand__disc {
   display: grid; place-items: center; width: 34px; height: 34px; flex: none;
   border-radius: 999px; background: var(--rust-500); color: var(--paper-000);
@@ -344,14 +345,14 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 
 <header class="bb-nav">
   <div class="bb-nav__inner">
-    <a class="bb-brand" href="bearings-board.html" title="Back to the board">
+    <button type="button" class="bb-brand" id="bb-brand" title="Back to the board">
       <span class="bb-brand__disc">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 6v16"/><path d="m19 13 2-1a9 9 0 0 1-18 0l2 1"/><path d="M9 11h6"/><circle cx="12" cy="4" r="2"/>
         </svg>
       </span>
       <span class="bb-brand__wm">bearings</span>
-    </a>
+    </button>
     <nav class="bb-tabs" id="bb-tabs" aria-label="Board and open pages" hidden></nav>
   </div>
 </header>
@@ -720,8 +721,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       a.href = l.url; a.target = "_blank"; a.rel = "noopener";
       /* Lavish annotate mode lets native controls act but turns a plain link
          click into an annotation note; data-lavish-action makes it navigate.
-         Only these new-tab links carry it: the header link only switches
-         back to the board view (PAGES SHOWN IN PLACE below). */
+         Only these new-tab links carry it: the header brand is a native
+         button that returns to the board's home view (goHome below). */
       a.setAttribute("data-lavish-action", "");
       pad.appendChild(a);
     });
@@ -1014,7 +1015,6 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       (answered ? " · " + answered + " answered" : "");
     stackPrev.disabled = active === 0;
     stackNext.disabled = active === cards.length - 1;
-    if (typeof showStep === "function" && typeof reorderBtn !== "undefined") reorderBtn.disabled = anyQueued();
     /* the pile thins as the deal approaches the bottom */
     deck.classList.toggle("bb-call--penult", active === cards.length - 2);
     deck.classList.toggle("bb-call--last", active === cards.length - 1);
@@ -1025,7 +1025,6 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   var callWrap = document.getElementById("bb-callwrap");
   var reorderBtn = document.getElementById("bb-reorder");
   var dragKey = null;
-  function anyQueued() { return deck.querySelectorAll(".is-queued").length > 0; }
   function orderPersist() {
     orderSave();
     var v = JSON.stringify({ keys: orderKeys, confirmed: orderConfirmed });
@@ -1128,7 +1127,6 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     orderPanel.hidden = !ordering;
     callWrap.hidden = ordering;
     reorderBtn.hidden = orderKeys.length < 2;
-    reorderBtn.disabled = anyQueued();
   }
   /* the durable priority: one annotation firstmate records and reads when it
      picks the next work, sent whenever the captain leaves the list */
@@ -1176,13 +1174,16 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     showStep();
     sendPriorityIfChanged();
   }
-  reorderBtn.addEventListener("click", function () {
-    if (anyQueued()) return;
+  /* The list stays reachable after answers are queued or sent: each answer
+     keeps the rank it was queued with, and a changed order is sent as its
+     own priority when the captain leaves the list again. */
+  function backToList() {
     orderConfirmed = false;
     orderPersist();
     renderOrder();
     showStep();
-  });
+  }
+  reorderBtn.addEventListener("click", backToList);
   /* Adopt an order Lavish restored with the form when storage held none.
      Surviving keys keep the restored order and new keys follow in payload
      order, so a changed item set no longer resets the captain's order. */
@@ -1508,12 +1509,16 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   document.getElementById("bb-page-end").addEventListener("click", function () {
     if (shownPage && pageById[shownPage]) endPage(pageById[shownPage]);
   });
-  /* inside the app the brand goes back to the board instead of loading the
-     page file into this frame */
-  document.querySelector(".bb-brand").addEventListener("click", function (ev) {
-    ev.preventDefault();
+  /* The brand returns to the board's home view from anywhere in place: it
+     leaves a shown page (and full screen) and goes back to the priority list
+     when there is one. It is a native button, so Lavish annotate mode lets it
+     act, and it never loads a page into this frame. */
+  function goHome() {
     showPage(null);
-  });
+    if (orderKeys.length > 1) backToList();
+    try { window.scrollTo(0, 0); } catch (e) { /* no scrolling */ }
+  }
+  document.getElementById("bb-brand").addEventListener("click", goHome);
   window.addEventListener("message", function (ev) {
     var d = ev && ev.data;
     if (!d || typeof d !== "object" || typeof d.type !== "string" || d.type.indexOf("fm-board-page:") !== 0) return;
