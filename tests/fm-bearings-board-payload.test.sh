@@ -791,6 +791,27 @@ test_a_long_asking_sentence_still_heads_its_card_as_a_question() {
   pass "a long asking sentence still heads its card as a question and the build accepts it"
 }
 
+# A status question whose lead sentence states the subject and whose "?"
+# sits only in its numbered calls does not ask in the card's own question,
+# so the build flags that card rather than letting a "?" from its options or
+# body pass for one. The text is the workload-pruner mate's real line.
+test_a_card_whose_question_does_not_ask_is_flagged_even_when_its_options_ask() {
+  local snap="$TMP_ROOT/calls-ask.json" p out reason
+  reason="Research agent ticket #37, two calls the priors do not cover. 1) Which model runs the research agent? Recommend Fable, the strongest; agent time is cheap next to GPU time. 2) Where do ideas and their outcomes (refused and failed included) live? Recommend the existing lab notebook next to the run directories (scratch/runs/NOTES.md) as the one record, one entry per round, each idea with its status, so no idea is proposed twice without new evidence. Details: https://forgejo.clarob.uk/rob/workload-pruner/issues/37#issuecomment-33470"
+  write_snapshot "$TMP_ROOT/calls-ask-base.json"
+  jq --arg r "$reason" '.decisions_open = [
+        {id: "workload-pruner/wp-37-grill", key: "status.workload-pruner.wp-37-grill", verb: "needs-decision",
+         source: "status", task: "workload-pruner", decision_key: "wp-37-grill", owner: "workload-pruner",
+         title: "workload-pruner", reason_full: $r, summary: "x"}]' \
+    "$TMP_ROOT/calls-ask-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/calls-ask-payload.json"
+  out=$(build_checks "$TMP_ROOT/calls-ask-payload.json")
+  assert_contains "$out" "undecided-card: status.workload-pruner.wp-37-grill: missing question" \
+    "the build let through a card whose question does not ask: $(jq -c '.captains_call[] | select(.key == "status.workload-pruner.wp-37-grill") | {title, question, decide}' <<<"$p") $out"
+  pass "a card whose question does not ask is flagged even when its options ask"
+}
+
 test_default_choices_match_the_question_asked() {
   local snap="$TMP_ROOT/fit.json" p
   write_snapshot "$TMP_ROOT/fit-base.json"
@@ -1376,6 +1397,7 @@ fm_test_run \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
   test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids \
   test_a_long_asking_sentence_still_heads_its_card_as_a_question \
+  test_a_card_whose_question_does_not_ask_is_flagged_even_when_its_options_ask \
   test_default_choices_match_the_question_asked \
   test_action_card_answers_reach_the_intake_as_the_captains_report \
   test_a_card_whose_pr_merged_or_closed_leaves_the_board \
