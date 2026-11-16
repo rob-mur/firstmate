@@ -44,6 +44,8 @@
 //   pageform:<id>   the in-place page <id>'s relay passes up its form's answer
 //                   (tag round-answers, queueKey round, data {q1:"a"})
 //   pagesend:<id>   the in-place page <id>'s relay asks to send the queue
+//   formsunsent:<id>:<n> the in-place page <id>'s relay reports <n> changed
+//                   forms it could not queue (0 when they are queued again)
 //   unsentsend      press the send button in the shown page's unsent notice
 //   pagetoggle:<id> the in-place page <id>'s relay asks to toggle annotate mode
 //   stranger        an unknown frame passes up an annotation
@@ -66,7 +68,9 @@
 //   pageUnsent }; each card
 //   also carries error {shown, text} from the box beside its answer, errors
 //   has the priority's and the page view's boxes, pageUnsent is the page
-//   view's notice of an answer queued but not sent ({shown, text}), boot is the load problem
+//   view's notice of an answer queued but not sent ({shown, text, send}, send
+//   being whether its send button shows), pageTabs maps each page tab's title
+//   to whether it carries the unsent mark, boot is the load problem
 //   the page shows while it waits for its data ({shown, text}), and polls
 //   counts the page's live intervals; opens lists every url the
 //   page asked to open elsewhere, framePosts every message the board sent
@@ -401,6 +405,11 @@ for (const act of actionList.split(",").filter(Boolean)) {
   } else if (name === "unsentsend") {
     byId.get("bb-page-unsent").querySelector("button").fire("click");
     flush();
+  } else if (name === "formsunsent") {
+    const [id, n] = arg.split(":");
+    const source = iframes.find((f) => pageOf(f) === id).contentWindow;
+    for (const fn of listeners) fn({ data: { type: "fm-board-page:formsUnsent", count: Number(n) }, source });
+    flush();
   } else if (["annotation", "pagetoggle", "stranger", "pageform", "pagesend"].includes(name)) {
     const source = name === "stranger" ? {} : iframes.find((f) => pageOf(f) === arg).contentWindow;
     const data = name === "pagetoggle" ? { type: "fm-board-page:toggleAnnotate", prompt: "", opts: {} }
@@ -457,7 +466,10 @@ process.stdout.write(JSON.stringify({
   dropped: dropped.length,
   errors: { priority: errorOf(get("bb-priority-error")), page: errorOf(get("bb-page-error")) },
   sends,
-  pageUnsent: errorOf(get("bb-page-unsent"), ".bb-page-unsent__text"),
+  pageUnsent: { ...errorOf(get("bb-page-unsent"), ".bb-page-unsent__text"),
+    send: get("bb-page-unsent")?.querySelector("button")?.hidden === false },
+  pageTabs: Object.fromEntries((get("bb-tabs")?.children || []).slice(1)
+    .map((t) => [t.textContent, t.classList.contains("is-unsent")])),
   boot: { shown: !!loadNote, text: loadNote?.textContent ?? "" },
   sub: get("bb-call-sub").textContent,
   order: {
