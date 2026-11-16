@@ -21,6 +21,9 @@
 # Stale rows never reach Captain's Call:
 #   - a hold deferred to a later date (hold_until after today, or fleet bucket
 #     `dated`), from any home, is charted with `until <date>: <reason>` instead;
+#     once that date arrives the hold is a card again, never a waiting row, and
+#     a lapsed card whose text does not ask asks whether it is still waiting
+#     (go ahead / hold it again / free text) when the hold recorded no choices;
 #   - a merge-ask card (is_merge_ask in bin/fm-bearings-question-lib.sh) whose
 #     every PR/MR (recorded, named in its reason, or its snapshot pr_url) merged
 #     or closed is dropped, as is a contribution card whose PR did; any other
@@ -372,10 +375,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   | (($snap.omitted // []) | map(.surface)) as $omitted
 
   | def released($d):
-      ( ((if $d | has("held") then $d.held else "yes" end) | tostring | ascii_downcase)
-        | (. == "no" or . == "false") )
-      or ( (($d.hold_until // "") | tostring) as $u
-           | ($u | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")) and (($u[:10]) <= $today) );
+      ((if $d | has("held") then $d.held else "yes" end) | tostring | ascii_downcase)
+      | (. == "no" or . == "false");
     ( [ $snap.decisions_open[]? | select(released(.) | not) ]
       | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end) ) as $held
   # A hold deferred to a future date (hold_until after today, or the dated
@@ -384,6 +385,11 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       ($d.hold_bucket // "") == "dated"
       or ( (($d.hold_until // "") | tostring) as $u
            | ($u | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")) and (($u[:10]) > $today) );
+    # A hold whose time gate has passed (hold_until today or earlier) is back on
+    # the captain: a decision card, never a waiting row, whatever its reason says.
+    def lapsed($d):
+      (($d.hold_until // "") | tostring) as $u
+      | ($u | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")) and (($u[:10]) <= $today);
     ( [ $held[] | select(deferred(.)) ] ) as $deferred
   | ( [ $held[] | select(deferred(.) | not) ] ) as $held
   # A row whose every PR/MR is merged or closed (live forge state, or a landed
@@ -469,7 +475,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # bin/fm-bearings-snapshot.sh) no longer waits on the captain: it is a wait
   # until the worker raises a fresh question.
   | def handed($d): ($d.handed_at // null) != null;
-    def waitlike($d): is_wait($d) or handed($d);
+    def waitlike($d): (is_wait($d) and (lapsed($d) | not)) or handed($d);
     def handed_reason($d):
       (($d.handed_at | tostring | .[:16] | sub("T"; " ")) + " UTC") as $when
       | if $d.handed_via == "reconcile" then
@@ -673,6 +679,21 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
           | if ($d.verb // "") == "review-ready"
                and (((.question // "") + " " + (.title // "")) | contains("?") | not)
             then .question = "Have you reviewed this page?" else . end
+          # A lapsed hold the generator returned to the board asks whether
+          # it is still waiting when its own text does not ask, offering a
+          # fresh date or a go-ahead (or a free-text answer) when the hold
+          # recorded no choices of its own, so build does not refuse it.
+          | if lapsed($d) and (((.question // "") + " " + (.title // "")) | contains("?") | not)
+            then .question = ("Its hold until " + ((($d.hold_until // "") | tostring)[:10])
+                              + " has passed: is it still waiting?")
+                 | if .options_inferred == true
+                   then .options = [{value: "go", label: "Go ahead now"},
+                                    {value: "keep-waiting", label: "Still waiting, hold it again"}]
+                        | .free_text = true | del(.options_inferred, .malformed)
+                        | if ((.links // []) | length) == 0 and ((.pr_url // "") | length) == 0
+                          then .no_link = true else . end
+                   else . end
+            else . end
           # A decision answered on its Lavish page shows only the link to that
           # page: no recap, no choices, and a title that names what the page is
           # about rather than the sentence pointing at it.
