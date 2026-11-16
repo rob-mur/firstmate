@@ -79,7 +79,8 @@ cat > "$LAB/payload.json" <<'JSON'
       "repo": "sample",
       "title": "Guard placeholder",
       "question": "Keep the guard placeholder?",
-      "options": [{ "value": "yes", "label": "Yes" }]
+      "options": [{ "value": "yes", "label": "Yes" }],
+      "no_link": true
     }
   ],
   "underway": [],
