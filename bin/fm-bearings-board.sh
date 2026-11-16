@@ -100,8 +100,22 @@
 # memory, and the payload validator reserves that value across every card type.
 # The board labels it "Already settled? Re-check and close it" and shows it
 # apart from the decision's own choices. Because build always adds it, a
-# decision card may arrive with no options and no free-text answer (a decision
-# answered on its page shows only that page link).
+# page-backed decision card may arrive with no options and no free-text answer
+# (a decision answered on its page shows only that page link).
+#
+# EVERY CARD STATES ITS DECISION. After the hygiene drop above and before the
+# board is touched, build refuses any Captain's Call card that does not say
+# what the captain is deciding: a card needs a prompt that asks - its
+# `question` or `decide` carries a `?`, or its title does - and a way to answer
+# it, at least one option of its own besides the injected reconcile choice or a
+# free-text answer. A card whose options include `done` and `not-done` asks
+# for an in-person action, so its prompt may be an imperative sentence. Exempt are a merge card (its type is the
+# question) and a page-backed card, one carrying `off_board` or with no options
+# and a Lavish page link, whose decision is on that page. Each refused card is
+# named on stderr as an `undecided-card: <key>: missing <field> (<why>)` line
+# and the final refusal repeats them, so the payload can be fixed; a refused
+# card is never rendered and never silently dropped.
+#
 # The validator's reservation scope must equal the adapter's reconcile
 # classification scope, which is all card types because the captured payload
 # carries no card type. Its meaning, and the reason it can never reach the
@@ -376,6 +390,36 @@ validate_payload() {  # <data.json>
   ' "$1" >/dev/null
 }
 
+# Print one `<key>: <missing fields>` line per Captain's Call card that does
+# not state its decision (see EVERY CARD STATES ITS DECISION above).
+undecided_cards() {  # <data.json>
+  jq -r '
+    def text: if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end;
+    def asks: text | contains("?");
+    .captains_call[]
+    | select(.type != "merge")
+    | .options |= map(select(.value != "reconcile"))
+    | select(has("off_board") | not)
+    | select(((.options | length) == 0)
+             and any(.links[]?; has("page")
+                     or ((.url // "") | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#]|$)")))
+             | not)
+    | .key as $key
+    | ([.question, .decide] | map(text) | map(select(length > 0))) as $prompts
+    | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $action
+    | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
+         then "question (no question or decide prompt, and the title is not a question)"
+         elif ($prompts | length) > 0 and (any($prompts[]; asks) | not) and (.title | asks | not)
+              and ($action | not)
+         then "question (\($prompts[0] | if length > 80 then .[:79] + "…" else . end) is not a question)"
+         else empty end),
+        (if (.options | length) == 0 and .allow_freeform != true
+         then "options (no options and no free-text answer)" else empty end) ]
+    | select(length > 0)
+    | "\($key): missing \(join(", "))"
+  ' "$1"
+}
+
 # Every live page registered through bin/fm-board-page.sh, oldest first, as the
 # board data's `pages` array. A record that does not parse or carries a bad id
 # is left out rather than failing the build.
@@ -604,7 +648,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data board board_data board_app json tmp extracted effective pages code stage reopen=1
+  local data board board_data board_app json tmp extracted effective pages code stage undecided reopen=1
   if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   data=$1
@@ -628,6 +672,13 @@ command_build() {
   if ! effective_payload "$data" "$effective"; then
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
+  fi
+  undecided=$(undecided_cards "$effective") \
+    || { rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot check the Captain's Call cards: $data"; }
+  if [ -n "$undecided" ]; then
+    rm -f -- "$effective"; rm -rf -- "$stage"
+    printf '%s\n' "$undecided" | sed 's/^/undecided-card: /' >&2
+    fail "refusing Captain's Call cards with no explicit decision - $(printf '%s' "$undecided" | paste -sd ';' - | sed 's/;/; /g'): $data"
   fi
   pages=$(live_pages_json)
   # Only a card that links a Lavish page needs the server's session listing.
