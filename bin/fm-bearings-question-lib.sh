@@ -2,7 +2,7 @@
 # Shared "is this a question or a wait, and what can the captain answer" rule.
 # Usage: . bin/fm-bearings-question-lib.sh; splice "$FM_BEARINGS_QUESTION_JQ_DEFS"
 # ahead of a jq program, then call `is_wait($row)`, `is_announcement($row)`,
-# `is_review($row)`, `default_options($row)`, `option_parse` and
+# `is_review($row)`, `is_merge_ask($row)`, `default_options($row)`, `option_parse` and
 # `recover_options`.
 #
 # ONE OWNER for the board's question rules. The bearings snapshot decides which
@@ -36,6 +36,15 @@
 # a "review page" or asks to review or re-review the PR, MR, merge request, or
 # pull request. The captain's own approval of every PR/MR such a row names
 # settles it (bin/fm-bearings-board-payload.sh).
+#
+# is_merge_ask($row): a row whose question is whether to merge its PRs/MRs, so
+# their merge or close settles it (bin/fm-bearings-board-payload.sh). It is a
+# review row (is_review); an asking sentence that says merge, or approve with a
+# PR, MR, pull request, merge request, or pulls/merge_requests URL; a reason
+# with no question mark that opens a sentence with merge (as is_action reads
+# it); or a recorded or listed option whose label opens with merge. Any other
+# question - apply, delete, or deploy after the merge - is not a merge ask,
+# whatever its links say.
 #
 # clean_reason: reason text as the captain reads it - every `corr=<hex>`
 # correlation token and a leading "captain hold <id>: " label removed.
@@ -246,8 +255,20 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
       and ($r | asks | not)
       and ($r | test("(^|[^a-z])(choose|pick|decide|which)([^a-z]|$)"; "i") | not)
       and ($r | test("(^|[^a-z])(review|understand|lavish|report|pr|mr|pull request|merge request)( (page|board))?(( is| now| are))*[[:space:]]*(live|ready|up|posted)([^a-z]|$)"; "i"));
+  def action_led($verbs):
+    test("(^|[.!;:][[:space:]]+)(please[[:space:]]+)?((the[[:space:]]+)?captain[,:]?[[:space:]]+(to[[:space:]]+|must[[:space:]]+|needs?[[:space:]]+to[[:space:]]+|please[[:space:]]+)?)?(" + $verbs + ")([^a-z-]|$)"; "i");
   def is_action:
-    test("(^|[.!;:][[:space:]]+)(please[[:space:]]+)?((the[[:space:]]+)?captain[,:]?[[:space:]]+(to[[:space:]]+|must[[:space:]]+|needs?[[:space:]]+to[[:space:]]+|please[[:space:]]+)?)?(dismiss|merge|run|re-?run|log[[:space:]]?in(to)?|sign[[:space:]]?in(to)?|re-?auth(enticate)?|re-?login)([^a-z-]|$)"; "i");
+    action_led("dismiss|merge|run|re-?run|log[[:space:]]?in(to)?|sign[[:space:]]?in(to)?|re-?auth(enticate)?|re-?login");
+  def is_merge_ask($d):
+    (($d.reason_full // $d.reason // $d.question // "") | clean_reason) as $q
+    | ($q | (split("?")[0] // "") | split(". ") | (last // "")) as $sentence
+    | is_review($d)
+      or (($q | test("\\?")) and ($sentence | test("(^|[^a-z])merge([^a-z-]|$)"; "i")))
+      or (($q | test("\\?")) and ($sentence
+            | test("(^|[^a-z])approve([^a-z]|$).*((^|[^a-z])(pr|mr|pull request|merge request)([^a-z]|$)|/pulls?/[0-9]|/merge_requests/[0-9])"; "i")))
+      or (($q | test("\\?") | not) and ($q | action_led("merge")))
+      or any((($d.choices.options // []) + ((($q | option_parse) // {}).options // []))[];
+             (.label // "") | tostring | test("^[[:space:]]*merge([^a-z-]|$)"; "i"));
   def default_options($d):
     (($d.reason_full // $d.reason // $d.question // "") | clean_reason) as $q
     | ($q | option_parse) as $parsed
