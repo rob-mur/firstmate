@@ -81,7 +81,40 @@ SH
 echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
+  # glab records every call too, so a test can prove the default path never
+  # reaches GitLab. It serves three open MRs the captain authored: !870 (a task
+  # records its URL), !880 (no task covers it) and !8 (no task covers it; its URL
+  # is a prefix of !870's and !880's, so only an exact match may cover it).
+  cat > "$fb/glab" <<'SH'
+#!/usr/bin/env bash
+echo "glab $*" >> "$NET_LOG"
+if [ "${1:-}" = api ]; then
+  case "${FAKE_GLAB:-ok}" in
+    fail) echo "glab: 401 Unauthorized" >&2; exit 1 ;;
+    hang) sleep 30 ;;
+  esac
+fi
+if [ "${1:-}" = config ]; then
+  [ "${FAKE_GLAB_NOHOST:-0}" = 1 ] && exit 1
+  printf 'gitlab.example.com\n'; exit 0
+fi
+path=${*: -1}
+case "$path" in
+  merge_requests\?*)
+    cat <<'JSON'
+[{"iid":870,"project_id":42,"title":"APP-5556 covered change","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/870","references":{"full":"grp/app/aegis!870"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-10T09:00:00Z"},
+ {"iid":880,"project_id":42,"title":"Bump the dependencies","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880","references":{"full":"grp/app/aegis!880"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T08:30:00Z"},
+ {"iid":8,"project_id":7,"title":"Draft keycloak realm","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/8","references":{"full":"grp/app/aegis!8"},"draft":true,"detailed_merge_status":"discussions_not_resolved","has_conflicts":false,"blocking_discussions_resolved":false,"updated_at":"2026-07-01T12:00:00Z"}]
+JSON
+    ;;
+  projects/42/merge_requests/880) echo '{"iid":880,"head_pipeline":{"status":"success"}}' ;;
+  projects/42/merge_requests/880/approvals) echo '{"approved":false,"approvals_left":1,"approved_by":[]}' ;;
+  projects/7/merge_requests/8) echo '{"iid":8,"head_pipeline":null}' ;;
+  projects/7/merge_requests/8/approvals) echo '{"approved":true,"approvals_left":0,"approved_by":[{"user":{"username":"ana"}}]}' ;;
+  *) echo "glab: 404 $path" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl" "$fb/glab"
   printf '%s\n' "$fb"
 }
 
@@ -1069,7 +1102,9 @@ test_default_is_bounded_and_local_only() {
   local canon; canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   [ "${#toon}" -lt "${#canon}" ] || fail "projection must be smaller than the canonical snapshot"
   # Local-only: no GitHub/network call on the default path.
-  [ ! -s "$home/net.log" ] || fail "default run must make no gh/gh-axi call, got: $(cat "$home/net.log")"
+  [ ! -s "$home/net.log" ] || fail "default run must make no gh/gh-axi/glab call, got: $(cat "$home/net.log")"
+  assert_contains "$toon" "captain's open GitLab MRs,\"--include-mrs\"" "omitted must mark the dropped GitLab MR surface"
+  printf '%s' "$json" | jq -e 'has("open_mrs") | not' >/dev/null || fail "default run must carry no open_mrs: $json"
   # Definitive not-requested PR state, never a silent omission.
   assert_contains "$toon" 'prs: "not_requested' "default must state PR checks were not requested"
   assert_contains "$toon" "live PR discovery + checks,\"--include-prs\"" "omitted must mark the dropped live-PR surface"
@@ -1479,7 +1514,7 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm mkdir chmod mv cp awk; do
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm mkdir chmod mv cp awk uname xargs; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   for cmd in shasum sha256sum; do
@@ -1487,13 +1522,117 @@ test_perl_fallback_bounds_github_call() {
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
-  json=$(PATH="$fakebin:$toolbin" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+  # A BASH_ENV startup file could put a real glab back on PATH; drop it.
+  json=$(env -u BASH_ENV PATH="$fakebin:$toolbin" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
     FM_BEARINGS_PR_TIMEOUT=1 NET_LOG="$home/net.log" FAKE_GH_SLEEP=1 "$BEARINGS" --include-prs --json)
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -lt 10 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"
   printf '%s' "$json" | jq -e '.prs | test("unavailable")' >/dev/null \
     || fail "timed-out gh call did not fail soft: $json"
   pass "Perl fallback bounds stalled GitHub calls without coreutils timeout"
+}
+
+# The captain's own open GitLab MRs that no task records reach the snapshot with
+# their full URL and one plain state line; an MR a task records stays with that
+# task. Coverage is an exact URL or reference match, never a fuzzy one.
+test_include_mrs_lists_only_uncovered_mrs() {
+  local home fakebin json err
+  home=$(make_home mrs); write_fixture "$home"
+  # A backlog note records !870's URL, so a task covers it.
+  printf '  Follow-up for https://gitlab.example.com/grp/app/aegis/-/merge_requests/870 once CI passes.\n' \
+    >> "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  err="$home/mrs.err"
+  json=$(run "$home" "$fakebin" --include-mrs --json 2>"$err") || fail "--include-mrs run failed: $(cat "$err")"
+  grep -q "merge_requests?scope=created_by_me&state=opened" "$home/net.log" \
+    || fail "--include-mrs must list the captain's open MRs: $(cat "$home/net.log")"
+  grep -q -- '--hostname gitlab.example.com' "$home/net.log" || fail "glab must target the configured host"
+  [ "$(grep -c 'merge_requests?' "$home/net.log")" = 1 ] || fail "one list call per build: $(cat "$home/net.log")"
+  ! grep -q 'projects/42/merge_requests/870' "$home/net.log" || fail "a covered MR needs no detail call"
+  printf '%s' "$json" | jq -e '
+    (.open_mrs | map(.url)) == ["https://gitlab.example.com/grp/app/aegis/-/merge_requests/880",
+                                "https://gitlab.example.com/grp/app/aegis/-/merge_requests/8"]
+    and (.open_mrs[0] | .key == "mr-42-880" and .repo == "aegis" and .title == "Bump the dependencies"
+         and .state == "mergeable, CI passing, 0 approvals, threads resolved, last activity 2026-07-11")
+    and (.open_mrs[1].state == "draft, no CI run, 1 approval, threads open, last activity 2026-07-01")
+    and (.mrs | startswith("checked"))
+  ' >/dev/null || fail "open_mrs must list only the uncovered MRs with their state: $json"
+  pass "--include-mrs lists the uncovered MRs and leaves a covered MR with its task"
+}
+
+test_include_mrs_covers_by_task_meta_and_reference() {
+  local home fakebin json
+  home=$(make_home mrs-meta); write_fixture "$home"
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" "worktree=$home/projects/ship-wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://gitlab.example.com/grp/app/aegis/-/merge_requests/880"
+  printf '  Waiting on grp/app/aegis!8 review.\n' >> "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --include-mrs --json 2>/dev/null)
+  printf '%s' "$json" | jq -e '(.open_mrs | map(.key)) == ["mr-42-870"]' >/dev/null \
+    || fail "task meta pr= and a full reference must cover their MRs: $json"
+  pass "an MR a task records by URL or full reference stays with that task"
+}
+
+# The board payload built live (no --snapshot) asks the snapshot for the
+# captain's open MRs, so the board shows them; FM_BEARINGS_BOARD_MR_CHECK=0
+# turns that one GitLab call off.
+test_live_board_payload_carries_the_open_mrs() {
+  local home fakebin out
+  home=$(make_home mrs-payload); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" \
+    FM_BEARINGS_BOARD_MR_CHECK=1 "$ROOT/bin/fm-bearings-board-payload.sh" 2>/dev/null) \
+    || fail "the live payload failed"
+  printf '%s' "$out" | jq -e '
+    (.open_mrs | map(.url)) == ["https://gitlab.example.com/grp/app/aegis/-/merge_requests/880",
+                                "https://gitlab.example.com/grp/app/aegis/-/merge_requests/870",
+                                "https://gitlab.example.com/grp/app/aegis/-/merge_requests/8"]
+    and (.open_mrs[0] | keys) == ["key","repo","state","title","url"]
+    and ([.captains_call[] | select((.pr_url // "") | test("merge_requests"))] | length) == 0
+  ' >/dev/null || fail "the live payload must list the open MRs as information rows: $out"
+  : > "$home/net.log"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" \
+    FM_BEARINGS_BOARD_MR_CHECK=0 "$ROOT/bin/fm-bearings-board-payload.sh" 2>/dev/null) \
+    || fail "the payload without the MR check failed"
+  ! grep -q glab "$home/net.log" || fail "FM_BEARINGS_BOARD_MR_CHECK=0 must make no GitLab call: $(cat "$home/net.log")"
+  printf '%s' "$out" | jq -e 'has("open_mrs") | not' >/dev/null || fail "no MR check, no open_mrs: $out"
+  pass "a live board payload carries the open MRs unless the check is off"
+}
+
+# A glab failure, a hang, a missing glab or no host never breaks the snapshot: the
+# section is left out and one line says why.
+test_include_mrs_failure_degrades() {
+  local home fakebin toolbin cmd json err rc mode started
+  home=$(make_home mrs-fail); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  err="$home/mrs.err"
+  for mode in fail hang nohost; do
+    : > "$home/net.log"; rc=0; started=$(date +%s)
+    case "$mode" in
+      nohost) json=$(FAKE_GLAB_NOHOST=1 run "$home" "$fakebin" --include-mrs --json 2>"$err") || rc=$? ;;
+      *) json=$(FAKE_GLAB=$mode FM_BEARINGS_MR_TIMEOUT=1 run "$home" "$fakebin" --include-mrs --json 2>"$err") || rc=$? ;;
+    esac
+    [ "$rc" = 0 ] || fail "glab $mode must not fail the snapshot (rc=$rc): $(cat "$err")"
+    [ $(( $(date +%s) - started )) -lt 20 ] || fail "glab $mode was not bounded"
+    printf '%s' "$json" | jq -e '(has("open_mrs") | not) and (.mrs | startswith("unavailable"))' >/dev/null \
+      || fail "glab $mode must leave open_mrs out: $json"
+    [ "$(grep -c 'GitLab MRs unavailable' "$err")" = 1 ] || fail "glab $mode must log one line: $(cat "$err")"
+  done
+  # Without glab anywhere on PATH: only the tools the snapshot needs.
+  rm "$fakebin/glab"
+  toolbin="$home/toolbin"; mkdir -p "$toolbin"
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm mkdir chmod mv cp awk uname xargs timeout shasum sha256sum; do
+    command -v "$cmd" >/dev/null 2>&1 || continue
+    ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
+  done
+  # A BASH_ENV startup file could put a real glab back on PATH; drop it.
+  json=$(env -u BASH_ENV PATH="$fakebin:$toolbin" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" \
+    "$BEARINGS" --include-mrs --json 2>"$err") || fail "a missing glab must not fail the snapshot: $(cat "$err")"
+  printf '%s' "$json" | jq -e '(has("open_mrs") | not) and (.mrs | test("glab not found"))' >/dev/null \
+    || fail "a missing glab must leave open_mrs out: $json"
+  pass "a glab failure, hang, missing host or missing glab leaves the MR section out"
 }
 
 write_large_fixture() {  # <home> <count>
@@ -3726,6 +3865,10 @@ fm_test_run \
   test_report_pointers_surface \
   test_queued_item_prose_never_hides_it \
   test_include_prs_is_the_only_fetch_path \
+  test_include_mrs_lists_only_uncovered_mrs \
+  test_include_mrs_covers_by_task_meta_and_reference \
+  test_include_mrs_failure_degrades \
+  test_live_board_payload_carries_the_open_mrs \
   test_include_prs_maps_custom_branch_prefix_to_task \
   test_partial_github_failure_degrades \
   test_perl_fallback_bounds_github_call \
