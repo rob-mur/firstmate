@@ -1097,6 +1097,69 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# A scout parked at a keyed decision can still run a short turn - its own
+# background wait finishing wakes it for a few seconds - and a board build that
+# reads it during that turn sees the pane busy. A keyed decision stays open until
+# a resolved line with its key lands, so that busy read must not drop it, or the
+# captain's card vanishes from that one build and comes back on the next.
+test_busy_pane_keeps_keyed_decision() {
+  local home fakebin out gen
+  home=$(make_home busy-keyed-scout)
+  mkdir -p "$home/projects/scout-wt4"
+  fm_write_meta "$home/state/busy-keyed.meta" \
+    "window=firstmate:fm-busy-keyed" \
+    "worktree=$home/projects/scout-wt4" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=scout"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" busy-keyed)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" busy-keyed busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf 'needs-decision [key=board-review]: is the plan on the board page the plan?\n' \
+    > "$home/state/busy-keyed.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "busy-keyed")
+    | .current_state.state == "working"
+      and .current_state.source == "pane"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+      and .hints.open_decisions[0].key == "board-review"
+  ' >/dev/null || fail "a busy pane read must not drop a keyed open decision: $out"
+  pass "a busy pane read keeps a keyed open decision"
+}
+
+# A pane read that cannot tell busy from idle proves nothing about the decision,
+# so it keeps every open decision, keyed or not.
+test_unknown_pane_keeps_open_decisions() {
+  local home fakebin out
+  home=$(make_home unknown-pane-scout)
+  mkdir -p "$home/projects/scout-wt5"
+  fm_write_meta "$home/state/unknown-pane.meta" \
+    "window=firstmate:fm-unknown-pane" \
+    "worktree=$home/projects/scout-wt5" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=scout"
+  printf '%s\n' \
+    'needs-decision [key=q1]: adopt approach A or B' \
+    'needs-decision: an unkeyed question' \
+    > "$home/state/unknown-pane.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "unknown-pane")
+    | .current_state.state == "unknown"
+      and .current_state.source == "pane"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 2
+  ' >/dev/null || fail "an unknown pane read must keep every open decision: $out"
+  pass "an unknown pane read keeps every open decision"
+}
+
 # A decision raised again under its key keeps only its newest line in the open
 # set, so options only an earlier line spelled out ride along as .earlier,
 # oldest first, and only for lines since the key last opened.
@@ -1243,6 +1306,8 @@ fm_test_run \
   test_open_decision_clears_on_keyed_resolution \
   test_completed_scout_report_is_pointer_not_pending \
   test_parked_scout_decision_stays_pending \
+  test_busy_pane_keeps_keyed_decision \
+  test_unknown_pane_keeps_open_decisions \
   test_a_reraised_decision_carries_its_earlier_text \
   test_current_state_cache_follows_status_and_ttl \
   test_scout_reports_include_teardown_reports \
