@@ -1004,9 +1004,59 @@ test_a_failed_page_answer_shows_an_error_and_can_be_queued_again() {
   pass "a page answer Lavish does not queue shows an error under the page and Queue again resends it"
 }
 
+test_a_page_answer_lavish_never_confirms_shows_an_error_and_can_be_queued_again() {
+  local home page out frame=understand-mr-872
+  home=$(make_home page-confirm)
+  page=$(register_page "$home" "$frame" "Understand MR 872")
+  printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$page" > "$home/lavish-sessions"
+  render_card_links "$home" '[{url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"}]' >/dev/null
+  # Lavish takes the call but never queues it, as its chrome does with a
+  # message it does not accept: the page must not count the answer as queued.
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(CHROME_MODE=drops run_board "$home" "frameload:$frame,go,page:mr-872,pageform:$frame,wait")
+  printf '%s' "$out" | jq -e '
+    .dropped == 1 and .calls == [] and .errors.page.shown
+      and (.errors.page.text | test("Understand MR 872") and test("did not confirm"))
+  ' >/dev/null || fail "a page answer Lavish never confirmed showed no error: $out"
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(CHROME_MODE=drops run_board "$home" "frameload:$frame,go,page:mr-872,pageform:$frame,wait,chrome:ok,retry:page")
+  printf '%s' "$out" | jq -e '
+    (.errors.page.shown | not)
+      and ([.calls[] | select(.tag == "page") | {key, tag: .data.tag, q1: .data.data.q1}]
+        == [{key: "page:understand-mr-872:round", tag: "round-answers", q1: "a"}])
+  ' >/dev/null || fail "Queue again did not resend the unconfirmed page answer: $out"
+  pass "a page answer Lavish never confirms shows an error under the page and Queue again resends it"
+}
+
+test_a_page_form_and_note_both_queue_and_the_page_says_while_they_are_unsent() {
+  local home page out frame=understand-mr-872
+  home=$(make_home page-unsent)
+  page=$(register_page "$home" "$frame" "Understand MR 872")
+  printf '  %s,open,"http://127.0.0.1:4387/session/aaaa1111",0\n' "$page" > "$home/lavish-sessions"
+  render_card_links "$home" '[{url:"http://dev-1.tailf848b0.ts.net:4387/session/aaaa1111", label:"Understand page"}]' >/dev/null
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(run_board "$home" "frameload:$frame,go,page:mr-872,pageform:$frame,annotation:$frame")
+  printf '%s' "$out" | jq -e '
+    ([.calls[] | select(.tag == "page") | .data.tag] == ["round-answers", "annotation"])
+      and (.errors.page.shown | not) and .sends == 0
+      and .pageUnsent.shown and (.pageUnsent.text | test("Understand MR 872") and test("not sent"))
+  ' >/dev/null || fail "a queued page form and note did not both queue with an unsent notice: $out"
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(run_board "$home" "frameload:$frame,go,page:mr-872,pageform:$frame,annotation:$frame,pagesend:$frame")
+  printf '%s' "$out" | jq -e '.sends == 1 and .queue == [] and (.pageUnsent.shown | not) and (.errors.page.shown | not)' \
+    >/dev/null || fail "sending from the page left the unsent notice up: $out"
+  rm -f "$home/storage.json" "$home/storage.json.session.json"
+  out=$(run_board "$home" "frameload:$frame,go,page:mr-872,pageform:$frame,unsentsend")
+  printf '%s' "$out" | jq -e '.sends == 1 and .queue == [] and (.pageUnsent.shown | not)' \
+    >/dev/null || fail "the unsent notice did not send the queued page answer: $out"
+  pass "a page form and a note from the same page both queue, and the page says so until they are sent"
+}
+
 test_a_missing_or_broken_data_file_shows_a_wait_and_boots_in_place
 test_a_failed_answer_shows_an_error_keeps_the_answer_and_can_be_queued_again
 test_a_failed_page_answer_shows_an_error_and_can_be_queued_again
+test_a_page_answer_lavish_never_confirms_shows_an_error_and_can_be_queued_again
+test_a_page_form_and_note_both_queue_and_the_page_says_while_they_are_unsent
 
 test_waiting_holds_render_below_the_decisions_and_a_card_leads_with_its_question() {
   local home out data
