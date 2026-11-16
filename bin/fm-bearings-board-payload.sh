@@ -78,7 +78,8 @@
 #                      open captain hold is a row here (see --all-decisions above).
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
-#                      one short `question` (at most 120 characters, first letter
+#                      one short `question` (at most 120 characters, a cut asking
+#                      sentence keeping its closing "?", first letter
 #                      capitalised): for a reason with its own options, the sentence
 #                      that introduces them (without a leading "Captain call:" or
 #                      "Decision needed:" label); else the sentence led by "Question:", else
@@ -419,12 +420,16 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     ( [ $held[] | select(((is_merge_ask(.) and pr_finished(row_urls(.); is_review(.))) or superseded(.)) | not) ] ) as $held
   # A status decision row (source "status") carries the asking task or home as its
   # title; the card title says what the question is instead.
+  # A sentence cut short keeps its closing "?", so a long asking sentence still
+  # reads as a question and the decision check in build still sees it ask.
   | def short_text_n($n):
       tostring | gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | ([match("^.*?[.?!](?=[[:space:]]|$)").string][0] // .)
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?]"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
-      | if length > $n then (.[:($n - 1)] | sub(" [^ ]*$"; "")) + "…" else . end;
+      | if length <= $n then .
+        elif endswith("?") then (.[:($n - 2)] | sub(" [^ ]*$"; "")) + "…?"
+        else (.[:($n - 1)] | sub(" [^ ]*$"; "")) + "…" end;
     def short_text: short_text_n(80);
     # The sentence that asks: one led by "Question:" (prefix dropped), else the
     # first ending in "?", else the first sentence.
