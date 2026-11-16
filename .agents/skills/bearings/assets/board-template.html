@@ -1065,20 +1065,23 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     renderOrder();
     scheduleReorderSend();
   }
-  /* Pressing down on the top row walks the list: the top decision rejoins
-     the ones already passed over, which stay in their order as a block just
-     below the top, and the next decision comes up. A B C D goes to B A C D,
-     then C A B D, then D A B C, and one more press restores A B C D and
-     starts over. Any other change to the order starts a new walk. */
-  var topWalk = { passed: 0, order: "" };
-  function shuntTop() {
-    var passed = topWalk.order === orderKeys.join("\n") ? topWalk.passed : 0;
-    var top = orderKeys.shift();
-    orderKeys.splice(passed, 0, top);
+  /* Pressing down on a row walks the rest of the list below it, leaving the
+     rows above alone: the decision in that row rejoins the ones already
+     passed over, which stay in their order as a block just below it, and the
+     next decision comes up into the row. With the rows above fixed, A B C D
+     goes to B A C D, then C A B D, then D A B C, and one more press restores
+     A B C D and starts over. Pressing another row, or any other change to
+     the order, starts a new walk. */
+  var walk = { slot: -1, passed: 0, order: "" };
+  function shunt(slot) {
+    var passed = walk.slot === slot && walk.order === orderKeys.join("\n") ? walk.passed : 0;
+    var rest = orderKeys.splice(slot);
+    rest.splice(passed, 0, rest.shift());
     passed += 1;
-    if (passed < orderKeys.length) orderKeys.unshift(orderKeys.splice(passed, 1)[0]);
+    if (passed < rest.length) rest.unshift(rest.splice(passed, 1)[0]);
     else passed = 0;
-    topWalk = { passed: passed, order: orderKeys.join("\n") };
+    Array.prototype.push.apply(orderKeys, rest);
+    walk = { slot: slot, passed: passed, order: orderKeys.join("\n") };
     orderPersist();
     renderOrder();
     scheduleReorderSend();
@@ -1114,7 +1117,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       up.addEventListener("click", function () { moveKey(k, i - 1); });
       var down = el("button", "bb-stacknav__btn bb-order__down", "\u2193");
       down.type = "button"; down.setAttribute("aria-label", "Move down"); down.disabled = i === orderKeys.length - 1;
-      down.addEventListener("click", function () { if (i === 0) shuntTop(); else moveKey(k, i + 1); });
+      down.addEventListener("click", function () { shunt(i); });
       moves.appendChild(up); moves.appendChild(down);
       row.appendChild(moves);
       row.addEventListener("dragstart", function (ev) {
