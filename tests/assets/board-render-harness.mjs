@@ -6,7 +6,8 @@
 // The payload is read from the bearings-board.data.js file the build writes
 // beside the page, the way the page's own <script src> loads it.
 // Prints one JSON document:
-//   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
+//   { stats:[{n,label}], waiting:{shown,rows}, open_mrs:{shown,rows:[{text,links}]},
+//     captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text,action}],
 //     pages:[{page,text}],notes:[text],options:[{value,label,aside}]}],
 //     empty, more, error }
@@ -175,8 +176,17 @@ const waiting = {
   shown: waitingNode ? waitingNode.hidden === false : false,
   rows: (byId.get("bb-waiting-list") || new Node("div")).children.map((r) => r.textContent),
 };
+// The captain's open MRs no task covers: each row's text and its links.
+const openMrsNode = byId.get("bb-open-mrs");
+const open_mrs = {
+  shown: openMrsNode ? openMrsNode.hidden === false : false,
+  rows: (byId.get("bb-open-mrs-list") || new Node("div")).children.map((r) => ({
+    text: r.textContent,
+    links: r.findAll((n) => n.tagName === "a").map((a) => ({ href: a.href ?? "", text: a.textContent })),
+  })),
+};
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, waiting, captains_call, underway, charted, call, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, waiting, open_mrs, captains_call, underway, charted, call, empty, more, error: errorText }) + "\n");

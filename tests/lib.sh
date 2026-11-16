@@ -53,6 +53,12 @@ export FM_GATE_REFUSE_BYPASS=1
 # leaked harness pin alone stays inert outside a suite.
 export FM_TEST_SEAM=1
 
+# Keep a board payload built without --snapshot from asking GitLab for the
+# captain's open MRs (bin/fm-bearings-board-payload.sh), so no test reaches a
+# real forge through a glab on PATH. A case that drives that path sets it to 1
+# with a stubbed glab.
+export FM_BEARINGS_BOARD_MR_CHECK=0
+
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
