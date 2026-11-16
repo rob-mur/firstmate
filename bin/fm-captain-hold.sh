@@ -109,10 +109,12 @@
 # identically no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
-# resumes; anything else is skipped. A `release` line while the away-posture
-# record exists is reported as `refused:` under the same attended-only rule as
-# `answer --release` and feeds nothing. A key that names no task, a task that is
-# not held for the captain, or a task already closed is reported as `skipped:`
+# resumes; anything else is skipped. A line on an in-flight task always
+# releases: a board answer on live work records the words and lifts the hold,
+# never closing the work. A releasing line while the away-posture record
+# exists is reported as `refused:` under the same attended-only rule as
+# `answer --release` and feeds nothing. A key that names no task, a task that
+# is not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
 # a mode mismatch is skipped. An answer over `answer-limit` bytes (6000) is
@@ -1807,6 +1809,14 @@ command_answers() {
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
+    if [ -z "$release_flag" ] && [ "$state" = in_flight ]; then
+      release_flag=--release
+      if ! release_attended; then
+        printf 'refused: %s (%s)\n' "$id" "$RELEASE_AWAY_REASON"
+        skipped=$((skipped + 1))
+        continue
+      fi
+    fi
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     if body_has_resolution_record "$body" \
