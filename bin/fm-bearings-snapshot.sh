@@ -29,6 +29,9 @@
 # in FM_BEARINGS_GITLAB_HOST or glab's configured host, plus bounded detail and
 # approvals reads for the first FM_BEARINGS_MR_DETAIL_MAX uncovered MRs, each call
 # bounded by FM_BEARINGS_MR_TIMEOUT seconds; at most FM_BEARINGS_MRS rows are kept.
+# GitLab keeps an MR open after its project is archived, so one bounded
+# `projects/<id>` read per distinct project (at most FM_BEARINGS_MR_PROJECT_MAX)
+# drops the MRs of an archived project; a project it cannot read keeps its MRs.
 # An MR is covered only when its exact URL or full reference (group/project!iid)
 # appears in this home's task meta, backlog or snapshot - never by a fuzzy match. A
 # missing glab, no host, no auth, a failure or a timeout leaves open_mrs out, sets
@@ -145,6 +148,7 @@ FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
 FM_BEARINGS_MRS=${FM_BEARINGS_MRS:-20}
 FM_BEARINGS_MR_DETAIL_MAX=${FM_BEARINGS_MR_DETAIL_MAX:-10}
+FM_BEARINGS_MR_PROJECT_MAX=${FM_BEARINGS_MR_PROJECT_MAX:-20}
 FM_BEARINGS_MR_TIMEOUT=${FM_BEARINGS_MR_TIMEOUT:-10}
 case "$FM_BEARINGS_MR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_MR_TIMEOUT=10 ;; esac
 case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
@@ -164,6 +168,7 @@ validate_bound FM_BEARINGS_PR_REPOS "$FM_BEARINGS_PR_REPOS"
 validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 validate_bound FM_BEARINGS_MRS "$FM_BEARINGS_MRS"
 validate_bound FM_BEARINGS_MR_DETAIL_MAX "$FM_BEARINGS_MR_DETAIL_MAX"
+validate_bound FM_BEARINGS_MR_PROJECT_MAX "$FM_BEARINGS_MR_PROJECT_MAX"
 
 usage() {
   cat <<'EOF'
@@ -213,7 +218,8 @@ Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 --include-mrs bounds: FM_BEARINGS_GITLAB_HOST (default: glab's configured host),
   FM_BEARINGS_MR_TIMEOUT seconds per glab call (10), FM_BEARINGS_MR_DETAIL_MAX MRs
-  read in detail (10), FM_BEARINGS_MRS rows kept (20).
+  read in detail (10), FM_BEARINGS_MR_PROJECT_MAX projects checked for archiving
+  (20), FM_BEARINGS_MRS rows kept (20).
 EOF
 }
 
@@ -1057,7 +1063,8 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
 
 # --- optional live GitLab MR listing ----------------------------------------
 # Under --include-mrs only: the captain's open GitLab MRs that no task records.
-# One bounded list call against the configured host, then one bounded detail and
+# One bounded list call against the configured host, one bounded project read per
+# distinct project to drop MRs of an archived project, then one bounded detail and
 # approvals call per uncovered MR (at most FM_BEARINGS_MR_DETAIL_MAX of them, run
 # in parallel). Read-only. An MR is covered when its exact web_url or full
 # reference (group/project!iid), not followed by another digit, appears anywhere
@@ -1094,6 +1101,24 @@ if [ "$INCLUDE_MRS" = 1 ]; then
                        and ((.web_url // "") | startswith("https://")))
           | select((recorded(.web_url) or recorded(.references.full // "")) | not) ]
         | sort_by(.updated_at // "") | reverse')
+      # GitLab keeps an MR "opened" after its project is archived and does not
+      # honour the list call's archive filter everywhere, so read each distinct
+      # project once (bounded, in parallel) and drop the MRs of an archived one.
+      # A project that cannot be read keeps its MRs.
+      while read -r pid; do
+        [ -n "$pid" ] || continue
+        ( glab_bounded api --hostname "$mr_host" "projects/$pid" > "$mr_tmp/p-$pid" 2>/dev/null || rm -f "$mr_tmp/p-$pid" ) &
+      done <<EOF
+$(printf '%s' "$mr_uncovered" | jq -r --argjson cap "$FM_BEARINGS_MR_PROJECT_MAX" '[.[].project_id] | unique | .[:$cap][]')
+EOF
+      wait
+      mr_archived=$(for f in "$mr_tmp"/p-*; do
+          [ -f "$f" ] || continue
+          jq -c 'select(type == "object" and .archived == true and (.id | type) == "number") | .id' "$f" 2>/dev/null
+        done | jq -s -c '.')
+      [ -n "$mr_archived" ] || mr_archived='[]'
+      mr_uncovered=$(printf '%s' "$mr_uncovered" | jq -c --argjson arch "$mr_archived" \
+        '[ .[] | select(.project_id as $p | $arch | index($p) | not) ]')
       mr_total=$(printf '%s' "$mr_uncovered" | jq 'length')
       i=0
       while IFS=$'\t' read -r pid iid; do
