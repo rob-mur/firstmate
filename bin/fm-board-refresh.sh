@@ -30,7 +30,15 @@
 # in its place, before anything else. A kick forwarded from a secondmate on
 # another release, or any caller from another code root, therefore never
 # rewrites the board page with another template: Lavish reloads the board, and
-# every page frame in it, each time that page file changes.
+# every page frame in it, each time that page file changes. A refresher loop an
+# older code root already started keeps the lock, and serves every later request
+# with its own code, for as long as requests keep coming. So when this is the
+# home's own code and the lock is held, it looks (Linux, through /proc) for a
+# refresher of this same home, by its state directory, that runs another file;
+# it waits until that one is between passes (its only child a sleep, at most
+# FM_BOARD_REFRESH_LOCK_TTL seconds), stops it and that sleep with SIGTERM (its
+# exit trap frees the lock), and carries on in its place. A refresher of another
+# home, one running this same file, or a kick is never touched.
 #
 # Requests are never dropped, only coalesced:
 #   - each request marks state/.board-refresh.pending; a mkdir lock under state/
@@ -290,6 +298,69 @@ refresh_once() {
   log "board build refused: $(printf '%s' "$out" | tail -n 1)"
   return 1
 }
+
+# The script path a process runs, when it is a refresher pass (not a kick).
+refresher_script() {  # <pid>
+  local arg script='' cwd
+  while IFS= read -r -d '' arg; do
+    case "$arg" in
+      --kick) return 1 ;;
+      */fm-board-refresh.sh|fm-board-refresh.sh) [ -n "$script" ] || script=$arg ;;
+    esac
+  done < "/proc/$1/cmdline" 2>/dev/null
+  [ -n "$script" ] || return 1
+  case "$script" in
+    /*) ;;
+    *) cwd=$(readlink "/proc/$1/cwd" 2>/dev/null) || return 1; script="$cwd/$script" ;;
+  esac
+  printf '%s\n' "$script"
+}
+
+# One variable from a process's starting environment.
+proc_env() {  # <pid> <name>
+  local kv
+  while IFS= read -r -d '' kv; do
+    case "$kv" in "$2="*) printf '%s\n' "${kv#*=}"; return 0 ;; esac
+  done < "/proc/$1/environ" 2>/dev/null
+  return 1
+}
+
+replace_foreign_refresher() {
+  local pid script home state kids kid comm busy deadline
+  [ -d /proc/self ] && [ -d "$LOCK" ] || return 0
+  [ "$FM_HOME/bin/fm-board-refresh.sh" -ef "${BASH_SOURCE[0]}" ] || return 0
+  for pid in /proc/[0-9]*; do
+    pid=${pid#/proc/}
+    [ "$pid" != "$$" ] || continue
+    script=$(refresher_script "$pid") || continue
+    [ ! "$script" -ef "${BASH_SOURCE[0]}" ] || continue
+    home=$(proc_env "$pid" FM_HOME) || home=$(cd "$(dirname "$script")/.." 2>/dev/null && pwd) || continue
+    state=$(proc_env "$pid" FM_STATE_OVERRIDE) || state="$home/state"
+    [ "$state" -ef "$STATE" ] || continue
+    deadline=$(($(date +%s) + LOCK_TTL))
+    while :; do
+      kids=$(pgrep -P "$pid" 2>/dev/null)
+      busy=0
+      for kid in $kids; do
+        comm=$(cat "/proc/$kid/comm" 2>/dev/null) || continue
+        [ "$comm" = sleep ] || busy=1
+      done
+      [ "$busy" = 1 ] || break
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        log "left a busy refresher from $(dirname "$(dirname "$script")") (pid $pid) running"
+        return 0
+      fi
+      sleep 0.2
+    done
+    # shellcheck disable=SC2086
+    kill -TERM "$pid" $kids 2>/dev/null || continue
+    deadline=$(($(date +%s) + 10))
+    while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.1; done
+    log "replaced a refresher from $(dirname "$(dirname "$script")") (pid $pid)"
+  done
+}
+
+replace_foreign_refresher
 
 rc=0
 # Re-check after releasing the lock: a request that arrived just as the last
