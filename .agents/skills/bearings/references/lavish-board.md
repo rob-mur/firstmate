@@ -15,7 +15,7 @@ Repeated down presses on any row walk the list below it, leaving the rows above 
 Clicking a decision row opens its card; "Start answering" deals the cards in the list's order.
 A task under way is not a decision, so the board never lists it unless it is blocked or needs a decision, in which case it is a question card; a sent priority carries the tasks under way after the decisions in their recorded order, so their stored rank survives.
 "Reorder" returns from the cards to the list at any time, including after answers are queued or sent.
-The "bearings" header returns to the board's home view in place from anywhere on the board - a shown page, full screen, or the cards - and to the priority list when there is one.
+The "bearings" header returns to the board's home view in place from anywhere on the board - a shown page, full screen, or the cards - and to the priority list whenever a decision waits, even one left after the agent refreshes the board for a send.
 The list's order survives a refresh and rebuild like a queued answer, and a row added since asks to be placed again.
 `bin/fm-bearings-board-payload.sh` already sorts cards and tasks by the stored priority, so a rebuilt board starts in the captain's order.
 Every question card carries real default answer choices derived from its question, and the standard reconcile choice stays secondary.
