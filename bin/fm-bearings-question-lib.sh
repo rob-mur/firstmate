@@ -45,7 +45,9 @@
 # last, and each option is {value, label}. The forms, tried in order, are
 # numbered "(1) ... (2) ..." and "1) ... 2) ...", lettered "(a) ... (b) ..." and
 # "A) ... B) ..." (either case), and a slash list after "Options:", "Choices:"
-# or "Decision:" ("Options: x / y / z."). Markers must run 1, 2, 3 or a, b, c
+# or "Decision:" ("Options: x / y / z."). A parenthesised mark may carry its
+# own recommendation ("(a, recommended) ...", "(2; rec) ..."): that option's
+# value is then the parse's `recommend`. Markers must run 1, 2, 3 or a, b, c
 # from the first, at least two; the last option ends at its sentence end; a
 # reason with no such list parses to null. Values are option-<n> or
 # option-<letter>. A label is the full option text, never shortened, with URLs
@@ -127,7 +129,7 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
           if (length == 0 and $m.n == 1) or (length > 0 and $m.n == (.[-1].n + 1)) then . + [$m] else . end);
       def marks($re; $kind):
         [ $q | match($re; "g")
-          | {offset, length, k: (.captures[0].string)}
+          | {offset, length, k: (.captures[0].string), rec: ((.captures[1].string // null) != null)}
           | . + {n: (if $kind == "number" then (.k | tonumber) else (.k | ascii_downcase | explode[0] - 96) end),
                  value: ("option-" + (if $kind == "number" then .k else (.k | ascii_downcase) end))} ];
       def from_marks($ms):
@@ -141,6 +143,7 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
                 else ($q[$s:] | cut_last) as $t | {value: $m.value, text: $t, end: ($s + ($t | length))} end ] as $o
             | {lead: $q[:$r[0].offset], tail: $q[($o[-1].end):],
                options: [ $o[] | {value, label: (.text | choice_label | captain_terms | phrase_cap)} ]}
+            + ([ $r[] | select(.rec) | .value ][0] | if . == null then {} else {recommend: .} end)
             | if all(.options[]; .label | length > 0) then . else null end
           end;
       def from_list:
@@ -154,11 +157,12 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
                  options: [ range(0; $items | length) as $i | {value: ("option-" + (($i + 1) | tostring)), label: $items[$i]} ]}
               else null end
           end;
-      if $kind == "number" then
-        from_marks(marks("\\((?<k>[0-9]{1,2})\\)"; "number"))
+      "(?<r>(?:,|;|:|[[:space:]]+-)[[:space:]]*(?:recommended|recommendation|rec|preferred)(?![[:alnum:]])[^()]{0,30})?" as $rec
+      | if $kind == "number" then
+        from_marks(marks("\\((?<k>[0-9]{1,2})" + $rec + "\\)"; "number"))
         // from_marks(marks("(?<![^[:space:]:;,])(?<k>[0-9]{1,2})\\)"; "number"))
       elif $kind == "letter" then
-        from_marks(marks("(?<![[:alnum:]])\\((?<k>[A-Za-z])\\)"; "letter"))
+        from_marks(marks("(?<![[:alnum:]])\\((?<k>[A-Za-z])" + $rec + "\\)"; "letter"))
         // from_marks(marks("(?<![^[:space:]:;,])(?<k>[A-Za-z])\\)"; "letter"))
       else from_list end;
   def option_parse: option_parse_by("number") // option_parse_by("letter") // option_parse_by("list");
