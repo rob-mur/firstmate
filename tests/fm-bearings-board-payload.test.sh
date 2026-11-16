@@ -727,6 +727,29 @@ test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids() {
   pass "a card heading is one short asking sentence and the full text is the body"
 }
 
+# A long asking sentence, its "?" past the heading's length after a long
+# parenthetical, still heads its card as a question, so the build does not
+# refuse it as a card that asks nothing. The text is the cd mate's real line.
+test_a_long_asking_sentence_still_heads_its_card_as_a_question() {
+  local snap="$TMP_ROOT/long-ask.json" p out reason
+  reason="Review continuous-delivery PR 894 (#697 vulnerability scan: ci:non-functional-requirements scans what CD ships for known vulnerabilities), now that it is complete? It changes pipeline paths, so the acknowledgement-gate review 638 (raised on an older head) still blocks it. PR 894: the scan, with every review, QA and break finding fixed; head 4315087; all 7 checks green; https://forgejo.clarob.uk/rob/continuous-delivery/pulls/894. When you are satisfied, dismiss or approve on Forgejo yourself, and the cd mate merges once the block clears (after a rebase if main has moved). The scan runs only on main, so the first main pipeline after the merge shows it working."
+  write_snapshot "$TMP_ROOT/long-ask-base.json"
+  jq --arg r "$reason" '.decisions_open = [
+        {id: "cd/cd-review-894", key: "status.cd.cd-review-894", verb: "needs-decision", source: "status",
+         task: "cd", decision_key: "cd-review-894", owner: "cd", title: "cd", reason_full: $r, summary: "x"}]' \
+    "$TMP_ROOT/long-ask-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "status.cd.cd-review-894")
+      | (.question | endswith("?")) and (.question | length) <= 120 and (.question | startswith("Review continuous-delivery PR 894"))' <<<"$p")" \
+    "a long asking sentence did not head its card as a short question"
+  assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "status.cd.cd-review-894") | .title | endswith("?")' <<<"$p")" \
+    "a status card titled by a long asking sentence does not read as a question"
+  printf '%s\n' "$p" > "$TMP_ROOT/long-ask-payload.json"
+  out=$(build_checks "$TMP_ROOT/long-ask-payload.json")
+  assert_not_contains "$out" "undecided-card" "the build refused a card whose long asking sentence asks: $out"
+  pass "a long asking sentence still heads its card as a question and the build accepts it"
+}
+
 test_default_choices_match_the_question_asked() {
   local snap="$TMP_ROOT/fit.json" p
   write_snapshot "$TMP_ROOT/fit-base.json"
@@ -1310,6 +1333,7 @@ fm_test_run \
   test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
   test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids \
+  test_a_long_asking_sentence_still_heads_its_card_as_a_question \
   test_default_choices_match_the_question_asked \
   test_action_card_answers_reach_the_intake_as_the_captains_report \
   test_a_card_whose_pr_merged_or_closed_leaves_the_board \
