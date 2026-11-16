@@ -96,6 +96,8 @@ One refresh policy covers the whole app: no frame ever reloads, and the board an
 A page's actions ride the board's Lavish session as rows tagged `page`, and the process-event runner routes them to that page's agent before publishing the result, so a board result holding only routed page actions raises no wake.
 Lavish keeps a queued page action only in the browser tab that queued it until the captain sends it, so the board shows a page action Lavish did not confirm as an error with "Queue again", and one still unsent as a notice with "Send to agent" and a mark on the page's tab.
 The page relay queues a form the captain changed before anything is sent, and the board flags a changed form it could not queue with the same notice and tab mark; the `wait` text in `bin/fm-board-page.sh` owns that contract.
+Input the captain has not sent outlives a page drawing its form again and any reload of a page, the board or the browser tab, because the relay keeps it as a draft per question that the board stores in Lavish's review state; the same `wait` text owns that contract.
+A board is built only by its own home's code, so a refresh another home's code kicks never rewrites the board file and makes Lavish reload it; the `bin/fm-board-refresh.sh` header owns that rule.
 A board wake that still lists `page` rows means their page was not registered or the route failed: check `bin/fm-board-page.sh list`, and never answer a page's action as a board decision.
 Each answer carries the captain's priority, as `[priority N of M]` in its label and as `order` and `order_total` in its context data.
 When a result holds several answers, handle them lowest `order` first, and echo that sequence in chat.
