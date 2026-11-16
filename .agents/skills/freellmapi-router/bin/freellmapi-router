@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+# freellmapi-router - Route tasks between free LLM providers and frontier models
+#
+# Usage:
+#   freellmapi-router recommend --effort <low|medium|high> [--task <description>]
+#   freellmapi-router catalog [--url <gateway-url>]
+#   freellmapi-router estimate --effort <level> --tokens <n> [--route freellmapi|claude]
+#   freellmapi-router read-config --dotfiles <path> --branch <branch>
+#
+# This router enables cost-effective task routing:
+#   - Simple/low-effort tasks → freellmapi (free models)
+#   - Complex/high-effort tasks → Claude Opus (frontier model)
+#   - Medium tasks → freellmapi with optional review
+
+set -euo pipefail
+
+# Default freellmapi gateway URL
+DEFAULT_FRELLMAPI_URL="http://localhost:3001"
+
+# Check if selective routing is enabled
+should_route_to_freellmapi() {
+  local effort="$1"
+
+  # Only route to freellmapi when:
+  # 1. FRELLMAPI_ROUTING=enabled, AND
+  # 2. Effort is low or medium
+  if [[ "${FRELLMAPI_ROUTING:-}" == "enabled" ]]; then
+    case "${effort,,}" in
+      low|medium)
+        return 0  # true - should route to freellmapi
+        ;;
+      high|xhigh|max|ultra)
+        return 1  # false - keep on Claude
+        ;;
+    esac
+  fi
+
+  return 1  # false - use default Claude routing
+}
+
+# Get routing recommendation based on task characteristics
+recommend_route() {
+  local effort="${1:-medium}"
+  local task_type="${2:-medium}"
+  local freellmapi_url="${3:-$DEFAULT_FRELLMAPI_URL}"
+
+  local route="claude"
+  local model="opus"
+  local provider="anthropic"
+  local cost_estimate=0
+
+  # Check if we should use freellmapi routing
+  if should_route_to_freellmapi "$effort"; then
+    case "${effort,,}" in
+      low)
+        route="freellmapi"
+        model="haiku"
+        provider="openai"
+        cost_estimate=0
+        ;;
+      medium)
+        route="freellmapi"
+        model="auto"
+        provider="openai"
+        cost_estimate=0
+        ;;
+    esac
+  else
+    # Default Claude routing
+    case "${effort,,}" in
+      high|xhigh|max|ultra)
+        route="claude"
+        model="opus"
+        provider="anthropic"
+        cost_estimate=0
+        ;;
+      *)
+        # medium and low default to Claude when freellmapi routing disabled
+        route="claude"
+        model="opus"
+        provider="anthropic"
+        cost_estimate=0
+        ;;
+    esac
+  fi
+
+  # Output in TOON format for easy parsing
+  cat << TOON
+ROUTE_RECOMMENDATION
+  status: recommended
+  route: ${route}
+  model: ${model}
+  provider: ${provider}
+  gateway_url: ${freellmapi_url}
+  effort_class: ${effort}
+  cost_tokens: ${cost_estimate}
+  cost_usd: ${cost_estimate:-0}
+  confidence: 0.9
+  routing_enabled: ${FRELLMAPI_ROUTING:-disabled}
+  action: launch with --harness ${route} --model ${model}
+TOON
+}
+
+# Output in JSON format for dispatch pipeline integration
+recommend_route_json() {
+  local effort="${1:-medium}"
+  local task_type="${2:-medium}"
+  local freellmapi_url="${3:-$DEFAULT_FRELLMAPI_URL}"
+
+  local route="claude"
+  local model="opus"
+  local provider="anthropic"
+  local cost_estimate=0
+
+  if should_route_to_freellmapi "$effort"; then
+    case "${effort,,}" in
+      low)
+        route="freellmapi"
+        model="haiku"
+        provider="openai"
+        cost_estimate=0
+        ;;
+      medium)
+        route="freellmapi"
+        model="auto"
+        provider="openai"
+        cost_estimate=0
+        ;;
+    esac
+  fi
+
+  cat << JSON
+{
+  "route": "${route}",
+  "harness": "${route}",
+  "model": "${model}",
+  "provider": "${provider}",
+  "gateway_url": "${freellmapi_url}",
+  "effort_class": "${effort}",
+  "cost_usd": ${cost_estimate},
+  "confidence": 0.9,
+  "routing_enabled": "${FRELLMAPI_ROUTING:-disabled}"
+}
+JSON
+}
+
+# Read freellmapi config from dotfiles branch (read-only)
+read_dotfiles_config() {
+  local dotfiles_path="$1"
+  local branch="$2"
+  
+  echo "READ_DOTFILES_CONFIG"
+  echo "  status: reading"
+  echo "  dotfiles: ${dotfiles_path}"
+  echo "  branch: ${branch}"
+  echo ""
+  
+  if [[ ! -d "${dotfiles_path}" ]]; then
+    echo "  error: dotfiles directory not found: ${dotfiles_path}"
+    return 1
+  fi
+  
+  # Read settings.json - Claude Code uses ANTHROPIC_BASE_URL to point to freellmapi
+  echo "--- settings.json from ${branch}:"
+  git -C "${dotfiles_path}" show "${branch}:home/programs/claude-code/settings.json" 2>/dev/null || echo "  not_found"
+  echo ""
+  
+  # Read any .env.claude file (contains ANTHROPIC_* env vars)
+  echo "--- .env.claude from ${branch}:"
+  git -C "${dotfiles_path}" show "${branch}:.env.claude" 2>/dev/null || echo "  not_found"
+}
+
+# Get freellmapi model catalog
+get_catalog() {
+  local url="${1:-$DEFAULT_FRELLMAPI_URL}"
+
+  echo "FRELLMAPI_CATALOG"
+  echo "  gateway: ${url}"
+  echo "  status: fetching_models"
+  echo "  models_endpoint: ${url}/v1/models"
+  echo ""
+
+  if command -v curl &>/dev/null; then
+    # Note: /v1/models requires ANTHROPIC_AUTH_TOKEN for freellmapi
+    echo "NOTE: Gateway requires ANTHROPIC_AUTH_TOKEN for model catalog access"
+    echo "The router itself works without auth for routing recommendations."
+    if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+      curl -s --max-time 10 -H "Authorization: Bearer ${ANTHROPIC_AUTH_TOKEN}" "${url}/v1/models" 2>/dev/null || echo "  error: cannot reach gateway at ${url}"
+    else
+      echo "  No ANTHROPIC_AUTH_TOKEN set - skipping authenticated request"
+    fi
+  else
+    echo "  error: curl not available"
+    return 1
+  fi
+}
+
+# Estimate cost for a task
+estimate_cost() {
+  local effort="$1"
+  local tokens="$2"
+  local route="$3"
+  
+  local cost=0
+  
+  if [[ "${route}" == "freellmapi" ]]; then
+    cost=0  # Free LLM API
+  elif [[ "${route}" == "claude" ]]; then
+    # Claude pricing is rough estimate - use quota-axi for actual tracking
+    cost=$(echo "scale=4; ${tokens:-0} * 0.00003" | bc 2>/dev/null || echo "0")
+  fi
+  
+  echo "COST_ESTIMATE"
+  echo "  effort: ${effort}"
+  echo "  tokens: ${tokens:-0}"
+  echo "  route: ${route}"
+  echo "  cost_usd: ${cost}"
+}
+
+# Show usage
+show_usage() {
+  cat << USAGE
+freellmapi-router - Route tasks between free LLM providers and frontier models
+
+Usage:
+  freellmapi-router recommend --effort <low|medium|high> [options]
+  freellmapi-router catalog [--url <url>]
+  freellmapi-router estimate --effort <level> --tokens <n> [--route freellmapi|claude]
+  freellmapi-router read-config --dotfiles <path> --branch <branch>
+  freellmapi-router help
+
+Routing Policy:
+  - low effort tasks → freellmapi (free models like haiku) when FRELLMAPI_ROUTING=enabled
+  - medium tasks → freellmapi (auto model, free) when FRELLMAPI_ROUTING=enabled
+  - high/xhigh/max/ultra tasks → Claude Opus (frontier model) always
+  - low/medium tasks → Claude Opus (default) when FRELLMAPI_ROUTING is not set
+
+Configuration:
+  Set FRELLMAPI_ROUTING=enabled to enable selective routing
+  Set FRELLMAPI_URL environment variable for gateway URL (default: http://localhost:3001)
+
+Options:
+  --json    Output JSON format for programmatic use
+
+Examples:
+  FRELLMAPI_ROUTING=enabled freellmapi-router recommend --effort low --task "fix typo in README"
+  freellmapi-router recommend --effort high --task "multi-file refactor" --json
+  freellmapi-router catalog --url http://100.97.145.107:3001
+  freellmapi-router estimate --effort medium --tokens 50000 --route claude
+
+USAGE
+}
+
+# Main command router
+main() {
+  local cmd="${1:-help}"
+  
+  shift || true
+  
+  case "${cmd}" in
+    recommend)
+      local effort="medium"
+      local task=""
+      local url="${FRELLMAPI_URL:-$DEFAULT_FRELLMAPI_URL}"
+      local json_output=false
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --effort)
+            effort="$2"
+            shift 2
+            ;;
+          --task)
+            task="$2"
+            shift 2
+            ;;
+          --url)
+            url="$2"
+            shift 2
+            ;;
+          --json)
+            json_output=true
+            shift
+            ;;
+          *)
+            shift
+            ;;
+        esac
+      done
+
+      if $json_output; then
+        recommend_route_json "$effort" "$task" "$url"
+      else
+        recommend_route "$effort" "$task" "$url"
+      fi
+      ;;
+      
+    catalog)
+      local url="${FRELLMAPI_URL:-$DEFAULT_FRELLMAPI_URL}"
+      
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --url)
+            url="$2"
+            shift 2
+            ;;
+          *)
+            shift
+            ;;
+        esac
+      done
+      
+      echo "FRELLMAPI_CATALOG"
+      echo "  gateway: ${url}"
+      echo "  status: fetching_models"
+      echo "  models_endpoint: ${url}/v1/models"
+      echo ""
+      echo '{"note": "Run with live gateway to get actual model catalog"}'
+      ;;
+      
+    estimate)
+      local effort="medium"
+      local tokens=0
+      local route="claude"
+      
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --effort)
+            effort="$2"
+            shift 2
+            ;;
+          --tokens)
+            tokens="$2"
+            shift 2
+            ;;
+          --route)
+            route="$2"
+            shift 2
+            ;;
+          *)
+            shift
+            ;;
+        esac
+      done
+      
+      estimate_cost "$effort" "$tokens" "$route"
+      ;;
+      
+    read-config)
+      local dotfiles_path=""
+      local branch="main"
+      
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --dotfiles)
+            dotfiles_path="$2"
+            shift 2
+            ;;
+          --branch)
+            branch="$2"
+            shift 2
+            ;;
+          *)
+            shift
+            ;;
+        esac
+      done
+      
+      if [[ -z "${dotfiles_path}" ]]; then
+        echo "Error: --dotfiles path required" >&2
+        return 1
+      fi
+      
+      read_dotfiles_config "$dotfiles_path" "$branch"
+      ;;
+      
+    help|--help|-h)
+      show_usage
+      ;;
+      
+    *)
+      echo "Unknown command: ${cmd}" >&2
+      show_usage
+      return 1
+      ;;
+  esac
+}
+
+main "$@"
