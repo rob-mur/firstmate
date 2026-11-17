@@ -199,12 +199,16 @@
 #
 # A REBUILD NEVER RELOADS THE OPEN PAGE. Lavish reloads the whole open page
 # whenever the page file changes, and watches no other file, so a forced reload
-# would wipe text the captain is typing. So build installs three files:
+# would wipe text the captain is typing. So build installs four files:
 #   - bearings-board.data.js holds the payload as one
 #     `window.FM_BEARINGS_BOARD_DATA = <json>;` assignment, stamped with
-#     `board_code`, the checksum of the template that built it. The data is
-#     the compact JSON with every `<` escaped as the \u003c string escape, so a
+#     `board_code`, the checksum of the template that built it, and
+#     `data_stamp`, the checksum of the payload itself. The data is the
+#     compact JSON with every `<` escaped as the \u003c string escape, so a
 #     payload string containing "</script>" stays inert.
+#   - bearings-board.stamp.js holds only that data stamp, as
+#     `window.FM_BEARINGS_BOARD_STAMP = "<stamp>";`, so the open page can poll
+#     one short line and read the data only when it changed.
 #   - bearings-board.app.js holds the template's one inline script, stamped
 #     with the same checksum as window.FM_BEARINGS_BOARD_CODE.
 #   - bearings-board.html, the page, is the template with that inline script
@@ -218,10 +222,11 @@
 # that changed; when the data names a newer `board_code` than the code it is
 # running, it reloads itself into the new code only once the reader is not
 # working in it, and keeps the shown card across that reload (the template
-# owns that test). Files are written code, then data, then page, each replaced
-# whole by a rename of a file staged beside it, so a reader never sees one
-# missing or half written and a page that reloads finds code at least as new as
-# the data that asked for it. A fetch already under way can still be cut short
+# owns that test). Files are written code, then data, then stamp, then page,
+# each replaced whole by a rename of a file staged beside it, so a reader never
+# sees one missing or half written, a page that reloads finds code at least as
+# new as the data that asked for it, and a stamp never names data that is not
+# there yet. A fetch already under way can still be cut short
 # by the rename, because Lavish streams a file by path, so the page treats a
 # data load that fails or breaks as a reason to wait and re-read, never as a
 # dead board (the template's waitForData).
@@ -270,6 +275,7 @@ fail() {
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 board_data_path() { printf '%s.data.js\n' "${1%.html}"; }
 board_app_path() { printf '%s.app.js\n' "${1%.html}"; }
+board_stamp_path() { printf '%s.stamp.js\n' "${1%.html}"; }
 APP_SCRIPT='<script src="bearings-board.app.js"></script>'
 
 # Render the installed page and code file from the template into <page> and
@@ -770,7 +776,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data board board_data board_app json tmp extracted effective pages code stage undecided reopen=1
+  local data board board_data board_app board_stamp json tmp extracted effective pages code stamp stage undecided reopen=1
   if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   data=$1
@@ -822,6 +828,9 @@ command_build() {
   rm -f -- "$effective"
   json=$(printf '%s\n' "$json" | jq -c --arg code "$code" '. + {board_code: $code}') \
     || { rm -rf -- "$stage"; fail "cannot stamp the board data"; }
+  stamp=$(printf '%s\n' "$json" | cksum | awk '{print $1 "-" $2}')
+  json=$(printf '%s\n' "$json" | jq -c --arg stamp "$stamp" '. + {data_stamp: $stamp}') \
+    || { rm -rf -- "$stage"; fail "cannot stamp the board data"; }
   # `<` never appears in JSON syntax outside strings, so escaping every
   # occurrence keeps the payload valid JSON while making </script> inert.
   json=${json//</\\u003c}
@@ -829,6 +838,7 @@ command_build() {
   board=$(board_path)
   board_data=$(board_data_path "$board")
   board_app=$(board_app_path "$board")
+  board_stamp=$(board_stamp_path "$board")
   (umask 077; mkdir -p "${board%/*}") || { rm -rf -- "$stage"; fail "cannot create ${board%/*}"; }
   # The code file goes first, so the data that names its stamp never reaches
   # an open page before the code it asks that page to reload into.
@@ -855,6 +865,13 @@ command_build() {
     rm -f -- "$tmp"; rm -rf -- "$stage"
     fail "cannot publish the board data"
   fi
+  tmp=$(umask 077; mktemp "${board%/*}/.board-stamp.XXXXXX") \
+    || { rm -rf -- "$stage"; fail "cannot stage the board data stamp"; }
+  if ! printf 'window.FM_BEARINGS_BOARD_STAMP = "%s";\n' "$stamp" > "$tmp"; then
+    rm -f -- "$tmp"; rm -rf -- "$stage"
+    fail "cannot write the board data stamp"
+  fi
+  publish_if_changed "$tmp" "$board_stamp" "board data stamp" || { rm -rf -- "$stage"; exit 1; }
   # The page file changes only when the template's markup or styles do,
   # because any change to it makes Lavish reload the captain's open page.
   tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") \
