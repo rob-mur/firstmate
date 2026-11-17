@@ -1151,20 +1151,28 @@ test_build_refuses_a_nondecision_reconcile_value() {
 }
 
 # A Captain's Call card must state its decision: a question the captain is
-# asked and the choices that answer it. A card missing either is built flagged:
-# named on stderr and carrying `problem`, which the board shows on that card,
-# while every other card builds unflagged. One bad card never stops the board.
+# asked and the choices that answer it. A card missing either never reaches the
+# captain: it is named on stderr, left out of Captain's Call, and listed in the
+# build's `cards_to_fix` and the home's state/board-cards-to-fix record with its
+# owning task, key and problem, while every other card builds. One bad card
+# never stops the board.
 expect_flagged_build() {  # <home> <data> <key> <field> <what>
   local out rc
   set +e; out=$(run_board "$1" build "$2" 2>&1); rc=$?; set -e
   [ "$rc" -eq 0 ] || fail "$5: one card that does not state its decision stopped the whole board: $out"
   assert_contains "$out" "undecided-card: $3: missing $4" "$5: stderr did not name the card and its missing field: $out"
-  assert_contains "$out" "flagged Captain's Call cards with no explicit decision" "$5: the build did not report the flag: $out"
+  assert_contains "$out" "held back Captain's Call cards with no explicit decision" "$5: the build did not report the held-back card: $out"
   extract_payload "$1/.lavish/bearings-board.html" | jq -e --arg k "$3" --arg f "missing $4" '
-    ([.captains_call[] | select(.key == $k) | .problem | strings | startswith($f)] == [true])
-    and ([.captains_call[] | select(.key != $k) | has("problem")] | all | not)
-    and ([.captains_call[] | select(.key != $k)] | length) > 0
-  ' >/dev/null || fail "$5: the board did not flag that card alone: $(extract_payload "$1/.lavish/bearings-board.html" | jq -c '[.captains_call[] | {key, problem}]')"
+    ([.captains_call[] | select(.key == $k)] == [])
+    and ([.captains_call[] | has("problem")] | any | not)
+    and ([.cards_to_fix[] | select(.key == $k) | .problem | strings | startswith($f)] == [true])
+    and ([.cards_to_fix[] | select(.key == $k) | .task | strings | length > 0] == [true])
+    and ([.cards_to_fix[] | select(.key != $k)] == [])
+    and (.captains_call | length) > 0
+  ' >/dev/null || fail "$5: the board did not hold back that card alone: $(extract_payload "$1/.lavish/bearings-board.html" | jq -c '{call: [.captains_call[] | {key, problem}], fix: .cards_to_fix}')"
+  awk -F '\t' -v k="$3" -v f="missing $4" '$2 == k && index($3, f) == 1 { n++ } END { exit !(n == 1 && NR == 1) }' \
+    "$1/state/board-cards-to-fix" \
+    || fail "$5: the home's cards-to-fix record does not name that card alone: $(cat "$1/state/board-cards-to-fix" 2>&1)"
 }
 
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest() {
@@ -1204,13 +1212,17 @@ test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest() {
     sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice options \
     "a question card with no way to answer it"
 
-  # A flag is the build's own: a payload that authors one has it cleared.
+  # A flag is the build's own: a payload that authors one, or an authored fix
+  # list, has it cleared, and a board with no card to fix leaves no record.
   write_valid_payload "$data"
-  jq '.captains_call[0].problem = "authored"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq '.captains_call[0].problem = "authored" | .cards_to_fix = [{"key":"x","task":"x","problem":"authored"}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null 2>&1 || fail "a payload authoring a flag on a sound card was refused"
-  extract_payload "$home/.lavish/bearings-board.html" | jq -e '[.captains_call[] | has("problem")] | any | not' >/dev/null \
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '([.captains_call[] | has("problem")] | any | not) and (.captains_call | length) == 2 and (has("cards_to_fix") | not)' >/dev/null \
     || fail "an authored flag on a card that states its decision reached the board"
-  pass "build flags a Captain's Call card with no explicit question or no way to answer it, naming it, and builds every other card"
+  assert_absent "$home/state/board-cards-to-fix" "a board with no card to fix left a cards-to-fix record"
+  pass "build holds back a Captain's Call card with no explicit question or no way to answer it, naming it, and builds every other card"
 }
 
 test_build_accepts_explicit_decisions_and_in_person_actions() {
@@ -1268,9 +1280,10 @@ test_build_flags_a_card_without_recorded_choices_or_a_link() {
   assert_contains "$out" "undecided-card: nothing-to-click: missing link (no link: re-hold with --link <url|page:id> or --no-link)" \
     "the no-link refusal did not say what to add: $out"
   extract_payload "$home/.lavish/bearings-board.html" | jq -e '
-    ([.captains_call[] | select(.key == "guessed-choices" or .key == "nothing-to-click") | .problem | strings] | length) == 2
+    ([.cards_to_fix[] | select(.key == "guessed-choices" or .key == "nothing-to-click") | .problem | strings] | length) == 2
+    and ([.captains_call[] | select(.key == "guessed-choices" or .key == "nothing-to-click")] == [])
     and ([.captains_call[] | select(.key == "merge.sample-task") | has("problem")] == [false])
-  ' >/dev/null || fail "the board did not flag exactly the two cards: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '[.captains_call[] | {key, problem}]')"
+  ' >/dev/null || fail "the board did not hold back exactly the two cards: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '{call: [.captains_call[] | {key, problem}], fix: .cards_to_fix}')"
 
   write_valid_payload "$data"
   jq '.captains_call += [
@@ -1287,7 +1300,7 @@ test_build_flags_a_card_without_recorded_choices_or_a_link() {
   extract_payload "$home/.lavish/bearings-board.html" \
     | jq -e '[.captains_call[].key] | index("name-it") != null and index("worker-asks") != null' >/dev/null \
     || fail "an opted-out or generator card did not reach the board"
-  pass "build flags a card with no recorded choices or no link by what to add, and passes the opt-outs and generator cards"
+  pass "build holds back a card with no recorded choices or no link by what to add, and passes the opt-outs and generator cards"
 }
 
 # A live page about a task links that task's card in place, whether its record
