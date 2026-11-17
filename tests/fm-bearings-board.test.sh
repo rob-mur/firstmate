@@ -567,6 +567,81 @@ test_build_refuses_a_template_that_does_not_load_the_data() {
   pass "build refuses a template that does not load the board data file exactly once"
 }
 
+# A home that carries its own Firstmate code has its board installed by that
+# code alone. A build from another code root, such as a secondmate on an older
+# release, must not install its own template there: Lavish reloads the open
+# board whenever the page file changes, and an older template can lack
+# features the captain is using.
+give_home_own_code() {  # <home> [<marker>]
+  cp -R "$ROOT/bin" "$1/bin"
+  mkdir -p "$1/.agents/skills"
+  cp -R "$ROOT/.agents/skills/bearings" "$1/.agents/skills/bearings"
+  [ -n "${2-}" ] || return 0
+  awk -v mark="$2" '{ print } $0 == "<body>" { print "<!-- " mark " -->" }' \
+    "$ROOT/.agents/skills/bearings/assets/board-template.html" > "$1/template.tmp"
+  mv "$1/template.tmp" "$1/.agents/skills/bearings/assets/board-template.html"
+}
+
+test_build_refuses_another_code_roots_template_in_a_home_with_its_own_code() {
+  local home data board rc out
+  home=$(make_home stale-root)
+  give_home_own_code "$home" "this home's own board code"
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  board="$home/.lavish/bearings-board.html"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_FAKE_STATE="$home/lavish-state" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    FM_BEARINGS_BOARD_REFRESH=true "$home/bin/fm-bearings-board.sh" build "$data" >/dev/null \
+    || fail "the home's own code did not build its board"
+  grep -q "this home's own board code" "$board" || fail "the fixture board does not carry its home's own markup"
+  cp "$board" "$home/page-before.html"
+  cp "${board%.html}.app.js" "$home/app-before.js"
+  cp "${board%.html}.data.js" "$home/data-before.js"
+  jq '.generated = "2026-08-19T07:00Z"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e
+  out=$(run_board "$home" build "$data" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a build from another code root installed its template in a home with its own code"
+  assert_contains "$out" "$ROOT" "the refusal did not name the building code root: $out"
+  assert_contains "$out" "$home" "the refusal did not name the home: $out"
+  cmp -s "$home/page-before.html" "$board" || fail "a refused build rewrote the board page, which reloads it"
+  cmp -s "$home/app-before.js" "${board%.html}.app.js" || fail "a refused build replaced the board code"
+  cmp -s "$home/data-before.js" "${board%.html}.data.js" || fail "a refused build replaced the board data"
+  grep -F "$ROOT" "$home/state/.board-refresh.log" 2>/dev/null | grep -qF "$home" \
+    || fail "the refusal was not logged naming both roots: $(cat "$home/state/.board-refresh.log" 2>/dev/null)"
+  [ -z "$(find "$home/.lavish" -name '.board*')" ] || fail "a refused build left staging files beside the board"
+  pass "a build from another code root is refused in a home with its own different template, and the page is untouched"
+}
+
+test_build_from_another_code_root_installs_a_matching_template() {
+  local home data out
+  home=$(make_home same-template)
+  give_home_own_code "$home"
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "a build whose template matches the home's own was refused: $out"
+  cmp -s <(sed '/^<script src="bearings-board.app.js"><\/script>$/d' "$home/.lavish/bearings-board.html") \
+    <(awk '$0 == "<script>" { skip = 1; next } $0 == "</script>" { skip = 0; next } !skip' \
+      "$home/.agents/skills/bearings/assets/board-template.html") \
+    || fail "the matching template was not installed as the board page"
+  pass "a build from another code root installs when its template matches the home's own"
+}
+
+test_build_installs_into_a_home_without_its_own_code() {
+  local home data out
+  home=$(make_home data-only)
+  mkdir -p "$home/.agents/skills/bearings/assets"
+  printf '<html>an unrelated template</html>\n' > "$home/.agents/skills/bearings/assets/board-template.html"
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "a home with no code of its own refused the build: $out"
+  [ -f "$home/.lavish/bearings-board.html" ] || fail "a home with no code of its own got no board"
+  pass "a home with no code of its own takes the build from the code root that serves it"
+}
+
 test_charted_kind_is_optional_and_accepts_both_values() {
   local home data
   home=$(make_home chartedkind)
@@ -1261,6 +1336,9 @@ test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
 test_rebuild_replaces_the_data_file_whole
 test_build_refuses_a_template_that_does_not_load_the_data
+test_build_refuses_another_code_roots_template_in_a_home_with_its_own_code
+test_build_from_another_code_root_installs_a_matching_template
+test_build_installs_into_a_home_without_its_own_code
 test_build_reopens_a_session_the_captain_ended
 test_rebuild_of_a_live_session_never_opens_another_tab
 test_build_reopens_when_an_opened_session_ends_before_listing
