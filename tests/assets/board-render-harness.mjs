@@ -79,6 +79,7 @@ const byId = new Map();
 
 globalThis.document = {
   createElement: (tag) => new Node(tag),
+  addEventListener() {},
   // Lazily mint any element the page asks for: the shim tracks whatever ids
   // the shipped template actually uses instead of pinning a fixed list.
   getElementById: (id) => {

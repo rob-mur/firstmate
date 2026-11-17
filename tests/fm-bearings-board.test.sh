@@ -342,8 +342,10 @@ test_build_injects_binds_then_arms() {
   assert_present "$board" "build reported success without a board"
 
   # Round-trip: apart from the reconcile choice the build adds to every
-  # decision card, the empty list of pages shown in place, and the stamp of
-  # the board code that built it, the payload extracted from the built page is the same JSON
+  # decision card, the empty list of pages shown in place, the stamp of the
+  # board code that built it, and the stamp of the data itself (which the
+  # stamp file beside the board names too), the payload extracted from the
+  # built page is the same JSON
   # document, and the escaped </script> string can no longer terminate the
   # data block.
   extract_payload "$board" | jq -S . > "$home/extracted.json" \
@@ -351,8 +353,12 @@ test_build_injects_binds_then_arms() {
   jq -S '.captains_call = [.captains_call[]
       | .options = [.options[] | select(.value != "reconcile")]]
       | if .pages == [] then del(.pages) else . end
-      | if (.board_code | type) == "string" and .board_code != "" then del(.board_code) else . end' \
+      | if (.board_code | type) == "string" and .board_code != "" then del(.board_code) else . end
+      | if (.data_stamp | type) == "string" and .data_stamp != "" then del(.data_stamp) else . end' \
     "$home/extracted.json" > "$home/stripped.json"
+  [ "$(cat "$home/.lavish/bearings-board.stamp.js" 2>/dev/null)" = \
+    "window.FM_BEARINGS_BOARD_STAMP = \"$(jq -r .data_stamp "$home/extracted.json")\";" ] \
+    || fail "the stamp file does not name the stamp of the data it was published with"
   jq -S '.captains_call = [.captains_call[]
       | .options = [.options[] | select(.value != "reconcile")]]' \
     "$data" > "$home/expected.json"

@@ -16,6 +16,11 @@
 //   run             run the shell command in FM_HARNESS_RUN (a rebuild while
 //                   the page stays open)
 //   poll            let the page's live-update poll run once
+//   hide            the tab is hidden: document.hidden turns true and the
+//                   page hears visibilitychange
+//   show            the tab is shown again
+//   mark            start counting the elements the page builds (scripts
+//                   aside) from here, reported as built
 //   submit:<key>    submit that card's form
 //   pick:<id>       tick a charted row's dispatch pick
 //   dispatch        press the dispatch button
@@ -68,14 +73,18 @@
 // page loads it, so a rebuild between polls is seen by the next poll.
 // Prints { cards, storage, calls, queue, anchors, ids, order, stack, reloads,
 //   opens, pageView, snaps, framePosts, keys, errors, boot, polls, rows, sends,
-//   pageUnsent }; each card
+//   pageUnsent, loads, built, provenance }; each card
 //   also carries error {shown, text} from the box beside its answer, errors
 //   has the priority's and the page view's boxes, pageUnsent is the page
 //   view's notice of an answer queued but not sent ({shown, text, send}, send
 //   being whether its send button shows), pageTabs maps each page tab's title
 //   to whether it carries the unsent mark, boot is the load problem
 //   the page shows while it waits for its data ({shown, text}), and polls
-//   counts the page's live intervals; opens lists every url the
+//   counts the page's live intervals; loads counts the page's reads of its
+//   data file and of the stamp file beside it ({data, stamp}), built the
+//   elements the page built since mark, and provenance the shown build line;
+//   each card also carries node, the serial of its card element, so a card
+//   rebuilt between runs shows a new one; opens lists every url the
 //   page asked to open elsewhere, framePosts every message the board sent
 //   each page frame, keyed by page id, and keys every key press the board
 //   dispatched to itself, and rows every waiting row that can
@@ -159,6 +168,11 @@ const byId = new Map();
 // Any other selector the page asks for is one stable element per selector.
 const bySel = new Map();
 const dataPath = boardPath.replace(/\.html$/, ".data.js");
+const stampPath = boardPath.replace(/\.html$/, ".stamp.js");
+const loads = { data: 0, stamp: 0 };
+let built = 0;
+let marked = false;
+const visibilityListeners = [];
 // A built page loads its code from bearings-board.app.js beside it; the bare
 // template carries the same code inline.
 const boardCode = (path, page) => page.includes("<script>")
@@ -184,7 +198,14 @@ const bodyAppend = body.appendChild.bind(body);
 body.appendChild = (n) => {
   bodyAppend(n);
   if (n.tagName === "script" && n.src) {
-    if (n.src.split("?")[0] === "bearings-board.data.js" && existsSync(dataPath)) { loadData(); n.onload?.(); }
+    const file = n.src.split("?")[0];
+    if (file === "bearings-board.data.js") loads.data++;
+    if (file === "bearings-board.stamp.js") loads.stamp++;
+    if (file === "bearings-board.data.js" && existsSync(dataPath)) { loadData(); n.onload?.(); }
+    else if (file === "bearings-board.stamp.js" && existsSync(stampPath)) {
+      try { new Function(readFileSync(stampPath, "utf8"))(); } catch { /* a broken script sets nothing */ }
+      n.onload?.();
+    }
     else n.onerror?.();
   }
   return n;
@@ -208,10 +229,13 @@ const anchorFor = (el) => {
 globalThis.document = {
   body,
   activeElement: body,
+  hidden: false,
+  addEventListener: (t, fn) => { if (t === "visibilitychange") visibilityListeners.push(fn); },
   write: () => reloads.push("document.write"),
   open: () => reloads.push("document.open"),
   createElement: (tag) => {
     const n = new Node(tag);
+    if (marked && tag !== "script") built++;
     if (tag === "iframe") {
       n.contentWindow = { postMessage: (data) => (framePosts[pageOf(n)] ||= []).push(data) };
       iframes.push(n);
@@ -383,6 +407,13 @@ for (const act of actionList.split(",").filter(Boolean)) {
     document.activeElement = document.body;
   } else if (name === "run") {
     execSync(process.env.FM_HARNESS_RUN, { stdio: ["ignore", "ignore", "inherit"] });
+  } else if (name === "hide" || name === "show") {
+    document.hidden = name === "hide";
+    for (const fn of visibilityListeners) fn();
+    flush();
+  } else if (name === "mark") {
+    marked = true;
+    built = 0;
   } else if (name === "poll") {
     for (const t of [...intervals]) if (intervals.includes(t)) t.fn();
     flush();
@@ -462,6 +493,7 @@ const cards = forms().map((f) => ({
   state: f.querySelectorAll("input").find((i) => i.name === "lavish-state")?.value ?? "",
   title: f.parentNode.parentNode.querySelector(".bb-decision__title")?.textContent ?? "",
   hidden: f.parentNode.parentNode.hidden,
+  node: f.parentNode.parentNode.serial,
   error: errorOf(f.querySelector(".bb-submit-error")),
 }));
 process.stdout.write(JSON.stringify({
@@ -479,6 +511,9 @@ process.stdout.write(JSON.stringify({
   framePosts,
   keys,
   polls: intervals.length,
+  loads,
+  built,
+  provenance: get("bb-provenance").textContent,
   dropped: dropped.length,
   errors: { priority: errorOf(get("bb-priority-error")), page: errorOf(get("bb-page-error")) },
   sends,
