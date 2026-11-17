@@ -1049,9 +1049,70 @@ test_each_card_has_a_stable_id_so_its_queued_badge_stays_on_it() {
   pass "every card form has its own stable id, so a queued badge stays on its card after a rebuild"
 }
 
+# A newly stored ranking reaches a page that is already open, and the page never
+# sends back an order the captain did not make. The page here last saw the
+# cards unranked; firstmate then stored k3 and k2 first and left k1 unranked,
+# so k1 is dealt last and opening a card sends no priority.
+test_a_newly_stored_ranking_reaches_an_open_page_and_is_never_echoed_back() {
+  local home out run
+  home=$(make_home order-adopt-live)
+  build_call_board "$home" '["k1","k2","k3"]'
+  run=$(rebuild_command "$home" '.captains_call |= [.[2], .[1], .[0]]')
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "load,run,poll")
+  printf '%s' "$out" | jq -e '.order.list == ["k3","k2","k1"] and .polls == 1' >/dev/null \
+    || fail "an open page kept its old order instead of the newly stored ranking: $out"
+  out=$(run_board "$home" "load,open:k2,send")
+  printf '%s' "$out" | jq -e "($priority_calls | length) == 0 and (.cards | map(.key)) == [\"k3\",\"k2\",\"k1\"]" >/dev/null \
+    || fail "opening a card sent a priority the captain did not make: $out"
+
+  home=$(make_home order-adopt-reload)
+  build_call_board "$home" '["k1","k2","k3"]'
+  run_board "$home" "go" >/dev/null
+  build_call_board "$home" '["k3","k2","k1"]'
+  out=$(run_board "$home" "load,go,open:k1,send")
+  printf '%s' "$out" | jq -e "
+    .order.list == [\"k3\",\"k2\",\"k1\"] and (.cards | map(.key)) == [\"k3\",\"k2\",\"k1\"]
+      and ($priority_calls | length) == 0
+  " >/dev/null || fail "a reload dealt the order the browser kept instead of the stored ranking, or echoed it: $out"
+
+  home=$(make_home order-adopt-nostorage)
+  build_call_board "$home" '["k1","k2","k3"]'
+  NO_STORAGE=1 run_board "$home" "go,load" >/dev/null
+  build_call_board "$home" '["k3","k2","k1"]'
+  out=$(NO_STORAGE=1 run_board "$home" "load,open:k1,send")
+  printf '%s' "$out" | jq -e "
+    .order.list == [\"k3\",\"k2\",\"k1\"] and ($priority_calls | length) == 0
+  " >/dev/null || fail "a sandboxed reload restored the old order over the stored ranking, or echoed it: $out"
+  pass "a newly stored ranking reaches an open or reloaded page, and the page never echoes an order back"
+}
+
+# The captain's own order stays on screen until firstmate records a ranking:
+# then the recorded ranking wins, even when it differs from what was sent.
+test_a_ranking_recorded_after_the_captains_send_replaces_the_sent_order() {
+  local home out run
+  home=$(make_home order-adopt-after-send)
+  build_call_board "$home" '["k1","k2","k3"]'
+  out=$(run_board "$home" "load,down:k1,go,send")
+  printf '%s' "$out" | jq -e "$priority_calls == [[\"k2\",\"k1\",\"k3\"]]" >/dev/null \
+    || fail "the captain's reorder was not sent: $out"
+  build_call_board "$home" '["k1","k2","k3","k4"]'
+  out=$(run_board "$home" "load,open:k3,send")
+  printf '%s' "$out" | jq -e "
+    .order.list == [\"k2\",\"k1\",\"k3\",\"k4\"] and ($priority_calls | length) == 0
+  " >/dev/null || fail "the captain's sent order was lost before any ranking was recorded, or sent again: $out"
+  run=$(rebuild_command "$home" '.captains_call |= [.[3], .[2], .[0], .[1]]')
+  out=$(FM_HARNESS_RUN="$run" run_board "$home" "load,run,poll,open:k2,send")
+  printf '%s' "$out" | jq -e "
+    .order.list == [\"k4\",\"k3\",\"k1\",\"k2\"] and ($priority_calls | length) == 0
+  " >/dev/null || fail "a ranking recorded after the captain's send did not replace the sent order, or was echoed: $out"
+  pass "the captain's sent order holds until a ranking is recorded, and the recorded ranking then wins"
+}
+
 test_a_refresh_merges_the_restored_order_with_new_and_departed_decisions
 test_the_priority_is_sent_only_when_the_order_changes
 test_a_queued_priority_is_queued_again_with_the_order_after_a_rebuild
+test_a_newly_stored_ranking_reaches_an_open_page_and_is_never_echoed_back
+test_a_ranking_recorded_after_the_captains_send_replaces_the_sent_order
 test_each_card_has_a_stable_id_so_its_queued_badge_stays_on_it
 
 # A data file that did not load (missing, or cut short by a fetch that raced a

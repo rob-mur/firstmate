@@ -501,6 +501,46 @@ test_the_captains_priority_orders_cards_and_tasks_and_is_recorded_durably() {
   pass "the stored priority orders the payload's cards and tasks and records the board's ranking"
 }
 
+# A board priority names only the decisions on the board and the tasks under
+# way. Recording one must keep every other stored rank - a queued task, or the
+# decisions themselves when a send carries only tasks - in its own place.
+test_a_partial_board_priority_keeps_the_ranks_it_does_not_name() {
+  local data="$TMP_ROOT/prio-merge-data" ctx="$TMP_ROOT/prio-merge-ctx.json" PRIO="$ROOT/bin/fm-board-priority.sh"
+  mkdir -p "$data"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set d1 queued-a d2 t1 d3 queued-b || fail "set refused a valid ranking"
+  printf '{"schema":"fm-bearings-priority.v1","keys":["d3","d1","d2","t1"],"order":["d3","d1","d2"]}' > "$ctx"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set --from-ctx "$ctx" || fail "the board's priority context was refused"
+  assert_equals "d3,queued-a,d1,t1,d2,queued-b" "$(FM_DATA_OVERRIDE="$data" "$PRIO" show | paste -sd, -)" \
+    "a board priority dropped or moved the queued tasks it does not name"
+  printf '{"schema":"fm-bearings-priority.v1","keys":["t1"],"order":[]}' > "$ctx"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set --from-ctx "$ctx" || fail "a tasks-only priority context was refused"
+  assert_equals "d3,queued-a,d1,t1,d2,queued-b" "$(FM_DATA_OVERRIDE="$data" "$PRIO" show | paste -sd, -)" \
+    "a priority carrying only tasks under way dropped the stored decision ranking"
+  printf '{"schema":"fm-bearings-priority.v1","keys":["new-call","d2","d3","t1"],"order":["new-call","d2","d3"]}' > "$ctx"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set --from-ctx "$ctx" || fail "a priority with a new decision was refused"
+  assert_equals "new-call,d2,queued-a,d1,t1,d3,queued-b" "$(FM_DATA_OVERRIDE="$data" "$PRIO" show | paste -sd, -)" \
+    "a new decision did not take its place in the board's order, or a stored rank was lost"
+  pass "a board priority keeps every stored rank it does not name in its place"
+}
+
+# fm-board-priority.sh promises a decision the ranking does not name sorts after
+# every ranked one, so a newly raised card is never dealt first.
+test_an_unranked_decision_card_is_dealt_after_every_ranked_card() {
+  local snap="$TMP_ROOT/prio-unranked.json" data="$TMP_ROOT/prio-unranked-data" out PRIO="$ROOT/bin/fm-board-priority.sh"
+  write_snapshot "$TMP_ROOT/prio-unranked-base.json"
+  jq '.decisions_open = [{id: "fresh-call", key: "fresh-call", verb: "captain-hold", title: "Fresh call",
+        reason: "Repad the GPU nodes?", owner: "(main)"}] + .decisions_open
+      | .decisions_open += [{id: "q3", key: "q3", verb: "captain-hold", title: "Still open",
+        reason: "Choose the public name?", owner: "(main)"}]' \
+    "$TMP_ROOT/prio-unranked-base.json" > "$snap"
+  mkdir -p "$data"
+  FM_DATA_OVERRIDE="$data" "$PRIO" set q3 t1 old-row alpha-fix >/dev/null || fail "set failed"
+  out=$(FM_DATA_OVERRIDE="$data" "$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "q3,old-row,alpha-fix,fresh-call" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$out")" \
+    "an unranked decision was not dealt after every ranked one"
+  pass "an unranked decision card is dealt after every ranked card"
+}
+
 test_the_priority_digest_is_bounded_and_silent_when_unset() {
   local data="$TMP_ROOT/digest-data" out ids PRIO="$ROOT/bin/fm-board-priority.sh"
   mkdir -p "$data"
@@ -1433,6 +1473,8 @@ fm_test_run \
   test_the_body_drops_the_words_that_introduced_its_options \
   test_a_handed_decision_waits_with_who_has_it_instead_of_a_card \
   test_a_priority_never_brings_back_a_closed_or_handed_decision \
+  test_a_partial_board_priority_keeps_the_ranks_it_does_not_name \
+  test_an_unranked_decision_card_is_dealt_after_every_ranked_card \
   test_a_review_card_the_captain_approved_leaves_and_any_other_stays \
   test_a_freeze_or_a_hold_that_says_it_is_no_decision_waits_instead_of_asking \
   test_a_card_carries_the_pr_link_its_snapshot_row_recorded \

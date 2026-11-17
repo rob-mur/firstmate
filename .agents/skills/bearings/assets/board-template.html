@@ -636,8 +636,6 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     }
     if (state) t.badge.classList.add("is-queued"); else t.badge.classList.remove("is-queued");
     if (state !== "queued" && ownQueued[t.id]) { delete ownQueued[t.id]; ownSave(); }
-    /* a sent priority is what firstmate now records */
-    if (state === "sent" && t.id === "board-priority" && queuedPriority) baselineKeys = queuedPriority.slice();
   }
   /* An answer never vanishes silently. Lavish's queue call returns nothing,
      and its chrome drops a message it does not accept without a word, so an
@@ -829,7 +827,9 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 
   /* Captain's chosen answer order. Stored beside the drafts so it survives a
      rebuild the same way; a copy also rides in a hidden control Lavish restores
-     with the form, for the sandboxed frame that has no storage. */
+     with the form, for the sandboxed frame that has no storage. The payload
+     order is the ranking firstmate recorded, and it wins unless the captain
+     reordered the list on this board (`mine`, below). */
   var ORDER_KEY = "fm-bearings-board.order.v1";
   var itemByKey, callKeySet, rankItems, baselineKeys, underwayIds;
   function indexItems(calls, underway) {
@@ -871,18 +871,41 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     orderKeys = keys;
     return added;
   }
+  /* The captain's own order: null until the captain reorders the list, then
+     { base: the recorded order it departs from, last: the order last sent or
+     null }. A kept order is the captain's only while the recorded order
+     still matches its base, or while its priority waits in the queue; once
+     firstmate records another ranking, that ranking replaces it. So an old
+     order kept in the browser is never dealt over, or sent back as, a newer
+     recorded one. */
+  var mine = null;
+  function sameCommon(a, b) {
+    return sameKeys(a.filter(function (k) { return b.indexOf(k) >= 0; }),
+      b.filter(function (k) { return a.indexOf(k) >= 0; }));
+  }
+  function keptMine(m) {
+    if (!m || typeof m !== "object" || !Array.isArray(m.base)) return null;
+    if (!priorityQueued() && !sameCommon(m.base, baselineKeys)) return null;
+    return { base: baselineKeys.slice(), last: Array.isArray(m.last) ? m.last : null };
+  }
+  function countNew(prior) {
+    return orderKeys.filter(function (k) { return prior.indexOf(k) < 0; }).length;
+  }
   var storedOrder = jsonLoad(ORDER_KEY, false);
-  var newKeys = mergeOrder(Array.isArray(storedOrder.keys) ? storedOrder.keys : []);
+  var storedKeys = Array.isArray(storedOrder.keys) ? storedOrder.keys : [];
+  mine = keptMine(storedOrder.mine);
+  mergeOrder(mine ? storedKeys : []);
   /* confirmed once the captain has started answering; a card that arrived
      since then, or a board with nothing to reorder, is handled below */
-  var orderConfirmed = (storedOrder.confirmed === true && newKeys === 0) || orderKeys.length < 2;
-  function orderSave() { jsonStore(ORDER_KEY, { keys: orderKeys, confirmed: orderConfirmed }); }
+  var orderConfirmed = (storedOrder.confirmed === true && countNew(storedKeys) === 0) || orderKeys.length < 2;
+  function orderState() { return { keys: orderKeys, confirmed: orderConfirmed, mine: mine }; }
+  function orderSave() { jsonStore(ORDER_KEY, orderState()); }
   orderSave();
   var orderScope = el("div");
   orderScope.setAttribute("data-lavish-question", "board-order");
   var orderHidden = document.createElement("input");
   orderHidden.type = "hidden"; orderHidden.name = "board-order";
-  orderHidden.value = JSON.stringify({ keys: orderKeys, confirmed: orderConfirmed });
+  orderHidden.value = JSON.stringify(orderState());
   orderScope.appendChild(orderHidden);
   document.getElementById("bb-order").appendChild(orderScope);
 
@@ -1142,7 +1165,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   var dragKey = null;
   function orderPersist() {
     orderSave();
-    var v = JSON.stringify({ keys: orderKeys, confirmed: orderConfirmed });
+    var v = JSON.stringify(orderState());
     if (orderHidden.value !== v) {
       orderHidden.value = v;
       try { orderHidden.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) { /* no events */ }
@@ -1161,10 +1184,15 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     arrangeCards();
     if (cards.length) showCard(0);
   }
+  /* the captain is reordering: from here on the order on screen is theirs */
+  function claimOrder() {
+    if (!mine) mine = { base: baselineKeys.slice(), last: null };
+  }
   function moveKey(key, to) {
     var from = orderKeys.indexOf(key);
     to = Math.max(0, Math.min(orderKeys.length - 1, to));
     if (from < 0 || from === to) return;
+    claimOrder();
     orderKeys.splice(from, 1);
     orderKeys.splice(to, 0, key);
     orderPersist();
@@ -1181,6 +1209,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   var walk = { slot: -1, passed: 0, order: "" };
   function shunt(slot) {
     var passed = walk.slot === slot && walk.order === orderKeys.join("\n") ? walk.passed : 0;
+    claimOrder();
     var rest = orderKeys.splice(slot);
     rest.splice(passed, 0, rest.shift());
     passed += 1;
@@ -1256,21 +1285,25 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   attachSubmitError(priorityTarget, document.getElementById("bb-priority-error"));
   priorityTarget.resend = function () { sendPriority(); };
   var reorderTimer = null;
-  var queuedPriority = null;
   function sameKeys(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
-  function priorityQueued() { return priorityTarget.hidden.value === "queued"; }
+  function priorityQueued() { return !!priorityTarget && priorityTarget.hidden.value === "queued"; }
   function sendPriority() {
     if (reorderTimer !== null) { clearTimeout(reorderTimer); reorderTimer = null; }
     var ids = orderKeys.concat(underwayIds);
-    queuedPriority = orderKeys.slice();
+    claimOrder();
+    mine.last = orderKeys.slice();
+    orderPersist();
     queueAnswer(priorityTarget, "Board priority, highest first: " + ids.join(", "),
       { tag: "priority", text: "board priority: " + ids.join(", "),
         data: { schema: "fm-bearings-priority.v1", keys: ids, order: orderKeys.slice() } });
   }
-  /* Send only a change: the recorded order is never re-submitted, and a
-     queued prompt is replaced so it always matches the list on screen. */
+  /* Send only an order the captain made, and only a change to it: neither
+     the recorded order nor the order last sent is submitted again, a card
+     that merely arrived since is no change, and a queued prompt is replaced
+     so it always matches the list on screen. */
   function sendPriorityIfChanged() {
-    if (priorityQueued() || !sameKeys(orderKeys, baselineKeys)) sendPriority();
+    if (!mine) return;
+    if (priorityQueued() || !sameCommon(orderKeys, mine.last || baselineKeys)) sendPriority();
   }
   function scheduleReorderSend() {
     if (reorderTimer !== null) clearTimeout(reorderTimer);
@@ -1303,15 +1336,17 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   }
   reorderBtn.addEventListener("click", backToList);
   /* Adopt an order Lavish restored with the form when storage held none.
-     Surviving keys keep the restored order and new keys follow in payload
-     order, so a changed item set no longer resets the captain's order. */
+     A restored order the captain made keeps its surviving keys in order with
+     new keys after them in payload order, so a changed item set no longer
+     resets it; any other restored order yields to the recorded one. */
   function adoptRestoredOrder() {
     var v;
     try { v = JSON.parse(orderHidden.value); } catch (e) { return; }
     if (!v || !Array.isArray(v.keys)) return;
     var prior = orderKeys;
-    var added = mergeOrder(v.keys);
-    var confirm = v.confirmed === true && added === 0 && !orderConfirmed;
+    var kept = keptMine(v.mine);
+    if (kept) { mine = kept; mergeOrder(v.keys); }
+    var confirm = v.confirmed === true && countNew(v.keys) === 0 && !orderConfirmed;
     if (sameKeys(prior, orderKeys) && !confirm) return;
     if (confirm) orderConfirmed = true;
     orderPersist();
@@ -1387,7 +1422,9 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       queueAnswer(t, rec.prompt, rec.opts, rec.ids);
     });
     /* a priority queued before a rebuild is queued again with the merged
-       order, so it never lists departed items */
+       order, so it never lists departed items; one queued by a page that
+       kept no order of the captain's is replaced with the recorded order, so
+       an older order it may carry is never sent */
     if (first && priorityQueued()) sendPriority();
     /* drop kept answers for cards that left the board */
     var pruned = false;
@@ -1892,7 +1929,9 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       carryCard(old, cardByKey[c.key]);
       deck.replaceChild(card, old.card);
     });
-    mergeOrder(orderKeys);
+    /* a newly recorded ranking replaces an order the captain has not made */
+    mine = keptMine(mine);
+    mergeOrder(mine ? orderKeys : []);
     arrangeCards();
     syncEmpty();
     if (cards.length) {
