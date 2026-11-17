@@ -535,6 +535,41 @@ test_reconcile_renders_apart_from_the_full_options() {
   pass "a card shows every option in full and reconcile in its own group after them"
 }
 
+# A worker's keyed decision card always has a labelled answer box, under the
+# decision's own options and above the reconcile choice, so the captain can
+# answer the worker in words. The first card comes from the BCR grill worker's
+# real line through the payload generator; the second is a worker decision
+# answered on a page, which carries no choices and no free-text flag.
+test_a_worker_decision_card_always_has_an_answer_box_above_reconcile() {
+  local home snap p calls out line
+  home=$(make_home worker-answer-box)
+  line='needs-decision [key=grill-bcr-r1] [at=1794917099]: Q1 what does BCR ship on 10 Dec? rec A = dry-run beta, no writes anywhere, on in prod behind Beta (~6 tickets: flag+upload/parse [APP-5860 rewritten, dummy page dropped], match+notice dry run, outcome CSV, money rows, policy prompt, link prompt); B = A + Confirm in dev/stg (one-way doors, stretch); C = skeleton only. Facts: APP-5860 not built, all 12 Submitted/untagged, no release::2026-12-10 tag, prototype predates spec by 1 day. Assumed A1-A9 from priors. Full round: /home/rob/repos/firstmate/data/bcr-dec10-grill/round-1.md'
+  snap="$home/snapshot.json"
+  jq -n --arg r "${line#*: }" '{schema:"fm-bearings.v1", home:"/fixture/home", generated:"2026-11-06T07:34:00Z",
+    prs:"unchecked", in_flight:[], charted:[], landed:[],
+    decisions_open:[{id:"bcr-dec10-grill", key:"status.bcr-dec10-grill.grill-bcr-r1", verb:"needs-decision", source:"status",
+      task:"bcr-dec10-grill", decision_key:"grill-bcr-r1", owner:"(main)", title:"bcr-dec10-grill", reason_full:$r}]}' > "$snap"
+  p=$(FM_HOME="$home" "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot "$snap") || fail "the payload generator failed"
+  calls=$(jq -c '.captains_call + [{key:"status.pruner.tiers", type:"decision", title:"pruner: grilling round ready", repo:null,
+    question:"Which test tiers run?", options:[], allow_freeform:false, from_status:true,
+    links:[{url:"https://example.test/o/r/issues/12", label:"Issue 12"}]}]' <<<"$p") || fail "the cards could not be built"
+  out=$(render_board "$home" '[]' '[]' 0 0 "$calls" 2>"$home/build.err")
+  ! grep -q 'undecided-card' "$home/build.err" || fail "the build flagged a worker decision card: $(cat "$home/build.err")"
+  printf '%s' "$out" | jq -e '
+    (.call[] | select(.key == "status.bcr-dec10-grill.grill-bcr-r1")) as $c
+    | .error == ""
+      and ($c.options | map(.value)) == ["option-a","option-b","option-c","reconcile"]
+      and ($c.options | map(.aside)) == [false,false,false,true]
+      and $c.answer_box.tag == "textarea" and $c.answer_box.name == "note"
+      and $c.answer_box.label == "Or answer in your own words" and $c.answer_box.before_aside
+  ' >/dev/null || fail "the grill card did not show its A, B and C buttons with an answer box above reconcile: $out"
+  printf '%s' "$out" | jq -e '
+    (.call[] | select(.key == "status.pruner.tiers")) as $c
+    | $c.answer_box.tag == "textarea" and $c.answer_box.label == "Your answer" and $c.answer_box.before_aside
+  ' >/dev/null || fail "a worker decision card without a free-text flag had no answer box: $out"
+  pass "a worker decision card always has an answer box under its options and above reconcile"
+}
+
 # Clicking a card's page button shows that page inside the board's own tab.
 test_a_card_page_button_shows_the_page_in_place() {
   local home page out
@@ -656,6 +691,7 @@ test_an_unregistered_page_link_says_it_is_not_in_the_board
 test_an_ended_session_link_opens_the_page_that_replaces_it
 test_a_page_backed_decision_is_answered_on_the_board_when_its_page_is_not_there
 test_reconcile_renders_apart_from_the_full_options
+test_a_worker_decision_card_always_has_an_answer_box_above_reconcile
 test_a_card_page_button_shows_the_page_in_place
 test_full_screen_keeps_the_same_page_frame
 test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent
