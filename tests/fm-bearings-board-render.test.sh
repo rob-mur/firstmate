@@ -583,7 +583,9 @@ test_a_numbered_option_card_renders_its_buttons() {
     prs:"unchecked", in_flight:[], charted:[], landed:[],
     decisions_open:[{id:"app-5750-ralph", key:"status.app-5750-ralph.app-5750-mr883-undraft", verb:"needs-decision", source:"status",
       task:"app-5750-ralph", decision_key:"app-5750-mr883-undraft", owner:"(main)", title:"app-5750-ralph", reason_full:$r}]}' > "$snap"
-  p=$(FM_HOME="$home" "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot "$snap") || fail "the payload generator failed"
+  # The line links a real MR; the live forge check is off so its later merge
+  # does not drop the card.
+  p=$(FM_HOME="$home" FM_BEARINGS_BOARD_PR_CHECK=0 "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot "$snap") || fail "the payload generator failed"
   out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -c .captains_call <<<"$p")" 2>"$home/build.err")
   ! grep -q 'undecided-card' "$home/build.err" || fail "the build flagged the numbered option card: $(cat "$home/build.err")"
   printf '%s' "$out" | jq -e '
