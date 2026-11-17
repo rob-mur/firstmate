@@ -1191,6 +1191,50 @@ PATH="$ADOPT_BIN:$PATH" FM_HOME="$HNOMETA" \
   || fail "a board was refused for a task that does have an endpoint"
 pass "a worker-owned board is only armed for an owner its feedback can reach"
 
+# --- end-user-aligned regression: a finished task's board stops listening ----
+# Every armed board holds a long poll open on the one shared Lavish server.
+# Once its task has ended, nothing can receive the board's feedback, so
+# reconcile retires that board instead of keeping its listener polling, while
+# a board whose task is still live stays armed.
+HGONE="$TMP_ROOT/hgone"; new_home "$HGONE"
+GONE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-gone-stub")
+GONE_TRIGGER="$TMP_ROOT/lavish-gone-release"
+export GONE_TRIGGER
+cat > "$GONE_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+while [ ! -e "$GONE_TRIGGER" ]; do sleep 0.05; done
+exit 1
+SH
+chmod +x "$GONE_BIN/lavish-axi"
+GONE_ART="$TMP_ROOT/gone-board.html"
+KEPT_ART="$TMP_ROOT/kept-board.html"
+printf '<h1>gone</h1>\n' > "$GONE_ART"
+printf '<h1>kept</h1>\n' > "$KEPT_ART"
+lavish_session "$GONE_ART"
+lavish_session "$KEPT_ART"
+gone_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$GONE_ART")
+kept_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$KEPT_ART")
+fm_test_track_procevent_home "$HGONE"
+new_task_endpoint "$HGONE" worker-20
+new_task_endpoint "$HGONE" worker-21
+PATH="$GONE_BIN:$PATH" FM_HOME="$HGONE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$GONE_ART" --for worker-20 >/dev/null
+PATH="$GONE_BIN:$PATH" FM_HOME="$HGONE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$KEPT_ART" --for worker-21 >/dev/null
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/$gone_id.claim" \
+  || fail "the finished task's board never started listening"
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/$kept_id.claim" \
+  || fail "the live task's board never started listening"
+rm -f -- "$HGONE/state/worker-20.meta"
+PATH="$GONE_BIN:$PATH" pe "$HGONE" reconcile >/dev/null 2>&1 || true
+[ ! -e "$HGONE/state/procevent/$gone_id.source" ] \
+  || fail "a board whose task has ended stayed armed"
+[ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$gone_id.claim" ] \
+  || fail "a board whose task has ended kept its listener polling"
+[ -e "$HGONE/state/procevent/$kept_id.source" ] \
+  || fail "a board whose task is still live was retired"
+touch "$GONE_TRIGGER"
+pass "a board whose task has ended is retired instead of left polling"
 
 # --- end-user-aligned regression: acknowledging a delivered note stops the ring
 # The move into handled/ is the worker's own acknowledgement (the inbox
