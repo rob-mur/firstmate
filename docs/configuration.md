@@ -3455,6 +3455,14 @@ Under the default ordering, this happens after the initial `check` publication.
 - For ordinary sources, explicit `retire` stays the supported and idempotent path afterwards; a task-owned board instead refuses `retire` until its owner concludes the open terminal round with `handled`.
 - For Lavish that verdict covers an ended session, a missing session, and the final feedback of a `Send & End` review, which the published poll marks with `session_ended` before it returns only empty ended sessions.
 
+A listener can also outlive its purpose without capturing anything terminal, such as a decision page whose call was answered elsewhere.
+Every reconcile therefore asks the built-in adapter's `finished <source-id> -- <listener argv>...` command about each ordinary source with no unhandled capture.
+
+- Exit 0 retires the registration through the ordinary `retire --if-matches` path, bound to the registration just read, so a replaced registration survives.
+- A missing command, an error, or any other exit keeps the source armed; a task-owned board is never asked, since its owner's endpoint record decides instead.
+- For Lavish, a firstmate-owned decision page is finished when its saved session has ended, or when every question key it carries was answered on the page in an already-handled capture or names a captain call `bin/fm-captain-hold.sh settled` reports finished.
+  A comment on an option card, a `reconcile` request, the bearings board itself, and a page with no question keys never count, and the page and its session are left untouched: only the listener stops.
+
 **Apply built-in results automatically**
 
 Applying a captured result through code is a built-in adapter seam, and some built-in results carry no judgement at all: they must simply be applied idempotently to this home's own durable state.
