@@ -1117,6 +1117,27 @@ test_annotated_decisions_offer_their_own_full_options_in_captain_terms() {
   pass "annotated decisions offer their own full options in captain terms, and page-backed ones only the page link"
 }
 
+# The body drops a reason's option list because the options are the card's
+# choices, so it also drops the words that only introduced that list.
+test_the_body_drops_the_words_that_introduced_its_options() {
+  local snap="$TMP_ROOT/intro.json" p
+  fresh_homes intro
+  write_snapshot "$TMP_ROOT/intro-base.json"
+  jq '.decisions_open = [
+    {id: "intake-picks", key: "intake-picks", verb: "captain-hold", owner: "(main)", title: "Pick which intake candidates to start",
+     reason: "Start the three ready tickets now? They are APP-1 and APP-2. Options are (a) all three, (b) only some, named in a note, (c) none for now. The other tickets wait for open MRs."},
+    {id: "colon-intro", key: "colon-intro", verb: "captain-hold", owner: "(main)", title: "Pick a rollout",
+     reason: "Roll the fix out today? The canary is green. Options: (1) all hosts, (2) one region first. The pager is quiet."}]' \
+    "$TMP_ROOT/intro-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
+  assert_equals "All three|Only some, named in a note|None for now" "$(card intake-picks | jq -r '[.options[].label] | join("|")')" "the lettered options are the choices"
+  assert_equals "They are APP-1 and APP-2. The other tickets wait for open MRs." "$(card intake-picks | jq -r .about)" "the body kept the words that introduced the options it dropped"
+  card colon-intro | jq -e '.about | test("Options") | not' >/dev/null \
+    || fail "the body kept a colon heading that introduced the options it dropped: $(card colon-intro | jq -r .about)"
+  pass "the body drops the words that introduced the options it leaves to the card's choices"
+}
+
 # A decision the snapshot marks handed (the answer or the work went to a worker,
 # or the captain marked the card out of date) is no longer the captain's call:
 # it waits, saying who has it, until the worker raises a fresh question.
@@ -1409,6 +1430,7 @@ fm_test_run \
   test_a_numbered_option_question_stays_a_card_when_an_option_says_until \
   test_card_links_are_labelled_by_what_they_point_at \
   test_annotated_decisions_offer_their_own_full_options_in_captain_terms \
+  test_the_body_drops_the_words_that_introduced_its_options \
   test_a_handed_decision_waits_with_who_has_it_instead_of_a_card \
   test_a_priority_never_brings_back_a_closed_or_handed_decision \
   test_a_review_card_the_captain_approved_leaves_and_any_other_stays \
