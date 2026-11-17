@@ -850,6 +850,10 @@ SH
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
     cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+    # The task has nothing beyond main, so it lands by content; tea answers no
+    # login so the Forgejo read never reaches the host's real tea.
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$case_dir/fakebin/tea"
+    chmod +x "$case_dir/fakebin/tea"
     out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
     tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
       | grep -F "links: \"pr:$url\"" >/dev/null \
@@ -1440,9 +1444,10 @@ test_squash_merged_rebased_branch_allows() {
 }
 
 # Override tea to answer one login for git.example.org and a pull request
-# read through "tea api" with the supplied merged flag and head.
+# read through "tea api" with the supplied merged flag, head, and state
+# (closed when omitted).
 add_tea_pull_for_head() {
-  local case_dir=$1 merged=$2 head=$3
+  local case_dir=$1 merged=$2 head=$3 state=${4:-closed}
   cat > "$case_dir/fakebin/tea" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tea.log"
@@ -1451,9 +1456,57 @@ if [ "\${1:-} \${2:-}" = "login list" ]; then
   exit 0
 fi
 [ "\${1:-}" = api ] || exit 1
-printf '{"state":"closed","merged":%s,"head":{"sha":"%s"}}\n' '$merged' '$head'
+printf '{"state":"%s","merged":%s,"head":{"sha":"%s"}}\n' '$state' '$merged' '$head'
 SH
   chmod +x "$case_dir/fakebin/tea"
+}
+
+# A Forgejo task whose branch was pushed to the forge is reachable from a
+# remote-tracking branch, but that is not landing: while its pull request is
+# still open the work is on the forge branch only, not on main. Teardown must
+# refuse and keep the task, and must not close its backlog item as merged.
+# The same pushed history with the pull request merged is torn down.
+test_pushed_forgejo_branch_with_open_pr_refuses() {
+  local case_dir rc head state merged expected
+  for state in open closed; do
+    merged=false
+    [ "$state" = open ] || merged=true
+    case_dir=$(make_case "forgejo-pushed-$state")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt "forge branch only"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    printf '%s\n' \
+      'pr=https://git.example.org/team/repo/pulls/65' \
+      "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+    seed_backlog_in_flight "$case_dir"
+    add_gh_axi_error "$case_dir"
+    add_tea_pull_for_head "$case_dir" "$merged" "$head" "$state"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expected=0
+    [ "$state" != open ] || expected=1
+    expect_code "$expected" "$rc" "forgejo-pushed-$state: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    grep -qF -- 'api --login fj --repo team/repo /repos/{owner}/{repo}/pulls/65' "$case_dir/tea.log" 2>/dev/null \
+      || fail "forgejo-pushed-$state: teardown did not read the Forgejo pull request through tea"
+    if [ "$state" = open ]; then
+      grep -q REFUSED "$case_dir/stderr" || fail "forgejo-pushed-open: no REFUSED line"
+      grep -qF 'https://git.example.org/team/repo/pulls/65' "$case_dir/stderr" \
+        || fail "forgejo-pushed-open: refusal does not name the pull request"
+      assert_refusal_retained_task_state "$case_dir" forgejo-pushed-open "$head"
+      [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+        || fail "forgejo-pushed-open: refusal moved the backlog item to $(backlog_row_state "$case_dir")"
+    else
+      [ "$(backlog_row_state "$case_dir")" = "done" ] \
+        || fail "forgejo-pushed-closed: merged task left its backlog item at $(backlog_row_state "$case_dir")"
+    fi
+  done
+  pass "a pushed Forgejo branch whose pull request is still open is not landed; a merged one is torn down"
 }
 
 # A Forgejo task whose default branch moved on after the squash merge, editing
@@ -6839,6 +6892,7 @@ test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
 test_squash_merged_gitlab_mr_allows_when_main_moved_on
+test_pushed_forgejo_branch_with_open_pr_refuses
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable
