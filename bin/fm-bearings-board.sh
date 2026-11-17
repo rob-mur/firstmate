@@ -124,12 +124,18 @@
 # `options_inferred` and `from_status` are optional. Exempt are a merge card (its type is the
 # question) and a page-backed card, one carrying `off_board` or with no options
 # and a Lavish page link, whose decision is on that page. A card that fails is
-# flagged, never refused and never silently dropped: it is named on stderr as
+# held back, never refused and never silently dropped: it is named on stderr as
 # an `undecided-card: <key>: missing <field> (<why>)` line plus one summary
-# line, it still renders, and it carries that `missing ...` text as `problem`,
-# which the board shows on the card as needing a fix, so the payload can be
-# fixed while every other card still builds. `problem` is the build's own: an
-# authored one is cleared.
+# line, and it moves out of `captains_call` into the payload's `cards_to_fix`
+# as {key, task, title, problem}, `problem` being that `missing ...` text
+# (the key is absent when no card was held back), so
+# no consumer counts or shows it as the captain's while every other card still
+# builds. The page does not render `cards_to_fix`. The build also publishes
+# the list as `<task>\t<key>\t<problem>` lines at <state>/board-cards-to-fix
+# (removed when empty), which bin/fm-wake-drain.sh presents to main as CARDS
+# TO FIX so the owner re-posts the card as a clean keyed decision.
+# `cards_to_fix` and a card's `problem` are the build's own: authored ones are
+# cleared.
 #
 # The validator's reservation scope must equal the adapter's reconcile
 # classification scope, which is all card types because the captured payload
@@ -517,14 +523,38 @@ undecided_cards() {  # <data.json>
   ' "$1"
 }
 
-# Put each undecided card's `<key>: <missing fields>` line on that card as its
-# `problem`, which the board shows on the card, and clear any other `problem`:
-# the flag is the build's own, never authored.
-flag_undecided() {  # <undecided-lines>  (payload on stdin)
+# Move each undecided card out of Captain's Call into `cards_to_fix` as
+# {key, task, title, problem}, its `problem` the card's `missing ...` text and
+# its task the card's owning task, and leave `cards_to_fix` out when none was.
+# Any other `problem` and any authored `cards_to_fix` are cleared: both are the
+# build's own, never authored.
+hold_back_undecided() {  # <undecided-lines>  (payload on stdin)
   jq -c --arg lines "$1" '
     ( [ $lines | split("\n")[] | select(length > 0) | index(": ") as $i
         | {key: .[:$i], value: .[($i + 2):]} ] | from_entries ) as $why
-    | .captains_call |= map(if $why[.key] != null then .problem = $why[.key] else del(.problem) end)'
+    | .cards_to_fix = [ .captains_call[] | select($why[.key] != null)
+        | {key, task: (.context.task // .key), title, problem: $why[.key]} ]
+    | .captains_call |= map(select($why[.key] == null) | del(.problem))
+    | if .cards_to_fix == [] then del(.cards_to_fix) else . end'
+}
+
+# Publish the held-back cards as `<task>\t<key>\t<problem>` lines at
+# <state>/board-cards-to-fix, which bin/fm-wake-drain.sh presents to main as
+# CARDS TO FIX, or remove that file when no card was held back.
+publish_cards_to_fix() {  # <state-dir>  (payload on stdin)
+  local dest="$1/board-cards-to-fix" tmp lines
+  lines=$(jq -r '.cards_to_fix[]? | [.task, .key, .problem] | map(gsub("[[:cntrl:]]"; " ")) | join("\t")') \
+    || return 1
+  if [ -z "$lines" ]; then
+    rm -f -- "$dest"
+    return
+  fi
+  mkdir -p -- "$1" || return 1
+  tmp=$(umask 077; mktemp "$1/.board-cards-to-fix.XXXXXX") || return 1
+  if ! { printf '%s\n' "$lines" > "$tmp" && mv -f -- "$tmp" "$dest"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # Every live page registered through bin/fm-board-page.sh, oldest first, as the
@@ -814,11 +844,11 @@ command_build() {
     || { rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot check the Captain's Call cards: $data"; }
   if [ -n "$undecided" ]; then
     printf '%s\n' "$undecided" | sed 's/^/undecided-card: /' >&2
-    printf 'fm-bearings-board: flagged Captain'"'"'s Call cards with no explicit decision - %s: %s\n' \
+    printf 'fm-bearings-board: held back Captain'"'"'s Call cards with no explicit decision - %s: %s\n' \
       "$(printf '%s' "$undecided" | paste -sd ';' - | sed 's/;/; /g')" "$data" >&2
   fi
-  if ! json=$(flag_undecided "$undecided" < "$effective") || ! printf '%s\n' "$json" > "$effective"; then
-    rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot flag the Captain's Call cards: $data"
+  if ! json=$(hold_back_undecided "$undecided" < "$effective") || ! printf '%s\n' "$json" > "$effective"; then
+    rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot hold back the Captain's Call cards: $data"
   fi
   # Only a card that links a Lavish page needs the server's session listing.
   sessions='{}'
@@ -876,6 +906,8 @@ command_build() {
     fail "cannot write the board data stamp"
   fi
   publish_if_changed "$tmp" "$board_stamp" "board data stamp" || { rm -rf -- "$stage"; exit 1; }
+  printf '%s\n' "$json" | publish_cards_to_fix "$STATE" \
+    || { rm -rf -- "$stage"; fail "cannot publish the cards to fix to $STATE"; }
   # The page file changes only when the template's markup or styles do,
   # because any change to it makes Lavish reload the captain's open page.
   tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") \
