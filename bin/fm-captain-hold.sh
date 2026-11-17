@@ -36,6 +36,7 @@
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh answered <origin-task-id> <decision-key> --opened-at <epoch>
 #   fm-captain-hold.sh answered-batch <origin-task-id>   (<decision-key>\t<epoch> lines on stdin)
+#   fm-captain-hold.sh settled <task-id>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -251,6 +252,15 @@
 # a candidate id whose text appears in neither the backlog file nor the Done
 # archive is known absent without a tasks-axi read, which is exactly what
 # `answered` concludes for it after its reads.
+#
+# `settled` is the read-only check a page listener's retirement asks: is the
+# captain call this task id names finished? Exit 0 means it is - the task is
+# no longer an open captain call and its row is Done, sits in the Done
+# archive, or carries a resolution record (an answer that released the work
+# back to the queue) - and 1 means it is still open or was never a recorded
+# call here, including an id this home has no row for. Exit 2 means the answer
+# could not be established, which a caller treats as not settled. It never
+# closes, answers, or writes anything.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -2675,6 +2685,40 @@ command_answered() {  # <origin-task-id> <decision-key> --opened-at <epoch>
   return 1
 }
 
+# Is this task's captain call finished? Exit 0 settled, 1 not, 2 cannot tell
+# (see the header).
+command_settled() {  # <task-id>
+  local id=${1-} rc=0 data
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*)
+      printf 'fm-captain-hold: task id must be a non-empty privacy-safe slug: %s\n' "$id" >&2
+      exit 2
+      ;;
+  esac
+  ( command_open "$id" --distinguish-absent ) >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    1) ;;
+    3)
+      rc=0
+      task_show_archived "$id" 2>/dev/null || rc=$?
+      case "$rc" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) exit 2 ;;
+      esac
+      ;;
+    *) exit 2 ;;
+  esac
+  data=$(fm_backlog_data_absolute "$DATA") || exit 2
+  fm_backlog_row_probe "$data" "$id" || exit 2
+  [ "${FM_BACKLOG_ROW_STATE%% *}" != "done" ] || return 0
+  task_show "$id" 2>/dev/null || exit 2
+  body_has_resolution_record "$(show_field "$TASK_SHOW_OUTPUT" body)" && return 0
+  return 1
+}
+
 # The keyed decisions of one origin that the captain already answered, in one
 # process (see the header). Each key runs command_answered in its own subshell,
 # so a read that stops the command for one key leaves that key unanswered and
@@ -2747,6 +2791,7 @@ case "${1:-}" in
   open) shift; command_open "$@" ;;
   answered) shift; command_answered "$@" ;;
   answered-batch) shift; command_answered_batch "$@" ;;
+  settled) shift; command_settled "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   pr-policy) shift; command_pr_policy "$@" ;;
