@@ -1407,6 +1407,77 @@ FIELDS
   FM_PR_RECORD_HEAD=$head
 }
 
+# The web host and owner/repository path of a Forgejo remote URL, set in
+# FM_PR_REMOTE_HOST and FM_PR_REMOTE_PATH. Accepts https://, http://, and
+# ssh:// URLs and scp-style [user@]host:owner/repo, each with an optional
+# user, port, and .git suffix; a host is lowercased and loses its port, the
+# way fm_pr_forgejo_login matches it. Any other shape returns 1.
+fm_pr_forgejo_remote_parse() {  # <remote-url>
+  local url=${1-} rest host path owner repo
+  local LC_ALL=C
+  FM_PR_REMOTE_HOST=
+  FM_PR_REMOTE_PATH=
+  case "$url" in
+    https://*|http://*|ssh://*)
+      rest=${url#*://}
+      host=${rest%%/*}
+      path=${rest#*/}
+      [ "$path" != "$rest" ] || return 1
+      ;;
+    *://*) return 1 ;;
+    *:*)
+      host=${url%%:*}
+      path=${url#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  host=${host##*@}
+  host=${host%:*}
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  [[ "$host" =~ ^[a-z0-9.-]{1,253}$ ]] || return 1
+  path=${path%/}
+  path=${path%.git}
+  owner=${path%%/*}
+  repo=${path#*/}
+  [ "$repo" != "$path" ] || return 1
+  case "$repo" in */*) return 1 ;; esac
+  fm_pr_forgejo_segment_valid "$owner" || return 1
+  fm_pr_forgejo_segment_valid "$repo" || return 1
+  # Consumed by bin/fm-teardown.sh forgejo_pr_url_from_branch.
+  # shellcheck disable=SC2034
+  FM_PR_REMOTE_HOST=$host
+  # shellcheck disable=SC2034
+  FM_PR_REMOTE_PATH=$owner/$repo
+}
+
+# The URL of the Forgejo pull request from <branch> into <base> of one
+# repository, looked up through "tea api" so the credential never leaves tea.
+# Prints https://<host>/<owner>/<repo>/pulls/<n>. "tea api" exits 0 on an HTTP
+# error and prints the error body instead, so only a record naming a positive
+# number and the same head branch is accepted; no such pull request, a branch
+# name a URL path cannot carry as is, and any read failure return 1.
+fm_pr_forgejo_url_from_branch() {  # <host> <path> <base> <branch>
+  local host=$1 path=$2 base=$3 branch=$4 login json number
+  local LC_ALL=C
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$base" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$branch" in ''|*[!A-Za-z0-9._/-]*|/*|*/|*//*) return 1 ;; esac
+  login=$(fm_pr_forgejo_login "$host") || return 1
+  [ -n "$login" ] || return 1
+  if ! json=$(tea api --login "$login" --repo "$path" \
+      "/repos/{owner}/{repo}/pulls/$base/$branch" 2>/dev/null) || [ -z "$json" ]; then
+    return 1
+  fi
+  number=$(printf '%s' "$json" | jq -er --arg b "$branch" '
+      if type == "object" and (.number | type) == "number" and .number > 0
+        and .head.ref == $b
+      then .number
+      else error("no pull request for the branch")
+      end' 2>/dev/null) || return 1
+  case "$number" in ''|*[!0-9]*) return 1 ;; esac
+  printf 'https://%s/%s/pulls/%s\n' "$host" "$path" "$number"
+}
+
 # Whether one GitHub pull request, GitLab merge request, or Forgejo pull
 # request takes its head from a repository other than the one it targets - a
 # fork contribution. Returns 0 only when the forge record says so; a
