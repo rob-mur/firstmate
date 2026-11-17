@@ -76,6 +76,11 @@
 #   (af) remote dropped a branch, fetch.prune=true                -> tracking ref kept
 #   (ag) work already reachable                                   -> ALLOW, no fetch
 #   (ah) hung fetch                                               -> bounded, REFUSE
+#
+# A pushed branch is not landed while its recorded request is still open:
+#   (ai) pushed branch + open GitHub/GitLab/Forgejo request       -> REFUSE
+#   (aj) pushed branch + merged GitHub/GitLab/Forgejo request     -> ALLOW
+#   (ak) fork-pushed contribution + open cross-repository request -> ALLOW (by design)
 #   (ai) commits held only by the no-mistakes gate                -> REFUSE, gate not fetched
 #   (aj) file saved during the refresh, work landed                -> REFUSE, file intact
 set -u
@@ -137,6 +142,18 @@ case "${1:-} ${2:-}" in
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
 esac
 exit 0
+SH
+  # GitLab and Forgejo reads fail by default, so no case reaches a real glab
+  # or tea on the runner's PATH. Tests that need a record override these.
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+echo "error: merge request not found" >&2
+exit 1
+SH
+  cat > "$fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+echo "error: tea unavailable" >&2
+exit 1
 SH
   # Default hermetic no-mistakes stub: `axi status` answers FM_FAKE_AXI_STATUS
   # verbatim (empty by default, i.e. no active run - the pre-teardown run-abort
@@ -201,7 +218,8 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/glab" "$fakebin/tea" \
+    "$fakebin/no-mistakes"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -1445,9 +1463,11 @@ test_squash_merged_rebased_branch_allows() {
 
 # Override tea to answer one login for git.example.org and a pull request
 # read through "tea api" with the supplied merged flag, head, and state
-# (closed when omitted).
+# (closed when omitted). The head branch lives in repository id 1, the base
+# repository, unless a different head repository id is supplied, which makes
+# the pull request a fork contribution.
 add_tea_pull_for_head() {
-  local case_dir=$1 merged=$2 head=$3 state=${4:-closed}
+  local case_dir=$1 merged=$2 head=$3 state=${4:-closed} head_repo=${5:-1}
   cat > "$case_dir/fakebin/tea" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tea.log"
@@ -1456,9 +1476,45 @@ if [ "\${1:-} \${2:-}" = "login list" ]; then
   exit 0
 fi
 [ "\${1:-}" = api ] || exit 1
-printf '{"state":"%s","merged":%s,"head":{"sha":"%s"}}\n' '$state' '$merged' '$head'
+printf '{"number":65,"state":"%s","merged":%s,"head":{"sha":"%s","ref":"fm/task-x1","repo":{"id":%s}},"base":{"ref":"main","repo":{"id":1}}}\n' '$state' '$merged' '$head' '$head_repo'
 SH
   chmod +x "$case_dir/fakebin/tea"
+}
+
+# Override gh so viewing the task's pull request reports <state> with <head>,
+# and its isCrossRepository field reports <cross> (false when omitted, a
+# branch of the base repository). Every gh call is logged to gh.log.
+add_gh_pr_record() {
+  local case_dir=$1 state=$2 head=$3 cross=${4:-false}
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/gh.log"
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' '$state' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"isCrossRepository"*) printf '%s\n' '$cross' ; exit 0 ;;
+    esac
+    echo "error: unexpected pr view" >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# Override glab so viewing merge request 12 reports <state> with <head>. The
+# source branch lives in project id 1, the target project, unless a different
+# source project id is supplied, which makes the merge request a fork
+# contribution. Every glab call is logged to glab.log.
+add_glab_mr_record() {
+  local case_dir=$1 state=$2 head=$3 source_project=${4:-1}
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/glab.log"
+[ "\${1:-} \${2:-} \${3:-}" = "mr view 12" ] || { echo "error: unexpected glab call" >&2 ; exit 1 ; }
+printf '{"iid":12,"state":"%s","sha":"%s","source_project_id":%s,"target_project_id":1}\n' '$state' '$head' '$source_project'
+SH
+  chmod +x "$case_dir/fakebin/glab"
 }
 
 # A Forgejo task whose branch was pushed to the forge is reachable from a
@@ -1507,6 +1563,126 @@ test_pushed_forgejo_branch_with_open_pr_refuses() {
     fi
   done
   pass "a pushed Forgejo branch whose pull request is still open is not landed; a merged one is torn down"
+}
+
+# A GitHub or GitLab task whose branch was pushed to its own repository is
+# reachable from a remote-tracking branch while its pull or merge request is
+# still open, the same as a Forgejo task: that is not landing. Teardown must
+# refuse and keep the task and its backlog item; the same pushed history with
+# the request merged is torn down. GitLab merge requests are read through glab
+# only with an opt-in flag (config/park-on-review here); without one teardown
+# makes no glab call, so a pushed GitLab branch whose content is not in the
+# base branch refuses whether its merge request is open or merged.
+test_pushed_github_and_gitlab_branch_with_open_pr_refuses() {
+  local case_dir rc head forge state label url expected
+  for forge in github gitlab gitlab-noflag; do
+    for state in open merged; do
+      label="$forge-pushed-$state"
+      case_dir=$(make_case "$label")
+      write_meta "$case_dir" no-mistakes ship
+      wt_commit_file "$case_dir" feature.txt "forge branch only"
+      git -C "$case_dir/wt" push -q origin fm/task-x1
+      git -C "$case_dir/project" fetch -q origin
+      head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      if [ "$forge" = github ]; then
+        url=https://github.com/example/repo/pull/7
+        if [ "$state" = open ]; then
+          add_gh_pr_record "$case_dir" OPEN "$head"
+        else
+          add_gh_pr_record "$case_dir" MERGED "$head"
+        fi
+      else
+        url=https://gitlab.example.com/group/sub/repo/-/merge_requests/12
+        if [ "$state" = open ]; then
+          add_glab_mr_record "$case_dir" opened "$head"
+        else
+          add_glab_mr_record "$case_dir" merged "$head"
+        fi
+        if [ "$forge" = gitlab ]; then
+          : > "$case_dir/config/park-on-review"
+        else
+          add_gh_axi_error "$case_dir"
+        fi
+      fi
+      printf '%s\n' "pr=$url" "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+      seed_backlog_in_flight "$case_dir"
+
+      set +e
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+
+      expected=0
+      [ "$state" != open ] && [ "$forge" != gitlab-noflag ] || expected=1
+      expect_code "$expected" "$rc" "$label: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+      if [ "$forge" = github ]; then
+        grep -qF -- "pr view $url --json state,headRefOid,url" "$case_dir/gh.log" 2>/dev/null \
+          || fail "$label: teardown did not read the GitHub pull request"
+      elif [ "$forge" = gitlab-noflag ]; then
+        [ ! -e "$case_dir/glab.log" ] || fail "$label: teardown read the merge request through glab without an opt-in flag"
+      else
+        grep -qF -- 'mr view 12 -R https://gitlab.example.com/group/sub/repo -F json' "$case_dir/glab.log" 2>/dev/null \
+          || fail "$label: teardown did not read the GitLab merge request"
+      fi
+      if [ "$expected" = 1 ]; then
+        grep -q REFUSED "$case_dir/stderr" || fail "$label: no REFUSED line"
+        grep -qF "$url" "$case_dir/stderr" || fail "$label: refusal does not name the request"
+        assert_refusal_retained_task_state "$case_dir" "$label" "$head"
+        [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+          || fail "$label: refusal moved the backlog item to $(backlog_row_state "$case_dir")"
+      else
+        [ "$(backlog_row_state "$case_dir")" = "done" ] \
+          || fail "$label: merged task left its backlog item at $(backlog_row_state "$case_dir")"
+      fi
+    done
+  done
+  pass "a pushed GitHub or GitLab branch whose request is still open is not landed; a merged one is torn down"
+}
+
+# An upstream contribution pushes its branch to a fork and opens its pull or
+# merge request on the upstream repository, which merges it on its own time.
+# The work is safe on the fork, so by design such a task is torn down while
+# its request is still open, on every forge. Asking GitLab whether the head
+# is cross-repository is a glab read, so the GitLab case opts in.
+test_pushed_fork_contribution_with_open_pr_is_torn_down() {
+  local case_dir rc head forge label url
+  for forge in github gitlab forgejo; do
+    label="$forge-fork-open"
+    case_dir=$(make_case "$label")
+    write_meta "$case_dir" direct-PR ship
+    wt_commit_file "$case_dir" feature.txt "fork branch only"
+    add_fork_with_pushed_branch "$case_dir"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    case "$forge" in
+      github)
+        url=https://github.com/example/repo/pull/7
+        add_gh_pr_record "$case_dir" OPEN "$head" true
+        ;;
+      gitlab)
+        url=https://gitlab.example.com/group/sub/repo/-/merge_requests/12
+        add_glab_mr_record "$case_dir" opened "$head" 2
+        : > "$case_dir/config/park-on-review"
+        ;;
+      forgejo)
+        url=https://git.example.org/team/repo/pulls/65
+        add_gh_axi_error "$case_dir"
+        add_tea_pull_for_head "$case_dir" false "$head" open 2
+        ;;
+    esac
+    printf '%s\n' "pr=$url" "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+    seed_backlog_in_flight "$case_dir"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "$label: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    ! grep -q REFUSED "$case_dir/stderr" || fail "$label: teardown printed a REFUSED line"
+    [ "$(backlog_row_state "$case_dir")" = "done" ] \
+      || fail "$label: fork contribution left its backlog item at $(backlog_row_state "$case_dir")"
+  done
+  pass "a fork-pushed upstream contribution is torn down while its request is still open"
 }
 
 # A Forgejo task whose default branch moved on after the squash merge, editing
@@ -6892,6 +7068,8 @@ test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
 test_squash_merged_gitlab_mr_allows_when_main_moved_on
 test_pushed_forgejo_branch_with_open_pr_refuses
+test_pushed_github_and_gitlab_branch_with_open_pr_refuses
+test_pushed_fork_contribution_with_open_pr_is_torn_down
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable

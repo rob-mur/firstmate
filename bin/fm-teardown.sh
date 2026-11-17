@@ -57,10 +57,11 @@
 # on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
 # its base branch instead of the default branch. A task whose recorded pr= is
-# a Forgejo pull request is the exception to reachability: pushing its branch to
-# the forge makes the work reachable while the pull request is still open, so
-# that task must pass the merged-PR or content proof even when pushed. GitHub
-# and GitLab tasks keep the reachability rule.
+# a GitHub pull request, a GitLab merge request, or a Forgejo pull request is the
+# exception to reachability: pushing its branch to the forge makes the work
+# reachable while the request is still open, so that task must pass the
+# merged-PR or content proof even when pushed. A fork contribution, whose
+# request takes its head from another repository, keeps the reachability rule.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -1700,7 +1701,7 @@ ensure_commit_object() {
   local target=$1 commit=$2 n ref
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   case "$target" in
-    *"/-/merge_requests/"*)
+    *"/-/merge_requests/"*)  # GitLab serves a merge request's head at refs/merge-requests/<n>/head.
       n=${target##*/-/merge_requests/}
       n=${n%%[!0-9]*}
       [ -n "$n" ] || return 1
@@ -1759,16 +1760,20 @@ EOF
 # and everything else through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
-# falls back to the content check.
+# falls back to the content check. TEARDOWN_PR_STATE_SEEN names the state the
+# forge reported, empty when no record was read.
 # The GitLab merged-MR read is opt-in with the park-on-review flags
 # (bin/fm-park.sh, docs/configuration.md "Park on review"); without either a
-# GitLab MR goes through the GitHub read like any other target.
+# GitLab MR goes through the GitHub read like any other target, and teardown
+# makes no glab call at all: a pushed GitLab branch then counts as landed only
+# when its content is in the base branch.
 gitlab_mr_landing_opted_in() {
   [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]
 }
 
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
+  TEARDOWN_PR_STATE_SEEN=
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
@@ -1777,12 +1782,14 @@ pr_is_merged() {
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
     fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    TEARDOWN_PR_STATE_SEEN="$FM_PR_RECORD_STATE, merged $FM_PR_RECORD_MERGED"
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1
     resolved_url=$FM_PR_URL
   elif gitlab_mr_landing_opted_in && fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
     fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    TEARDOWN_PR_STATE_SEEN=$FM_PR_RECORD_STATE
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1
@@ -1792,6 +1799,7 @@ pr_is_merged() {
     state=${view%%$'\t'*}
     remainder=${view#*$'\t'}
     [ "$state" != "$view" ] || return 1
+    TEARDOWN_PR_STATE_SEEN=$state
     head=${remainder%%$'\t'*}
     resolved_url=${remainder#*$'\t'}
     [ "$head" != "$remainder" ] || return 1
@@ -1853,8 +1861,8 @@ content_in_default() {
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch (or, for a recorded Forgejo pull
-# request, whether or not they are)? True when a merged PR proves the
+# reachable from any remote-tracking branch (or, for a recorded GitHub, GitLab,
+# or Forgejo request, whether or not they are)? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
@@ -2221,7 +2229,7 @@ read_worktree_dirt() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch request_label
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2294,26 +2302,51 @@ validate_worktree_teardown_safety() {
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
-  elif [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    # Work pushed to a Forgejo branch is reachable from a remote-tracking ref
-    # while its pull request is still open, so for a recorded Forgejo pull
-    # request that reachability is not landing: the record must show it merged
-    # with this work, or the content must already be in the base branch.
+  elif [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL" && request_label=$(recorded_request_label "$FM_PR_PROVIDER"); then
+    # Work pushed to its own forge branch is reachable from a remote-tracking
+    # ref while its pull or merge request is still open, so for a recorded
+    # GitHub, GitLab, or Forgejo request that reachability is not landing: the
+    # record must show it merged with this work, or the content must already
+    # be in the base branch. A fork contribution, whose request takes its head
+    # from another repository, keeps the reachability rule: the work is safe
+    # on the fork and the upstream merges it on its own time.
     read_teardown_safety_branch
     branch=$TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY
-    if ! work_is_landed "$branch"; then
+    if ! work_is_landed "$branch" && ! request_head_is_cross_repository "$PR_URL"; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
         echo "Restore or upgrade Git and retry the content check." >&2
-      elif [ -n "${FM_PR_RECORD_STATE:-}" ]; then
-        echo "REFUSED: worktree $WT has work on a forge branch only: Forgejo pull request $PR_URL (state $FM_PR_RECORD_STATE, merged $FM_PR_RECORD_MERGED) does not show it merged, and its content is not in the base branch." >&2
+      elif [ -n "${TEARDOWN_PR_STATE_SEEN:-}" ]; then
+        echo "REFUSED: worktree $WT has work on a forge branch only: $request_label $PR_URL (state $TEARDOWN_PR_STATE_SEEN) does not show this work merged, and its content is not in the base branch." >&2
       else
-        echo "REFUSED: worktree $WT has work on a forge branch only: Forgejo pull request $PR_URL could not be read to prove it merged, and its content is not in the base branch." >&2
+        echo "REFUSED: worktree $WT has work on a forge branch only: $request_label $PR_URL could not be read to prove it merged, and its content is not in the base branch." >&2
       fi
-      echo "Merge the pull request, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Merge the $request_label, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
+}
+
+# Does the recorded request take its head from another repository? A GitLab
+# merge request is asked through glab only when gitlab_mr_landing_opted_in, so
+# without either opt-in flag teardown makes no glab call and a GitLab fork
+# contribution must prove it landed like any other pushed GitLab branch.
+request_head_is_cross_repository() {  # <pr-url>
+  if fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gitlab ] && ! gitlab_mr_landing_opted_in; then
+    return 1
+  fi
+  fm_pr_head_is_cross_repository "$1"
+}
+
+# The reader-facing name of a recorded request whose pushed branch must prove
+# it landed; non-zero for a provider that keeps the reachability rule.
+recorded_request_label() {  # <provider>
+  case "$1" in
+    github) printf 'GitHub pull request' ;;
+    gitlab) printf 'GitLab merge request' ;;
+    forgejo) printf 'Forgejo pull request' ;;
+    *) return 1 ;;
+  esac
 }
 
 # Sets TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY, the worktree branch the
