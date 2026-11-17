@@ -60,6 +60,9 @@
 # reachable while the request is still open, so that task must pass the
 # merged-PR or content proof even when pushed. A fork contribution, whose
 # request takes its head from another repository, keeps the reachability rule.
+# A task of a registered Forgejo project that recorded no pr= gets the same
+# proof, with its pull request looked up from the branch on origin, unless
+# its work is on a fork remote.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -1745,12 +1748,19 @@ EOF
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check. TEARDOWN_PR_STATE_SEEN names the state the
-# forge reported, empty when no record was read.
+# forge reported, empty when no record was read. A registered Forgejo project
+# has no GitHub pull request to find from the branch, so with no pr= recorded
+# its pull request is looked up from the branch on origin instead, and
+# TEARDOWN_PR_LOOKED_UP_URL names the one found.
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
   TEARDOWN_PR_STATE_SEEN=
+  TEARDOWN_PR_LOOKED_UP_URL=
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
+  elif read_teardown_project_forge && [ "$TEARDOWN_PROJECT_FORGE" = forgejo ]; then
+    target=$(forgejo_pr_url_from_branch "$branch") || return 1
+    TEARDOWN_PR_LOOKED_UP_URL=$target
   else
     target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
   fi
@@ -1797,6 +1807,54 @@ pr_is_merged() {
     PR_URL=$resolved_url
   fi
   return 0
+}
+
+# The registered forge binding of this task's project (bin/fm-project-mode.sh
+# --forge), read once into TEARDOWN_PROJECT_FORGE: none for a record naming no
+# project, and "error" with a non-zero return when the registry refuses the
+# binding.
+TEARDOWN_PROJECT_FORGE=
+read_teardown_project_forge() {
+  local forge
+  case "$TEARDOWN_PROJECT_FORGE" in
+    error) return 1 ;;
+    ?*) return 0 ;;
+  esac
+  if [ -z "$PROJ" ]; then
+    TEARDOWN_PROJECT_FORGE=none
+    return 0
+  fi
+  if ! forge=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-project-mode.sh" --forge "$(basename "$PROJ")" 2>/dev/null) \
+    || [ -z "$forge" ]; then
+    TEARDOWN_PROJECT_FORGE=error
+    return 1
+  fi
+  TEARDOWN_PROJECT_FORGE=$forge
+}
+
+# The URL of the pull request <branch> opened into the task's base branch on
+# the Forgejo repository origin names, for a task that recorded no pr=.
+forgejo_pr_url_from_branch() {  # <branch>
+  local base remote_url
+  base=${BASE_BRANCH:-}
+  [ -n "$base" ] || base=$(default_branch) || return 1
+  remote_url=$(git -C "$WT" config --get remote.origin.url 2>/dev/null) || return 1
+  fm_pr_forgejo_remote_parse "$remote_url" || return 1
+  fm_pr_forgejo_url_from_branch "$FM_PR_REMOTE_HOST" "$FM_PR_REMOTE_PATH" "$base" "$1"
+}
+
+# Is HEAD on a remote-tracking branch of a remote other than origin and the
+# local no-mistakes mirror - a fork the work was pushed to?
+head_is_on_fork_remote() {
+  local ref
+  while IFS= read -r ref; do
+    case "$ref" in
+      refs/remotes/origin/*|refs/remotes/no-mistakes/*) ;;
+      refs/remotes/*) return 0 ;;
+    esac
+  done < <(git -C "$WT" for-each-ref --contains HEAD --format='%(refname)' refs/remotes 2>/dev/null)
+  return 1
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -2308,6 +2366,34 @@ validate_worktree_teardown_safety() {
         echo "REFUSED: worktree $WT has work on a forge branch only: $request_label $PR_URL could not be read to prove it merged, and its content is not in the base branch." >&2
       fi
       echo "Merge the $request_label, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  elif [ -z "$PR_URL" ] \
+    && { ! read_teardown_project_forge || [ "$TEARDOWN_PROJECT_FORGE" = forgejo ]; } \
+    && ! head_is_on_fork_remote; then
+    # A registered Forgejo project's task that recorded no pr= is the same
+    # case: its branch pushed to the forge is reachable while the pull request
+    # is open, and the branch lookup only knows GitHub. Teardown looks the pull
+    # request up from the branch on the Forgejo remote, and a branch with no
+    # merged pull request there, or a forge binding the registry cannot read,
+    # needs the content in the base branch. Work pushed to a fork keeps the
+    # reachability rule, as a fork contribution does.
+    read_teardown_safety_branch
+    branch=$TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY
+    if ! work_is_landed "$branch"; then
+      if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
+        echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
+        echo "Restore or upgrade Git and retry the content check." >&2
+      elif [ "$TEARDOWN_PROJECT_FORGE" = error ]; then
+        echo "REFUSED: worktree $WT has work on a remote branch only, and the registry's forge binding for project '$(basename "$PROJ")' cannot be read to tell whether that branch is an open pull request; its content is not in the base branch." >&2
+        echo "Fix the project's registry entry (bin/fm-project-mode.sh --forge $(basename "$PROJ") names the problem), or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      elif [ -n "${TEARDOWN_PR_LOOKED_UP_URL:-}" ]; then
+        echo "REFUSED: worktree $WT has work on a forge branch only: Forgejo pull request $TEARDOWN_PR_LOOKED_UP_URL for branch $branch (state ${TEARDOWN_PR_STATE_SEEN:-unreadable}) does not show this work merged, and its content is not in the base branch." >&2
+      else
+        echo "REFUSED: worktree $WT has work on a forge branch only: no pull request is recorded, none for branch $branch could be read from the project's Forgejo remote, and its content is not in the base branch." >&2
+      fi
+      echo "Merge the branch's pull request, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi

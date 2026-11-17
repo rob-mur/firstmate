@@ -78,6 +78,9 @@
 #   (ai) pushed branch + open GitHub/GitLab/Forgejo request       -> REFUSE
 #   (aj) pushed branch + merged GitHub/GitLab/Forgejo request     -> ALLOW
 #   (ak) fork-pushed contribution + open cross-repository request -> ALLOW (by design)
+#   (al) Forgejo project, no pr=, open/missing request by branch  -> REFUSE
+#   (am) Forgejo project, no pr=, merged request by branch        -> ALLOW
+#   (an) Forgejo project, no pr=, work pushed only to a fork      -> ALLOW (by design)
 #   (ai) commits held only by the no-mistakes gate                -> REFUSE, gate not fetched
 #   (aj) file saved during the refresh, work landed                -> REFUSE, file intact
 set -u
@@ -1458,6 +1461,23 @@ SH
   chmod +x "$case_dir/fakebin/tea"
 }
 
+# Override tea to answer one login for git.example.org and, like "tea api" on
+# an HTTP 404, print an error body and exit 0 for every pull request read.
+add_tea_pull_missing() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tea" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tea.log"
+if [ "\${1:-} \${2:-}" = "login list" ]; then
+  printf '[\n  {\n    "name": "fj",\n    "url": "https://git.example.org"\n  }\n]\n'
+  exit 0
+fi
+[ "\${1:-}" = api ] || exit 1
+printf '{"message":"pull request does not exist","url":"https://git.example.org/api/swagger"}\n'
+SH
+  chmod +x "$case_dir/fakebin/tea"
+}
+
 # Override gh so viewing the task's pull request reports <state> with <head>,
 # and its isCrossRepository field reports <cross> (false when omitted, a
 # branch of the base repository). Every gh call is logged to gh.log.
@@ -1540,6 +1560,80 @@ test_pushed_forgejo_branch_with_open_pr_refuses() {
     fi
   done
   pass "a pushed Forgejo branch whose pull request is still open is not landed; a merged one is torn down"
+}
+
+# A task of a registered Forgejo project that never recorded pr= has no GitHub
+# pull request for the branch lookup to find, so reachability alone would count
+# its branch pushed to the forge as landed while the pull request is open.
+# Teardown must look the pull request up from the branch on the Forgejo remote
+# and refuse unless it is merged with this work; a branch with no pull request
+# there, and a forge binding the registry cannot read, refuse too. Work pushed
+# only to a fork keeps the reachability rule.
+test_pushed_forgejo_branch_without_recorded_pr_looks_it_up() {
+  local case_dir rc head variant forge expected
+  for variant in open merged missing fork badforge; do
+    case_dir=$(make_case "forgejo-nopr-$variant")
+    write_meta "$case_dir" no-mistakes ship
+    forge=forgejo
+    [ "$variant" != badforge ] || forge=bogus
+    printf '%s\n' "- project [no-mistakes forge=$forge] - teardown fixture (added 2026-01-01)" \
+      > "$case_dir/data/projects.md"
+    # The forge's own URL names the remote; insteadOf keeps git on the fixture.
+    git -C "$case_dir/project" config "url.$case_dir/origin.git.insteadOf" \
+      https://git.example.org/team/repo.git
+    git -C "$case_dir/project" remote set-url origin https://git.example.org/team/repo.git
+    wt_commit_file "$case_dir" feature.txt "forge branch only"
+    if [ "$variant" = fork ]; then
+      add_fork_with_pushed_branch "$case_dir"
+    else
+      git -C "$case_dir/wt" push -q origin fm/task-x1
+      git -C "$case_dir/project" fetch -q origin
+    fi
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    seed_backlog_in_flight "$case_dir"
+    add_gh_axi_error "$case_dir"
+    case "$variant" in
+      open) add_tea_pull_for_head "$case_dir" false "$head" open ;;
+      merged) add_tea_pull_for_head "$case_dir" true "$head" closed ;;
+      missing) add_tea_pull_missing "$case_dir" ;;
+    esac
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expected=1
+    case "$variant" in merged|fork) expected=0 ;; esac
+    expect_code "$expected" "$rc" "forgejo-nopr-$variant: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    case "$variant" in
+      open|merged|missing)
+        grep -qF -- 'api --login fj --repo team/repo /repos/{owner}/{repo}/pulls/main/fm/task-x1' "$case_dir/tea.log" 2>/dev/null \
+          || fail "forgejo-nopr-$variant: teardown did not look the pull request up from the branch through tea"
+        ;;
+    esac
+    if [ "$expected" = 1 ]; then
+      grep -q REFUSED "$case_dir/stderr" || fail "forgejo-nopr-$variant: no REFUSED line"
+      assert_refusal_retained_task_state "$case_dir" "forgejo-nopr-$variant" "$head"
+      [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+        || fail "forgejo-nopr-$variant: refusal moved the backlog item to $(backlog_row_state "$case_dir")"
+    else
+      grep -q REFUSED "$case_dir/stderr" && fail "forgejo-nopr-$variant: unexpected REFUSED"$'\n'"$(cat "$case_dir/stderr")"
+      [ "$(backlog_row_state "$case_dir")" = "done" ] \
+        || fail "forgejo-nopr-$variant: landed task left its backlog item at $(backlog_row_state "$case_dir")"
+    fi
+    case "$variant" in
+      open)
+        grep -qF 'https://git.example.org/team/repo/pulls/65' "$case_dir/stderr" \
+          || fail "forgejo-nopr-open: refusal does not name the pull request found for the branch"
+        ;;
+      badforge)
+        grep -qF 'forge binding' "$case_dir/stderr" \
+          || fail "forgejo-nopr-badforge: refusal does not name the unreadable forge binding"
+        ;;
+    esac
+  done
+  pass "a pushed Forgejo task with no recorded pull request looks it up from the branch, refusing unless it merged"
 }
 
 # A GitHub or GitLab task whose branch was pushed to its own repository is
@@ -6876,6 +6970,7 @@ test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
 test_pushed_forgejo_branch_with_open_pr_refuses
 test_pushed_github_and_gitlab_branch_with_open_pr_refuses
+test_pushed_forgejo_branch_without_recorded_pr_looks_it_up
 test_pushed_fork_contribution_with_open_pr_is_torn_down
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
