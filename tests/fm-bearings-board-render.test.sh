@@ -354,10 +354,61 @@ test_a_refresh_to_no_decisions_clears_the_stack_counter() {
   pass "a refresh that leaves no decisions shows no stale card counter or answered count"
 }
 
+# An open board whose data has not changed does no work: each poll reads only
+# the stamp file, never the data, and builds nothing. A rebuild that changes
+# only the build time reads the data once and updates only the provenance
+# line; a real change still rebuilds its card.
+test_an_unchanged_board_reads_only_its_stamp_and_builds_nothing() {
+  local home out run
+  home=$(make_home idle-unchanged)
+  build_call_board "$home" '["k1","k2"]'
+  out=$(NO_STORAGE=1 run_board "$home" "go,type:k1,mark,poll,poll,poll")
+  printf '%s' "$out" | jq -e '
+    .loads == {data: 0, stamp: 3} and .built == 0 and .reloads == [] and .polls == 1
+      and .cards[0].note == "typed k1" and (.provenance | endswith("2026-08-26T00:00Z"))
+  ' >/dev/null || fail "an unchanged board read its data or built elements on a poll: $out"
+  run=$(rebuild_command "$home" '.generated = "2026-08-26T00:01Z"')
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "go,type:k1,mark,run,poll,poll")
+  printf '%s' "$out" | jq -e '
+    .loads == {data: 1, stamp: 2} and .built == 0 and .reloads == []
+      and .cards[0].note == "typed k1" and (.provenance | endswith("2026-08-26T00:01Z"))
+  ' >/dev/null || fail "a rebuild that changed only the build time re-rendered the board: $out"
+  run=$(rebuild_command "$home" '.captains_call |= map(if .key == "k2" then .title = "Card k2 reworded" else . end)')
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "go,mark,run,poll")
+  printf '%s' "$out" | jq -e '
+    .loads == {data: 1, stamp: 1} and .built > 0 and .cards[1].title == "Card k2 reworded"
+  ' >/dev/null || fail "a real change was not rendered after the stamp moved: $out"
+  pass "an unchanged board polls only its stamp and builds nothing; a build-time-only change updates only the provenance"
+}
+
+# A hidden tab runs no poll timer and reads nothing; showing it again reads the
+# stamp at once, picks up what changed meanwhile, and restarts the timer.
+test_a_hidden_board_stops_polling_and_catches_up_when_shown() {
+  local home out run
+  home=$(make_home idle-hidden)
+  build_call_board "$home" '["k1","k2"]'
+  run=$(rebuild_command "$home" '.captains_call |= map(if .key == "k2" then .title = "Card k2 reworded" else . end)')
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "go,hide,run,poll,poll")
+  printf '%s' "$out" | jq -e '
+    .polls == 0 and .loads == {data: 0, stamp: 0} and .cards[1].title == "Card k2"
+  ' >/dev/null || fail "a hidden board kept polling: $out"
+  home=$(make_home idle-shown)
+  build_call_board "$home" '["k1","k2"]'
+  run=$(rebuild_command "$home" '.captains_call |= map(if .key == "k2" then .title = "Card k2 reworded" else . end)')
+  out=$(NO_STORAGE=1 FM_HARNESS_RUN="$run" run_board "$home" "go,hide,run,poll,show")
+  printf '%s' "$out" | jq -e '
+    .polls == 1 and .loads == {data: 1, stamp: 1} and .cards[1].title == "Card k2 reworded"
+      and .reloads == []
+  ' >/dev/null || fail "a board shown again did not catch up at once and resume polling: $out"
+  pass "a hidden board runs no poll and catches up the moment it is shown again"
+}
+
 test_a_refresh_patches_changed_cards_without_reloading_or_touching_typed_text
 test_a_refresh_leaves_a_card_alone_while_it_is_being_edited
 test_a_refresh_to_no_decisions_clears_the_stack_counter
 test_a_departed_card_leaves_the_board_even_while_it_is_busy
+test_an_unchanged_board_reads_only_its_stamp_and_builds_nothing
+test_a_hidden_board_stops_polling_and_catches_up_when_shown
 
 test_every_card_type_renders_its_links() {
   local home data out
