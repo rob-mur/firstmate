@@ -4,14 +4,24 @@
 # The board's step 1 list ranks every Captain's Call decision. The board sends
 # that ranking, followed by the tasks under way in their recorded order, as a
 # `priority` annotation (context schema fm-bearings-priority.v1, `keys` highest
-# first); firstmate records it here, and
+# first, `order` the decisions among them); firstmate records it here, and
 # reads it back whenever it chooses which task to work on or which decision to
 # answer next. A task or card the ranking does not name sorts after the ranked
 # ones.
 #
+# A board priority names only what that board showed, so `set --from-ctx`
+# merges it per section instead of replacing the ranking. Its decisions
+# (`order`) and its other keys (the tasks under way) are two sections. Each
+# section's stored ids are re-ranked among the places that section already
+# held, so every id the priority does not name - a queued task, a decision the
+# board did not show, or a whole section the priority left empty - keeps its
+# stored rank. A newly named id goes just above the next id of its section
+# already stored, or just below the previous one, or last when its section has
+# none stored.
+#
 # Usage:
-#   fm-board-priority.sh set <id> [<id>...]   replace the ranking, highest first
-#   fm-board-priority.sh set --from-ctx <file> replace it from a fm-bearings-priority.v1 JSON object
+#   fm-board-priority.sh set <id> [<id>...]   replace the whole ranking, highest first
+#   fm-board-priority.sh set --from-ctx <file> merge a fm-bearings-priority.v1 JSON object into it, as above
 #   fm-board-priority.sh show                 print the ranking, one id per line
 #   fm-board-priority.sh rank <id>            print the 1-based rank, or `-` when unranked
 #   fm-board-priority.sh digest               print a bounded one-block ranking for the session digest and wake drain; nothing when no ranking is stored
@@ -77,12 +87,15 @@ case "$cmd" in
     ;;
   set)
     ids=()
+    ctx=''
     if [ "${1:-}" = "--from-ctx" ]; then
       [ "$#" -eq 2 ] || fail "--from-ctx needs one file"
       command -v jq >/dev/null 2>&1 || fail "jq is required"
-      jq -e '.schema == "fm-bearings-priority.v1" and (.keys | type == "array") and all(.keys[]; type == "string")' "$2" >/dev/null \
+      jq -e '.schema == "fm-bearings-priority.v1" and (.keys | type == "array") and all(.keys[]; type == "string")
+        and ((.order // []) | type == "array" and all(.[]; type == "string"))' "$2" >/dev/null \
         || fail "not an fm-bearings-priority.v1 object: $2"
-      while IFS= read -r k; do ids+=("$k"); done < <(jq -r '.keys[]' "$2")
+      ctx=$2
+      while IFS= read -r k; do ids+=("$k"); done < <(jq -r '.keys[]' "$ctx")
     else
       ids=("$@")
     fi
@@ -96,6 +109,37 @@ case "$cmd" in
       seen="$seen$id "
       printf '%s\n' "$id" >>"$tmp"
     done
+    if [ -n "$ctx" ] && [ -s "$FILE" ]; then
+      # Per-section merge, as the header describes: fill each section's stored
+      # places with its ids in the board's order, then place its new ids.
+      merged=$(jq -rn --rawfile named "$tmp" --rawfile stored "$FILE" --slurpfile ctx "$ctx" '
+        def lines: split("\n") | map(select(length > 0));
+        def set: map({key: ., value: true}) | from_entries;
+        def at($k): index([$k]);
+        def section($x):
+          ($x | set) as $inx
+          | (. | set) as $ins
+          | [$x[] | select($ins[.])] as $known
+          | (reduce .[] as $id ({out: [], i: 0};
+              if $inx[$id] then .out += [$known[.i]] | .i += 1 else .out += [$id] end) | .out)
+          | reduce range(0; $x | length) as $j (.;
+              . as $cur | $x[$j] as $k
+              | if $ins[$k] then .
+                else
+                  ([$x[$j + 1:][] | select(. as $n | $cur | at($n) != null)] | first // null) as $next
+                  | ([$x[:$j][] | select(. as $n | $cur | at($n) != null)] | last // null) as $prev
+                  | if $next != null then ($cur | at($next)) as $p | $cur[:$p] + [$k] + $cur[$p:]
+                    elif $prev != null then ($cur | at($prev) + 1) as $p | $cur[:$p] + [$k] + $cur[$p:]
+                    else $cur + [$k] end
+                end);
+        ($named | lines) as $keys
+        | (($ctx[0].order // []) | set) as $dec
+        | ($stored | lines | reduce .[] as $s ([]; if index([$s]) then . else . + [$s] end))
+        | section([$keys[] | select($dec[.])])
+        | section([$keys[] | select($dec[.] | not)])
+        | .[]') || { rm -f "$tmp"; fail "could not merge the board priority: $ctx"; }
+      printf '%s\n' "$merged" >"$tmp"
+    fi
     mv "$tmp" "$FILE"
     ;;
   *) fail "unknown command: $cmd" ;;
