@@ -546,11 +546,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         else ask_sentence end
       | sub("[[:space:]:;,-]+$"; "");
     # The body shows the lead and tail of a text; its options are the choices on the card.
+    # Words that only introduce the options ("Options are", "Choices:") go with them.
     # A tail that only repeats a link label adds nothing the card links lack.
     def without_options:
       (option_parse) as $p
       | if $p == null then .
-        else [ ($p.lead | sub("[[:space:]:;,-]+$"; "") | if length > 0 and (test("[.?!]$") | not) then . + "." else . end),
+        else [ ($p.lead | sub("[[:space:]:;,-]+$"; "")
+                | sub("(?:^|(?<=[.!?])[[:space:]]+)(?:the )?(?:options|choices|alternatives)(?: (?:are|would be))?$"; ""; "i")
+                | if length > 0 and (test("[.?!]$") | not) then . + "." else . end),
                ($p.tail | sub("^[[:space:]]+"; "")
                 | if test("^((PR|MR|Issue) [0-9]+|[A-Z][a-z]+ page|Report)[.]?$") then "" else . end) ]
              | map(select(length > 0)) | join(" ") end;
