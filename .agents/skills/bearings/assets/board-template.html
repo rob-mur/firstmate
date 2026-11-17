@@ -240,7 +240,10 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 .bb-limit.is-visible { display: inline; }
 .bb-submit-error { display: none; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0; padding: 8px 12px; border: 2px solid var(--status-danger); border-radius: var(--radius-sm); background: var(--status-danger-soft); color: var(--status-danger); font-size: var(--fs-xs); font-weight: 700; }
 .bb-submit-error.is-visible { display: flex; }
-.bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
+.bb-answer { display: flex; flex-direction: column; gap: 5px; }
+.bb-answer__label { font-size: var(--fs-xs); font-weight: 700; color: var(--text-strong); }
+.bb-freeform { display: block; width: 100%; min-height: 3.2em; resize: vertical; line-height: 1.4;
+  font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
 
@@ -1016,9 +1019,9 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     form.id = stableId("bb-card-", item.key);
     form.setAttribute("data-lavish-question", item.key);
     var target = makeTarget("card:" + item.key, form, card, form);
-    /* The decision's own options, then the reconcile choice the build adds,
-       in a separate group so it never reads as one of them. One radio name
-       spans both groups, so either answers the card. */
+    /* The decision's own options, then the answer box, then the reconcile
+       choice the build adds, in a separate group so it never reads as one of
+       them. One radio name spans both groups, so either answers the card. */
     var opts = el("div", "bb-opts");
     var aside = el("div", "bb-opts bb-opts--aside");
     item.options.forEach(function (o) {
@@ -1036,14 +1039,29 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       (o.value === "reconcile" ? aside : opts).appendChild(lab);
     });
     if (opts.children.length) form.appendChild(opts);
-    if (aside.children.length) form.appendChild(aside);
 
-    if (item.allow_freeform) {
-      var ff = document.createElement("input");
-      ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
-      form.appendChild(ff);
+    /* A labelled answer box sits right under the decision's own options, above
+       the reconcile choice, so it never reads as a note on that choice. A
+       worker's keyed decision (from_status) always has one, whatever else its
+       card offers, so the captain can always answer the worker in words.
+       Enter queues the answer, as it did from a one-line box; Shift+Enter
+       starts a new line. */
+    if (item.allow_freeform || item.from_status === true) {
+      var answerBox = el("label", "bb-answer");
+      answerBox.appendChild(el("span", "bb-answer__label",
+        opts.children.length ? "Or answer in your own words" : "Your answer"));
+      var ff = document.createElement("textarea");
+      ff.name = "note"; ff.className = "bb-freeform"; ff.rows = 2;
+      ff.placeholder = item.freeform_hint || "answer in your own words…";
+      ff.addEventListener("keydown", function (ev) {
+        if (ev.key !== "Enter" || ev.shiftKey || ev.isComposing) return;
+        ev.preventDefault();
+        if (form.requestSubmit) form.requestSubmit(); else btn.click();
+      });
+      answerBox.appendChild(ff);
+      form.appendChild(answerBox);
     }
+    if (aside.children.length) form.appendChild(aside);
 
     /* In-progress input survives a rebuild: saved per card key under one
        stable storage key, restored here, and pruned for departed cards. */
@@ -1054,7 +1072,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
           if (r.value === saved.selection) r.checked = true;
         });
       }
-      var noteBox = form.querySelector("input[name=note]");
+      var noteBox = form.querySelector("textarea[name=note]");
       if (noteBox && saved.note) noteBox.value = saved.note;
     }
     function saveDraft() {
@@ -1483,8 +1501,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
         if (r.value === picked.value) r.checked = true;
       });
     }
-    var oldNote = oldForm.querySelector("input[name=note]");
-    var note = form.querySelector("input[name=note]");
+    var oldNote = oldForm.querySelector("textarea[name=note]");
+    var note = form.querySelector("textarea[name=note]");
     if (oldNote && note && oldNote.value) note.value = oldNote.value;
   }
   /* move focus back to the same control of a rebuilt priority row */
