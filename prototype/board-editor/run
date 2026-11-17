@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""PROTOTYPE - throwaway. Answer the bearings board's Captain's Call in your editor.
+
+    prototype/board-editor/run              every Captain's Call card in one file
+    prototype/board-editor/run <card-key>   one card on its own
+
+Renders the cards as a plain text file and opens it in ${EDITOR:-nvim}.
+Write an answer under any card, save and quit. Every line you added under a
+card becomes that card's answer; cards you leave alone produce nothing.
+Answers go ONLY to prototype/outbox.jsonl; nothing reaches the board,
+the backlog or a worker. The board data file is only read.
+
+Standard library only.
+"""
+
+from __future__ import annotations
+
+import difflib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+DATA = Path(os.environ.get("TUI_BOARD_DATA", "/home/rob/repos/firstmate/.lavish/bearings-board.data.js"))
+OUTBOX = Path(os.environ.get("TUI_BOARD_OUTBOX", str(HERE.parent / "outbox.jsonl")))
+WIDTH = 78
+LETTERS = "abcdefghijklmnopqrstuvwxyz"
+
+
+def load_payload(path: Path) -> dict:
+    raw = path.read_text()
+    return json.loads(raw.split("=", 1)[1].strip().rstrip(";"))
+
+
+def wrap(text: str, indent: str = "") -> list[str]:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return textwrap.wrap(text, WIDTH, initial_indent=indent, subsequent_indent=indent,
+                         break_long_words=False, break_on_hyphens=False) or [indent.rstrip()]
+
+
+def render_card(n: int, total: int, card: dict) -> list[str]:
+    """One card. The question first, then why, options, links, answer area."""
+    out = [f"## {n}/{total}  {card.get('question') or card.get('title') or card['key']}", ""]
+    if card.get("title") and card.get("title") != card.get("question"):
+        out += wrap(f"About: {card['title']}") + [""]
+    if card.get("problem"):
+        out += wrap(f"Note: {card['problem']}") + [""]
+    why = (card.get("context") or {}).get("reason") or card.get("about")
+    if why:
+        out += wrap(f"Why: {why}") + [""]
+    options = card.get("options") or []
+    if options:
+        out.append("Options:")
+        for letter, o in zip(LETTERS, options):
+            star = "  (recommended)" if o.get("value") == card.get("recommend_value") else ""
+            out += textwrap.wrap(f"{o.get('label')}{star}", WIDTH, initial_indent=f"  {letter}) ",
+                                 subsequent_indent="     ", break_long_words=False, break_on_hyphens=False)
+        out.append("")
+    links = card.get("links") or []
+    if links:
+        out.append("Links:")
+        for link in links:
+            where = link.get("url") or f"board page '{link.get('page')}' (no URL)"
+            out.append(f"  {link.get('label') or 'link'}: {where}")
+        out.append("")
+    meta = f"Card: {card['key']}" + (f"   Repo: {card['repo']}" if card.get("repo") else "")
+    out += [meta, "", "Your answer (write below this line):", "", ""]
+    return out
+
+
+def render(cards: list[dict], built: str) -> tuple[list[str], list[int | None]]:
+    """The whole file, plus which card (by index) owns each line."""
+    head = [
+        f"# Captain's Call: {len(cards)} card{'s' if len(cards) != 1 else ''}"
+        + (f" (board built {built})" if built else ""),
+        "",
+        "Write your answer under a card, then save and quit (:wq).",
+        "A letter on its own, like  b , picks that option.",
+        "Anything else you write is kept as your own words.",
+        "Cards you leave alone send nothing. To send nothing at all, quit with :q!",
+        "",
+        "PROTOTYPE: answers are written only to prototype/outbox.jsonl.",
+        "",
+        "",
+    ]
+    lines, owner = list(head), [None] * len(head)
+    for i, card in enumerate(cards):
+        block = render_card(i + 1, len(cards), card)
+        lines += block
+        owner += [i] * len(block)
+    return lines, owner
+
+
+def added_lines(before: list[str], after: list[str], owner: list[int | None]) -> dict[int | None, list[str]]:
+    """Lines that are new in `after`, grouped by the card they were written under."""
+    found: dict[int | None, list[str]] = {}
+    sm = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag not in ("insert", "replace"):
+            continue
+        # Text typed after line i1-1 belongs to whichever card that line is in.
+        at = i1 if tag == "replace" else i1 - 1
+        card = owner[at] if 0 <= at < len(owner) else (owner[-1] if owner else None)
+        found.setdefault(card, []).extend(after[j1:j2])
+    return found
+
+
+def interpret(card: dict, text_lines: list[str]) -> dict | None:
+    text = "\n".join(text_lines).strip()
+    if not text:
+        return None
+    options = card.get("options") or []
+    record = {"key": card["key"], "question": card.get("question") or card.get("title"), "text": text}
+    # "b", "b)", "b." or "b, but ..." picks b; a sentence that starts "A worker ..." does not.
+    m = re.match(r"^\s*\(?([a-z])(?:\)|[.:,]|\s*$)", text, re.I)
+    if m and LETTERS.index(m.group(1).lower()) < len(options):
+        o = options[LETTERS.index(m.group(1).lower())]
+        record["option"] = o.get("value")
+        record["option_label"] = o.get("label")
+    return record
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) > 1 or (argv and argv[0] in ("-h", "--help")):
+        print(__doc__.strip().split("\n\n")[1])
+        return 0 if argv and argv[0] in ("-h", "--help") else 2
+    payload = load_payload(DATA)
+    cards = list(payload.get("captains_call") or [])
+    if argv:
+        cards = [c for c in cards if c.get("key") == argv[0]]
+        if not cards:
+            print(f"No Captain's Call card with key {argv[0]!r}. Cards now:", file=sys.stderr)
+            for c in payload.get("captains_call") or []:
+                print(f"  {c.get('key')}", file=sys.stderr)
+            return 2
+    if not cards:
+        print("Captain's Call is empty; nothing to answer.")
+        return 0
+
+    built = (payload.get("generated") or "")[11:16]
+    built = built + "Z" if built else ""
+    before, owner = render(cards, built)
+    workdir = Path(tempfile.mkdtemp(prefix="board-editor."))
+    path = workdir / ("captains-call.txt" if len(cards) > 1 else f"{cards[0]['key']}.txt")
+    path.write_text("\n".join(before) + "\n")
+
+    editor = shlex.split(os.environ.get("EDITOR") or "nvim")
+    rc = subprocess.run(editor + [str(path)]).returncode
+    if rc != 0:
+        print(f"The editor exited with status {rc}; nothing written. Your file is kept at {path}")
+        return 1
+    after = path.read_text().splitlines()
+    path.unlink()
+    workdir.rmdir()
+
+    found = added_lines(before, after, owner)
+    stray = [l for l in found.pop(None, []) if l.strip()]
+    records = [r for i, ls in sorted(found.items()) if (r := interpret(cards[i], ls))]
+    if stray:
+        print("Ignored text that is not under any card:")
+        for l in stray:
+            print(f"  {l}")
+    if not records:
+        print("No answers written; nothing captured.")
+        return 0
+
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    OUTBOX.parent.mkdir(parents=True, exist_ok=True)
+    with OUTBOX.open("a") as f:
+        for r in records:
+            f.write(json.dumps({"at": at, "prototype": True, "kind": "answer", **r}) + "\n")
+    print(f"Captured {len(records)} answer{'s' if len(records) != 1 else ''} into {OUTBOX}:")
+    for r in records:
+        pick = f" picked {r['option_label']!r}" if "option" in r else ""
+        print(f"  {r['key']}:{pick}")
+        for line in r["text"].splitlines():
+            print(f"    | {line}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
