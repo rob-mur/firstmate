@@ -338,6 +338,7 @@ class TuiBoard(App):
             payload = load_payload(DATA)
         except Exception as e:  # prototype: keep the last good payload
             self.say("prototype", f"board data unreadable, keeping last view: {e}")
+            self.stamp_sig = None  # try again on the next poll
             return
         new = card_hashes(payload)
         if self.hashes:
