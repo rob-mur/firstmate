@@ -300,6 +300,14 @@ build_checks() {  # <payload>
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" "$BOARD" build --no-reopen "$1" 2>&1 || true
 }
 
+# The payload the last build_checks published for the board page.
+built_data() {
+  local js
+  js=$(cat "$TMP_ROOT/build-home/.lavish/bearings-board.data.js") || fail "the build published no board data"
+  js=${js#window.FM_BEARINGS_BOARD_DATA = }
+  printf '%s\n' "${js%;}"
+}
+
 test_the_generators_own_cards_pass_the_build_decision_check() {
   local snap p out
   snap="$TMP_ROOT/snap-own-cards.json"
@@ -408,7 +416,14 @@ test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add() {
     "a hold with recorded options was refused for options: $out"
   assert_not_contains "$out" "undecided-card: opted-out" \
     "a declared free-text question with no link was refused: $out"
-  pass "a hold missing recorded options or a link is refused by key, and the explicit opt-outs build"
+  p=$(built_data)
+  assert_equals "opted-out" "$(jq -r '[.captains_call[].key | select(. == "alpha-fix" or . == "no-link" or . == "opted-out")] | join(",")' <<<"$p")" \
+    "a card that needs fixing reached Captain's Call"
+  assert_equals "alpha-fix,no-link" "$(jq -r '[.cards_to_fix[].key] | join(",")' <<<"$p")" \
+    "the cards that need fixing were not listed to fix"
+  assert_equals "alpha-fix:missing options" "$(jq -r '.cards_to_fix[0] | "\(.task):\(.problem | split(" (")[0])"' <<<"$p")" \
+    "a card to fix did not name its task and problem"
+  pass "a hold missing recorded options or a link is held back from Captain's Call to fix, and the explicit opt-outs build"
 }
 
 test_cards_carry_links_and_a_non_held_credential_card_survives() {
