@@ -211,6 +211,13 @@
 # (its header owns the contract). It runs before publication so the adapter's
 # own `silent` can tell a result that carried only delivered page prompts.
 #
+# The captain's board ranking uses one more seam of the same kind. A source whose
+# adapter has a `priority <result-file>` command may carry the ranking the board
+# sent; whatever that command prints is piped into
+# `bin/fm-board-priority.sh record`, which owns accepting it only from the
+# bearings board's own source and only once per result (its header owns the
+# contract), so recording the ranking never depends on an agent remembering.
+#
 # Feeding is deliberately independent of handling: it never acknowledges a result
 # and never suppresses a wake. Recording the captain's answer is transcription,
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
@@ -500,6 +507,18 @@ feed_page_prompts() {  # <adapter> <result-file>
   [ -n "$rows" ] || return 1
   printf '%s\n' "$rows" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-board-page.sh" route >/dev/null 2>&1
+}
+
+# Pass a captured result's board ranking to the one priority store, best-effort
+# and silenced like the seams above (see the board-ranking note in the header).
+feed_board_priority() {  # <adapter> <source-id> <result-file>
+  local script ctx
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  ctx=$(FM_HOME="$FM_HOME" "$script" priority "$3" 2>/dev/null) || return 1
+  [ -n "$ctx" ] || return 1
+  printf '%s\n' "$ctx" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-board-priority.sh" record --source-id "$2" --result "$3" >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>
@@ -1402,6 +1421,9 @@ EOF
   # for every adapter and cannot change what the handler receives.
   if [ "$extension_owner" -eq 0 ] && feed_page_prompts "$adapter" "$durable"; then
     printf 'pages-fed: %s\n' "$id"
+  fi
+  if [ "$extension_owner" -eq 0 ] && feed_board_priority "$adapter" "$id" "$durable"; then
+    printf 'priority-fed: %s\n' "$id"
   fi
   if [ "$extension_owner" -eq 0 ] \
     && feed_reconcile_requests "$adapter" "$id" "$durable"; then
