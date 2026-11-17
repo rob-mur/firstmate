@@ -314,7 +314,7 @@ setChrome(chromeMode);
 globalThis.FormData = class {
   constructor(form) { this.form = form; }
   get(name) {
-    const els = this.form.querySelectorAll("input");
+    const els = [...this.form.querySelectorAll("input"), ...this.form.querySelectorAll("textarea")];
     const hit = name === "answer" ? els.find((e) => e.name === name && e.checked) : els.find((e) => e.name === name);
     return hit ? hit.value : null;
   }
@@ -373,7 +373,7 @@ for (const act of actionList.split(",").filter(Boolean)) {
     for (const f of forms()) {
       if (arg !== undefined && f.attributes["data-lavish-question"] !== arg) continue;
       f.querySelector("input[type=radio]").checked = true;
-      f.querySelector("input[name=note]").value = "typed " + f.attributes["data-lavish-question"];
+      f.querySelector("textarea[name=note]").value = "typed " + f.attributes["data-lavish-question"];
       f.fire("input");
     }
   } else if (name === "submit") {
@@ -399,10 +399,10 @@ for (const act of actionList.split(",").filter(Boolean)) {
       .find((b) => b.attributes["data-board-page"] != null).fire("click");
   } else if (name === "note") {
     const f = forms().find((x) => x.attributes["data-lavish-question"] === arg);
-    f.querySelector("input[name=note]").value = "noted " + arg;
+    f.querySelector("textarea[name=note]").value = "noted " + arg;
     f.fire("input");
   } else if (name === "focus") {
-    document.activeElement = forms().find((f) => f.attributes["data-lavish-question"] === arg).querySelector("input[name=note]");
+    document.activeElement = forms().find((f) => f.attributes["data-lavish-question"] === arg).querySelector("textarea[name=note]");
   } else if (name === "blur") {
     document.activeElement = document.body;
   } else if (name === "run") {
@@ -488,7 +488,7 @@ const loadNote = (bySel.get(".bb-main")?.children || []).find((c) => c.id === "b
 const cards = forms().map((f) => ({
   key: f.attributes["data-lavish-question"],
   selection: f.querySelectorAll("input").find((r) => r.type === "radio" && r.checked)?.value ?? "",
-  note: f.querySelector("input[name=note]").value,
+  note: f.querySelector("textarea[name=note]").value,
   queued: f.parentNode.parentNode.classList.contains("is-queued"),
   state: f.querySelectorAll("input").find((i) => i.name === "lavish-state")?.value ?? "",
   title: f.parentNode.parentNode.querySelector(".bb-decision__title")?.textContent ?? "",

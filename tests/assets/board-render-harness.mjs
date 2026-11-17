@@ -9,7 +9,8 @@
 //   { stats:[{n,label}], waiting:{shown,rows}, open_mrs:{shown,rows:[{text,links}]},
 //     captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text,action}],
-//     pages:[{page,text}],notes:[text],options:[{value,label,aside}]}],
+//     pages:[{page,text}],notes:[text],options:[{value,label,aside}],
+//     answer_box:null|{tag,name,label,placeholder,before_aside}}],
 //     empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -171,6 +172,20 @@ const call = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
       label: lab.findAll((c) => c.className.includes("bb-opt__label"))[0]?.textContent ?? "",
       aside: g.className.includes("bb-opts--aside"),
     }))),
+  // The free-text answer box: what it is, the label shown with it, and whether
+  // it sits above the separate reconcile group.
+  answer_box: (() => {
+    const form = card.findAll((n) => n.tagName === "form")[0];
+    const box = card.findAll((n) => n.className.split(/\s+/).includes("bb-freeform"))[0];
+    if (!form || !box) return null;
+    const wrap = form.children.find((c) => c === box || c.findAll((n) => n === box).length > 0);
+    const asideAt = form.children.findIndex((c) => c.className.split(/\s+/).includes("bb-opts--aside"));
+    return {
+      tag: box.tagName, name: box.name ?? "", placeholder: box.placeholder ?? "",
+      label: wrap && wrap !== box ? wrap.findAll((n) => n.className.includes("bb-answer__label"))[0]?.textContent ?? "" : "",
+      before_aside: asideAt < 0 || form.children.indexOf(wrap) < asideAt,
+    };
+  })(),
 }));
 const waitingNode = byId.get("bb-waiting");
 const waiting = {

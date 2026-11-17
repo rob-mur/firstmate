@@ -53,18 +53,21 @@
 # tail} - lead is the text before the first option, tail the text after the
 # last, and each option is {value, label}. The forms, tried in order, are
 # numbered "(1) ... (2) ..." and "1) ... 2) ...", lettered "(a) ... (b) ..." and
-# "A) ... B) ..." (either case), and a slash list after "Options:", "Choices:"
-# or "Decision:" ("Options: x / y / z."). A parenthesised mark may carry its
-# own recommendation ("(a, recommended) ...", "(2; rec) ..."): that option's
-# value is then the parse's `recommend`. Markers must run 1, 2, 3 or a, b, c
+# "A) ... B) ..." (either case) and "A = ...; B = ..." (capitals only), and a
+# slash list after "Options:", "Choices:" or "Decision:" ("Options: x / y /
+# z."). A parenthesised mark may carry its own recommendation ("(a,
+# recommended) ...", "(2; rec) ..."), and an "A = " mark may follow one
+# ("rec A = ...", "recommended B = ..."): that option's value is then the
+# parse's `recommend`. Markers must run 1, 2, 3 or a, b, c
 # from the first, at least two; the last option ends at its sentence end; a
 # reason with no such list parses to null. Values are option-<n> or
 # option-<letter>. A label is the full option text, never shortened, with URLs
 # and a trailing "or"/"and" removed, then put in captain terms: a leading
 # "firstmate posts it" becomes "Post it for me" and a leading "I post it" or
 # "I will post it" becomes "The worker posts it" or "The worker will post it".
-# A label that opens with a lowercase word followed by more words starts with a
-# capital letter; a single word such as a tool name keeps its case.
+# A label that opens with a lowercase word (hyphens allowed, as in "dry-run")
+# followed by more words starts with a capital letter; a single word such as a
+# tool name keeps its case.
 #
 # option_parse_by($kind): option_parse limited to one kind - "number",
 # "letter" or "list" - so a reason holding a numbered list and a lettered one
@@ -118,7 +121,7 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
     | sub("^ "; "") | sub("[[:space:]?.;,:]+$"; "")
     | sub("[.;,]?[[:space:]]+(or|and)$"; ""; "i") | sub("[[:space:]?.;,:]+$"; "");
   def cap: (.[:1] | ascii_upcase) + .[1:];
-  def phrase_cap: if test("^[a-z]+ ") then cap else . end;
+  def phrase_cap: if test("^[a-z][a-z-]* ") then cap else . end;
   def captain_terms:
     def stem: if test("(ch|sh|ss|x|z|o)es$") then .[:-2] elif test("[^aeiou]ies$") then .[:-3] + "y" elif test("s$") then .[:-1] else . end;
     def third: if test("(ch|sh|ss|x|z|o)$") then . + "es" elif test("[^aeiou]y$") then .[:-1] + "ies" else . + "s" end;
@@ -138,7 +141,8 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
           if (length == 0 and $m.n == 1) or (length > 0 and $m.n == (.[-1].n + 1)) then . + [$m] else . end);
       def marks($re; $kind):
         [ $q | match($re; "g")
-          | {offset, length, k: (.captures[0].string), rec: ((.captures[1].string // null) != null)}
+          | (.captures | map({(.name): .string}) | add) as $c
+          | {offset, length, k: $c.k, rec: ($c.r != null)}
           | . + {n: (if $kind == "number" then (.k | tonumber) else (.k | ascii_downcase | explode[0] - 96) end),
                  value: ("option-" + (if $kind == "number" then .k else (.k | ascii_downcase) end))} ];
       def from_marks($ms):
@@ -173,6 +177,7 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
       elif $kind == "letter" then
         from_marks(marks("(?<![[:alnum:]])\\((?<k>[A-Za-z])" + $rec + "\\)"; "letter"))
         // from_marks(marks("(?<![^[:space:]:;,])(?<k>[A-Za-z])\\)"; "letter"))
+        // from_marks(marks("(?:(?<![[:alnum:]])(?<r>recommended|rec|preferred)[[:space:]]+)?(?<![^[:space:]:;,(])(?<k>[A-Z])[[:space:]]?=[[:space:]]"; "letter"))
       else from_list end;
   def option_parse: option_parse_by("number") // option_parse_by("letter") // option_parse_by("list");
   def option_mark_value: "option-" + (if test("^[0-9]") then . else ascii_downcase end);
