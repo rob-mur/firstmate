@@ -77,7 +77,8 @@
 # a session this adapter classifies `ended` that carries no queued content block
 # at all, or `browser_disconnected`, which carries no answer while the session
 # remains open - and every other result stays announced. The page-prompt
-# shape described under `pages` below is the one addition.
+# shape described under `pages` below and the server restart below are the
+# only additions.
 #
 # Deliberately narrow, in both directions. A `Send & End` close carrying the
 # captain's actual answer arrives as `status: feedback` with `session_ended`, so
@@ -85,9 +86,31 @@
 # is any `ended` result that still carries a `prompts` or `feedback` block, which
 # the published poll is not expected to produce but which must never be dropped
 # on that expectation. A `waiting` session, a `missing` one, an `unknown` or
-# unreadable result, and any error all stay announced, because none of them
-# positively proves nothing was said. Silence is only ever an absence this
-# adapter can see in the result, never an absence it assumes.
+# unreadable result, and every error except the transport errors below stay
+# announced, because none of them positively proves nothing was said. Silence
+# is only ever an absence this adapter can see in the result, never an absence
+# it assumes.
+#
+# A SERVER RESTART IS NOT NEWS EITHER. While the shared board server is down or
+# restarting, every armed listener's poll ends in a bare transport error -
+# `Lavish Editor server did not start`, `... poll response was interrupted`, or
+# `... server connection failed`, under `code: SERVER_ERROR` with only `help[N]:`
+# lines after it - and captured that way, each one woke the handler with
+# nothing in it. `silent` holds a result that is exactly that and nothing else,
+# so the runner records it handled and the same listener polls again. A result
+# carrying any other line, session block, prompt, or feedback is announced. So
+# the outage cannot go unseen, the capture that takes a source's unbroken run of
+# transport errors past TRANSPORT_OUTAGE_ANNOUNCE_SECONDS is announced, once per
+# run per source; captures before and after it stay quiet.
+#
+# OUTAGE BACK-OFF. A poll against a down server fails at once, so without a
+# pause each relaunched listener would poll again on the next supervision cycle
+# and a fleet of boards would spin. Before its first poll, `poll` therefore
+# counts its source's unbroken run of transport-error captures, newest first,
+# and waits the retry delay (POLL_RETRY_DELAY_DEFAULT, or its test override)
+# doubled for each capture after the first, capped at POLL_RETRY_DELAY_MAX and
+# measured from the newest capture. A capture that is not a transport error
+# ends the run, so the first poll after a real answer never waits.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
@@ -163,7 +186,8 @@
 # attempt starts at least POLL_RETRY_DELAY_DEFAULT seconds apart. The match is exact and
 # deliberately narrow: real feedback, ended and missing sessions, any other
 # SERVER_ERROR, and the same interruption still standing after the bound is
-# spent are all printed straight through and captured normally. The retry is a
+# spent are all printed straight through and captured normally, where `silent`
+# then treats a bare interruption as the server restart above. The retry is a
 # Lavish fact, so the generic runner in bin/fm-procevent.sh stays
 # adapter-agnostic and learns nothing about it.
 #
@@ -344,6 +368,7 @@ cmd_retire() {
 # only the delay takes an override, so a test can exercise the real bound
 # without waiting it out.
 POLL_RETRY_LIMIT=12
+TRANSPORT_OUTAGE_ANNOUNCE_SECONDS=300
 POLL_RETRY_DELAY_DEFAULT=5
 POLL_RETRY_DELAY_MIN=1
 POLL_RETRY_DELAY_MAX=60
@@ -429,6 +454,50 @@ poll_iteration_floor_wait() {
   ' "$1" "$2"
 }
 
+# The outage back-off described in the header. The run is counted from this
+# source's latest capture backwards and stops at the first capture that is not
+# a transport error, so a real answer resets it at once; the walk also stops as
+# soon as the delay reaches its cap, which bounds its cost. The wait is measured
+# from the latest capture, so time the listener already spent relaunching
+# counts, and it never exceeds the computed delay even if that capture's time
+# reads as being in the future.
+transport_backoff_wait() {  # <artifact> <base-delay>
+  local artifact=$1 delay=$2 id inbox latest='' f seq run=0 captured now wait
+  id=$(cmd_source_id "$artifact" 2>/dev/null) || return 0
+  inbox=$(fm_procevent_inbox_dir "${FM_STATE_OVERRIDE:-$FM_HOME/state}")
+  for f in "$inbox/$id".*.result; do
+    seq=${f##*/"$id".}
+    seq=${seq%.result}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$latest" ] || [ "$((10#$seq))" -gt "$((10#$latest))" ]; then
+      latest=$seq
+    fi
+  done
+  [ -n "$latest" ] || return 0
+  seq=$((10#$latest))
+  while [ "$seq" -ge 1 ]; do
+    f="$inbox/$id.$seq.result"
+    if ! { [ -f "$f" ] && [ ! -L "$f" ] && result_is_transport_error "$f"; }; then
+      break
+    fi
+    run=$((run + 1))
+    [ "$run" -eq 1 ] || delay=$((delay * 2))
+    if [ "$delay" -ge "$POLL_RETRY_DELAY_MAX" ]; then
+      delay=$POLL_RETRY_DELAY_MAX
+      break
+    fi
+    seq=$((seq - 1))
+  done
+  [ "$run" -gt 0 ] || return 0
+  wait=$delay
+  if captured=$(fm_path_mtime "$inbox/$id.$latest.result") \
+    && case "$captured" in ''|*[!0-9]*) false ;; esac; then
+    now=$(date +%s)
+    [ "$now" -lt "$captured" ] || wait=$((delay - (now - captured)))
+  fi
+  [ "$wait" -le 0 ] || sleep "$wait"
+}
+
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
   local pipeline_status reply_file=''
@@ -441,6 +510,7 @@ cmd_poll() {
   fi
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
+  transport_backoff_wait "$artifact" "$delay"
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
   printf -v cleanup_command 'rm -f -- %q' "$response"
   # shellcheck disable=SC2064 # $cleanup_command must expand now, while the staged path is still set.
@@ -765,6 +835,58 @@ result_has_queued_content() {  # <result-file>
   ' "$1"
 }
 
+# Whether a captured result is nothing but one of the transport errors the
+# published poll prints while the board server is down or restarting: the whole
+# result is the error line, `code: SERVER_ERROR`, and only `help[N]:` lines. Any
+# other line, a session block, or a near-match message is not one.
+result_is_transport_error() {  # <result-file>
+  awk '
+    NR == 1 {
+      if ($0 !~ /^error: Lavish Editor (server did not start|poll response was interrupted|server connection failed)$/) { bad = 1; exit }
+      next
+    }
+    NR == 2 {
+      if ($0 != "code: SERVER_ERROR") { bad = 1; exit }
+      next
+    }
+    /^help\[[0-9]+\]: / { next }
+    { bad = 1; exit }
+    END { exit (bad || NR < 2) ? 1 : 0 }
+  ' "$1" 2>/dev/null
+}
+
+# Whether this transport-error capture is the one that takes its source's
+# unbroken run of transport-error captures (this sequence and the consecutive
+# earlier sequences beside it) past TRANSPORT_OUTAGE_ANNOUNCE_SECONDS, measured
+# between capture times. Exactly one capture per run qualifies, and the verdict
+# reads only captures that already exist, so it is the same on every re-read.
+# The walk stops as soon as the previous capture alone is past the bound, so its
+# cost is bounded by the captures in that window, not by the outage's length. A
+# capture time that cannot be read counts as sustained, so doubt announces.
+transport_outage_sustained_at() {  # <transport-error-result-file>
+  local file=$1 dir id seq now start prev='' earlier at
+  dir=$(dirname -- "$file")
+  id=$(fm_procevent_result_source_id "$file")
+  seq=$(fm_procevent_result_sequence "$file")
+  now=$(fm_path_mtime "$file") || return 0
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  start=$now
+  earlier=$((10#$seq - 1))
+  while [ "$earlier" -ge 1 ]; do
+    at="$dir/$id.$earlier.result"
+    if ! { [ -f "$at" ] && [ ! -L "$at" ] && result_is_transport_error "$at"; }; then break; fi
+    start=$(fm_path_mtime "$at") || return 0
+    case "$start" in ''|*[!0-9]*) return 0 ;; esac
+    [ -n "$prev" ] || prev=$start
+    [ $((prev - start)) -lt "$TRANSPORT_OUTAGE_ANNOUNCE_SECONDS" ] || return 1
+    earlier=$((earlier - 1))
+  done
+  [ $((now - start)) -ge "$TRANSPORT_OUTAGE_ANNOUNCE_SECONDS" ] || return 1
+  [ -n "$prev" ] || return 0
+  [ $((prev - start)) -lt "$TRANSPORT_OUTAGE_ANNOUNCE_SECONDS" ]
+}
+
 # Whether a captured result is a routine no-op the runner should record without
 # announcing, for the generic runner's silence seam. Lavish's notion of "nothing
 # was said" lives here and nowhere else: an ended session carrying no queued
@@ -776,6 +898,10 @@ cmd_silent() {
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   [ "$(cmd_classify "$file")" = disconnected ] && return 0
+  if result_is_transport_error "$file"; then
+    transport_outage_sustained_at "$file" && return 1
+    return 0
+  fi
   # Every queued item is a page prompt and each one already reached its page.
   if lines=$(page_rows only "$file" 2>/dev/null) && [ -n "$lines" ]; then
     printf '%s\n' "$lines" | FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board-page.sh" routed >/dev/null 2>&1 && return 0

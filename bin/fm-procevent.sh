@@ -846,7 +846,14 @@ cmd_register_extension() {
 # Capture already happened, so this only turns durable state into durable
 # events - and it republishes on every call regardless of any earlier
 # publication, so a result stays eligible for re-announcement across restarts
-# and drains until `fm_procevent_mark_handled` records it.
+# and drains until `fm_procevent_mark_handled` records it. The one exception is
+# a wake for the same result that is still queued and unacknowledged: that
+# result already stands announced, so no second copy is stacked behind it, and
+# re-announcement resumes once a drain consumes that wake.
+procevent_wake_not_queued() {  # <key> <payload>; a guard for fm_wake_append_guarded
+  ! fm_wake_queued_carries_locked check "$1" "$2"
+}
+
 publish_result() {  # <result-file>
   local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
   local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record
@@ -930,9 +937,11 @@ EOF
       esac
     fi
     unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
-    if fm_wake_append check "procevent:$id:$seq" "check: $line"; then
-      status=0
-    fi
+    # A rejection (3) means an identical wake is still queued, which already
+    # announces this result, so it counts as published.
+    fm_wake_append_guarded procevent_wake_not_queued check "procevent:$id:$seq" "check: $line" \
+      "procevent:$id:$seq" "check: $line"
+    case "$?" in 0|3) status=0 ;; esac
   fi
   fm_procevent_source_lock_release "$id"
   return "$status"
