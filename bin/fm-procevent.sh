@@ -68,7 +68,10 @@
 #            republish every durably captured result with no handled
 #            acknowledgement yet - regardless of any earlier publication - and
 #            start a runner for any registered source that has no live owner and
-#            no open task-owned round. This is liveness repair only - it never
+#            no open task-owned round. A task-owned source with no open round
+#            whose owner task has no endpoint record left is retired instead,
+#            because its task has ended and nothing can receive its feedback.
+#            This is liveness repair only - it never
 #            discovers results by
 #            polling the source, because the child blocks on the source itself.
 #            A start is REPORTED only once it is confirmed: starting a runner is
@@ -1771,7 +1774,7 @@ stranded_leaderless_detail() {  # <source-id>
 }
 
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending
+  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending task_owner
   local launch_identity launch_stamp launch_mark unconfirmed entry
   local -a launched=()
   # Rejected before anything is launched, and by name. A window this command
@@ -1837,6 +1840,21 @@ cmd_reconcile() {
           task_pending=$(source_pending "$id" | head -1)
           if [ -n "$task_pending" ]; then
             fm_procevent_source_lock_release "$id"
+            continue
+          fi
+          # A board can only be armed for a task with an endpoint record, so
+          # once that record is gone the task has ended and nothing can receive
+          # the board's feedback. Retire it through the ordinary guarded path
+          # rather than keep a listener holding a poll on the shared server.
+          task_owner=$(source_owner_task "$id" 2>/dev/null || true)
+          if [ -n "$task_owner" ] && fm_pr_task_id_valid "$task_owner" \
+            && [ ! -e "$STATE/$task_owner.meta" ] && [ ! -L "$STATE/$task_owner.meta" ]; then
+            fm_procevent_source_lock_release "$id"
+            if FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1; then
+              stopped=$((stopped + 1))
+            else
+              uncertain=$((uncertain + 1))
+            fi
             continue
           fi
         fi
