@@ -570,6 +570,32 @@ test_a_worker_decision_card_always_has_an_answer_box_above_reconcile() {
   pass "a worker decision card always has an answer box under its options and above reconcile"
 }
 
+# A worker's keyed decision that numbers its options "(1, recommended) ...;
+# (2) ...; (3) ..." after "Options:" renders a button per option and the
+# recommendation, as the lettered form does. The card comes from a ralph
+# worker's real line through the payload generator.
+test_a_numbered_option_card_renders_its_buttons() {
+  local home snap p out line
+  home=$(make_home numbered-options)
+  line='needs-decision [at=1794925270] [key=app-5750-mr883-undraft]: Should Draft MR https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/883 (APP-5750, test-only fix so test_concurrent_requests_no_cross_contamination can fail; head 98c2eee5, pipeline 544413 green, 0 unresolved threads, not behind main, no approvals) be marked ready for another human reviewer? Options: (1, recommended) you read the one-file diff, then I mark it ready - every ralph round is clean (review clean, QA 6/6 pass, break clean with all binder mutants killed), so only your look is left before it goes to a reviewer; (2) mark it ready now without your read; (3) keep it Draft and say what to change.'
+  snap="$home/snapshot.json"
+  jq -n --arg r "${line#*]: }" '{schema:"fm-bearings.v1", home:"/fixture/home", generated:"2026-11-06T07:34:00Z",
+    prs:"unchecked", in_flight:[], charted:[], landed:[],
+    decisions_open:[{id:"app-5750-ralph", key:"status.app-5750-ralph.app-5750-mr883-undraft", verb:"needs-decision", source:"status",
+      task:"app-5750-ralph", decision_key:"app-5750-mr883-undraft", owner:"(main)", title:"app-5750-ralph", reason_full:$r}]}' > "$snap"
+  p=$(FM_HOME="$home" "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot "$snap") || fail "the payload generator failed"
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -c .captains_call <<<"$p")" 2>"$home/build.err")
+  ! grep -q 'undecided-card' "$home/build.err" || fail "the build flagged the numbered option card: $(cat "$home/build.err")"
+  printf '%s' "$out" | jq -e '
+    (.call[] | select(.key == "status.app-5750-ralph.app-5750-mr883-undraft")) as $c
+    | .error == ""
+      and ($c.options | map(.value)) == ["option-1","option-2","option-3","reconcile"]
+      and ($c.options | map(.aside)) == [false,false,false,true]
+      and $c.answer_box.before_aside
+  ' >/dev/null || fail "the numbered option card did not show its 1, 2 and 3 buttons: $out"
+  pass "a numbered (1, recommended) option card renders its buttons"
+}
+
 # Clicking a card's page button shows that page inside the board's own tab.
 test_a_card_page_button_shows_the_page_in_place() {
   local home page out
@@ -692,6 +718,7 @@ test_an_ended_session_link_opens_the_page_that_replaces_it
 test_a_page_backed_decision_is_answered_on_the_board_when_its_page_is_not_there
 test_reconcile_renders_apart_from_the_full_options
 test_a_worker_decision_card_always_has_an_answer_box_above_reconcile
+test_a_numbered_option_card_renders_its_buttons
 test_a_card_page_button_shows_the_page_in_place
 test_full_screen_keeps_the_same_page_frame
 test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent
