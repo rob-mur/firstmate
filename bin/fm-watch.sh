@@ -379,9 +379,9 @@ case "$POLL" in
     ;;
 esac
 IDLE_POLL_NOW=$POLL
-# Liveness-repair cadence for the two helper commands each cycle would
-# otherwise start: process-event reconcile and the inactive-outcome scan.
-# Both run on this process's first cycle and then once per
+# Liveness-repair cadence for the helper commands each cycle would otherwise
+# start: process-event reconcile, the opt-in Lavish server watchdog, and the
+# inactive-outcome scan. All run on this process's first cycle and then once per
 # FM_WATCH_RECONCILE_SECS (default 60; 0 runs them every cycle).
 # The inactive-outcome scan also runs on any cycle where a status file changed
 # since its last run, so a child's terminal ledger line still reaches the parent
@@ -390,6 +390,7 @@ IDLE_POLL_NOW=$POLL
 WATCH_RECONCILE_SECS=${FM_WATCH_RECONCILE_SECS:-60}
 case "$WATCH_RECONCILE_SECS" in ''|*[!0-9]*) WATCH_RECONCILE_SECS=60 ;; esac
 WATCH_PROCEVENT_AT=
+WATCH_LAVISH_AT=
 WATCH_INACTIVE_AT=
 WATCH_INACTIVE_STATUS_FP=
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
@@ -4398,6 +4399,17 @@ while :; do
   # generic recovery reason, so give that owner first refusal.
   reconcile_overdue_pauses
   resurface_after_downtime
+
+  # Opt-in Lavish board server watchdog (config/lavish-heap-watchdog): keeps
+  # core dumps off and restarts the server before its heap limit when no page is
+  # mid-answer. Silent; it never wakes firstmate. bin/fm-lavish-watchdog.sh owns
+  # the policy. Runs on the WATCH_RECONCILE_SECS cadence.
+  if [ -e "$CONFIG/lavish-heap-watchdog" ] && watch_reconcile_due "$WATCH_LAVISH_AT"; then
+    WATCH_LAVISH_AT=$SECONDS
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-lavish-watchdog.sh" check >/dev/null 2>&1 \
+      || triage_log "lavish watchdog: check failed; see state/lavish-watchdog.log"
+  fi
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation

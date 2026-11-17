@@ -1985,6 +1985,19 @@ When the file is absent, worker launches do not add a board address and retain t
 
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
+Restarting the server is owned only by the opt-in watchdog below.
+
+## Lavish heap watchdog (config/lavish-heap-watchdog)
+
+The optional local, gitignored `config/lavish-heap-watchdog` opts this home into watching the Lavish board server on this machine, which otherwise grows until it crashes at its heap limit.
+Enable it in exactly one home per machine, because every home that has the file acts on the same server; the file is not inherited into secondmate homes.
+An empty file uses the defaults, and `key=value` lines set `rss_mb` (restart threshold, default 2560, under the server's 4 GB heap limit), `quiet_secs` (default 120), and `round_secs` (default 1800).
+
+The watcher runs `bin/fm-lavish-watchdog.sh check` on its reconcile cadence; the check is silent, never wakes firstmate, and logs its actions to `state/lavish-watchdog.log`.
+Each pass turns core dumps off for the running server, and over the threshold restarts it with the same command line and environment, unless a page may be mid-answer.
+A restart never reloads or closes an open page; the page reconnects by itself and keeps any draft.
+The server is stopped with SIGTERM only, and one that does not exit is reported and left running.
+The script's header owns the deferral rules, the restart sequence, and the exit codes.
 
 ## Lavish URL domain map (config/lavish-url-domains)
 
