@@ -970,8 +970,6 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       /* the question refers to options it does not list: say so rather than
          let the choices below pass for them */
       if (item.malformed) top.appendChild(badge("warn", "options missing"));
-      /* the build found this card does not state its decision: say what to fix */
-      if (item.problem) top.appendChild(badge("warn", "needs fixing"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
     }
     pad.appendChild(top);
@@ -990,7 +988,6 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       /* the rec marker on the option itself carries the recommendation */
       var ctx = el("div", "bb-ctx");
       if (item.malformed) ctx.appendChild(ctxRow("options", item.malformed));
-      if (item.problem) ctx.appendChild(ctxRow("needs fixing", item.problem));
       if (item.about) ctx.appendChild(ctxRow("about", item.about));
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);

@@ -3,7 +3,8 @@
 # optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
-# newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
+# newer branch outcome, OPEN DECISIONS, captain-call record divergence, the
+# board's held-back CARDS TO FIX, and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
@@ -888,6 +889,28 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
+# CARDS TO FIX: the Captain's Call cards the board build held back because they
+# do not state their decision (bin/fm-bearings-board.sh owns the check and
+# writes state/board-cards-to-fix as <task>\t<key>\t<problem> lines). Main's
+# drain names each one by owning task and key on every drain until a rebuild
+# shows it, so it is re-posted as a clean keyed decision rather than reaching
+# the captain; it prints nothing when the build held no card back.
+print_cards_to_fix_section() {
+  local file="$STATE/board-cards-to-fix" task key problem printed=0
+  [ "$ACTOR" = main ] && [ -s "$file" ] || return 0
+  while IFS=$'\t' read -r task key problem || [ -n "$task" ]; do
+    [ -n "$task" ] && [ -n "$key" ] || continue
+    if [ "$printed" = 0 ]; then
+      printf "CARDS TO FIX (held back from Captain's Call by the board build):\n"
+      printed=1
+    fi
+    fm_cap_line_var "  $task [key=$key]: $problem"
+    printf '%s\n' "$FM_LINE_CAP_LINE"
+  done < "$file"
+  [ "$printed" = 1 ] || return 0
+  printf '  re-post each as a clean keyed decision: bin/fm-captain-hold.sh hold <task> --reason "<question?>" with --option <value>=<label> (repeatable) or --free-text, and --link <url|page:id> or --no-link; for a worker status question, steer the worker to re-raise it as needs-decision [key=<key>] with a question; the next board build shows it once it passes.\n'
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
@@ -1129,6 +1152,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
+  print_cards_to_fix_section || true
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
@@ -1151,6 +1175,7 @@ if [ "$ACTOR" = main ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
+    print_cards_to_fix_section || true
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
     assert_watcher_liveness
     exit "$BRANCH_OUTCOMES_RC"
@@ -1214,6 +1239,7 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+print_cards_to_fix_section || true
 [ "$ACTOR" != main ] || FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$SCRIPT_DIR/fm-board-priority.sh" digest 2>/dev/null || true
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 assert_watcher_liveness
