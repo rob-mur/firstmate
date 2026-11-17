@@ -3970,6 +3970,71 @@ test_a_no_link_hold_does_not_take_its_origins_pr() {
   pass "a hold recorded with no link does not take its origin's PR"
 }
 
+# A secondmate's question raised in main's own log (owner the mate, no mate
+# field) takes its link from the PRs that mate's home recorded, never from
+# main's. A bare "#N" names a PR only in the repository of a link the reason
+# already carries: "#881" beside a forgejo issue link never means a GitLab MR
+# !881 that some other task recorded.
+test_a_mate_question_takes_only_its_own_repos_pr_link() {
+  local home mate fakebin json
+  home=$(make_home mate-question-pr-link); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  printf '%s\n' 'needs-decision [key=mate-882-decisions]: May I build #882? See https://forgejo.example/rob/continuous-delivery/issues/882 - the #881 spike (PR 895) and the follow-up #883 cover it' \
+    > "$home/state/mate.status"
+  fm_write_meta "$home/state/aegis-relock.meta" \
+    "window=firstmate:fm-aegis-relock" "worktree=$home/projects/ship-wt" "project=aegis" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://gitlab.example/work/app/aegis/-/merge_requests/881"
+  printf 'working: relocking\n' > "$home/state/aegis-relock.status"
+  fm_write_meta "$mate/state/cd-follow-up.meta" \
+    "window=firstmate:fm-cd-follow-up" "worktree=$mate/projects/mate" "project=continuous-delivery" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://forgejo.example/rob/continuous-delivery/pulls/883"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "https://forgejo.example/rob/continuous-delivery/pulls/883" \
+    "$(printf '%s' "$json" | jq -r '.decisions_open[] | select(.decision_key == "mate-882-decisions") | .pr_url')" \
+    "a mate's question did not take the same-repo PR its own home recorded"
+  # The same question without the same-repo PR names nothing it can link.
+  rm -f "$mate/state/cd-follow-up.meta"
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "null" \
+    "$(printf '%s' "$json" | jq -r '.decisions_open[] | select(.decision_key == "mate-882-decisions") | .pr_url')" \
+    "a mate's question took a PR from another home or repository"
+  pass "a mate's question takes only a PR its own home recorded in the linked repository"
+}
+
+# A bare "#N" in main's own hold matches only a recorded PR in the repository of
+# a link the reason carries; with no link it matches nothing. "PR N", "MR N"
+# and "!N" keep matching any PR the home recorded with that number.
+test_a_bare_number_names_a_pr_only_in_a_linked_repo() {
+  local home fakebin json
+  home=$(make_home bare-number-pr-link); write_fixture "$home"
+  fm_write_meta "$home/state/aegis-relock.meta" \
+    "window=firstmate:fm-aegis-relock" "worktree=$home/projects/ship-wt" "project=aegis" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://gitlab.example/work/app/aegis/-/merge_requests/881"
+  printf 'working: relocking\n' > "$home/state/aegis-relock.status"
+  sed -i '/^## Queued/a\
+- [ ] cross-call - Build it (repo: cd) (kind: captain) (hold: see https://forgejo.example/rob/continuous-delivery/issues/882 and the #881 spike) (hold-kind: captain)\
+- [ ] nolink-call - Merge it (repo: firstmate) (kind: captain) (hold: does #9 merge now?) (hold-kind: captain)\
+- [ ] samerepo-call - Merge it (repo: firstmate) (kind: captain) (hold: per https://github.com/kunchenguid/firstmate/issues/3 does #9 merge now?) (hold-kind: captain)\
+- [ ] bang-call - Relock it (repo: aegis) (kind: captain) (hold: should !881 merge now?) (hold-kind: captain)\
+- [ ] mr-call - Relock it (repo: aegis) (kind: captain) (hold: should MR 881 merge now?) (hold-kind: captain)' "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  pr_of() { printf '%s' "$json" | jq -r --arg k "$1" '.decisions_open[] | select(.key == $k) | .pr_url'; }
+  assert_equals "null" "$(pr_of cross-call)" "a bare #N matched a PR in another repository"
+  assert_equals "null" "$(pr_of nolink-call)" "a bare #N with no link in the reason matched a PR"
+  assert_equals "https://github.com/kunchenguid/firstmate/pull/9" "$(pr_of samerepo-call)" \
+    "a bare #N did not match the PR in the repository the reason links"
+  assert_equals "https://gitlab.example/work/app/aegis/-/merge_requests/881" "$(pr_of bang-call)" \
+    "an explicit !N no longer matches"
+  assert_equals "https://gitlab.example/work/app/aegis/-/merge_requests/881" "$(pr_of mr-call)" \
+    "an explicit MR N no longer matches"
+  pass "a bare #N names a PR only in a repository the reason links; explicit forms still match"
+}
+
 fm_test_run \
   test_full_captain_questions_survive_local_and_secondmate_projection \
   test_supplied_secondmate_questions_and_legacy_optional_fields \
@@ -4050,4 +4115,6 @@ fm_test_run \
   test_a_board_answer_from_another_page_is_ignored \
   test_a_reconciled_re_hold_raises_the_card_again \
   test_a_hold_gains_the_pr_link_its_home_recorded \
-  test_a_no_link_hold_does_not_take_its_origins_pr
+  test_a_no_link_hold_does_not_take_its_origins_pr \
+  test_a_mate_question_takes_only_its_own_repos_pr_link \
+  test_a_bare_number_names_a_pr_only_in_a_linked_repo
