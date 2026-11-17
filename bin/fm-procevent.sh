@@ -71,6 +71,11 @@
 #            no open task-owned round. A task-owned source with no open round
 #            whose owner task has no endpoint record left is retired instead,
 #            because its task has ended and nothing can receive its feedback.
+#            Any other source with no unacknowledged capture whose own adapter's
+#            `finished` command exits 0 for its registration argv is retired
+#            too, since nothing will arrive through it again (for Lavish, a
+#            decision page whose calls are answered or closed, or whose session
+#            has ended; bin/fm-procevent-lavish.sh owns that verdict).
 #            This is liveness repair only - it never
 #            discovers results by
 #            polling the source, because the child blocks on the source itself.
@@ -425,6 +430,19 @@ adapter_self_announcing() {  # <adapter>
   script=$(adapter_script "$1")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   "$script" self-announcing >/dev/null 2>&1
+}
+
+# Ask the source's own adapter whether the page or channel it listens on is
+# finished, so reconcile may retire a listener nobody will answer through again.
+# Exit 0 is the only "finished"; everything else - including a missing adapter
+# or an adapter without the command - keeps the registration armed. The adapter
+# receives the registration's own argv, so no adapter-specific condition appears
+# in this runner.
+adapter_source_finished() {  # <adapter> <source-id> <argv>...
+  local script
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  FM_STATE_OVERRIDE="$STATE" "$script" finished "$2" -- "${@:3}" >/dev/null 2>&1
 }
 
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
@@ -1774,7 +1792,8 @@ stranded_leaderless_detail() {  # <source-id>
 }
 
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending task_owner
+  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending task_owner adapter
+  local -a ARGV=()
   local launch_identity launch_stamp launch_mark unconfirmed entry
   local -a launched=()
   # Rejected before anything is launched, and by name. A window this command
@@ -1857,6 +1876,22 @@ cmd_reconcile() {
             fi
             continue
           fi
+        elif [ -z "$(source_pending "$id" | head -1)" ] \
+          && adapter=$(read_adapter "$id" 2>/dev/null) && read_argv "$id" 2>/dev/null \
+          && adapter_source_finished "$adapter" "$id" "${ARGV[@]}"; then
+          # The source's own adapter says what it listens on is finished - for
+          # a decision page, its calls are answered or closed, or its session
+          # has ended - so nothing will arrive through it again. Retire it
+          # through the ordinary guarded path, bound to the registration just
+          # read, rather than keep a listener holding a poll on the server.
+          fm_procevent_source_lock_release "$id"
+          if FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-procevent.sh" \
+            retire "$id" --if-matches "$adapter" -- "${ARGV[@]}" >/dev/null 2>&1; then
+            stopped=$((stopped + 1))
+          else
+            uncertain=$((uncertain + 1))
+          fi
+          continue
         fi
         if [ "$claim_state" -eq 1 ] && fm_procevent_claim_undisplaceable_locked "$id"; then
           # A stale claim whose process group still has members, which can mean

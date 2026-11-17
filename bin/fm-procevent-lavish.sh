@@ -13,6 +13,7 @@
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
+#   fm-procevent-lavish.sh finished <source-id> -- <listener argv>...
 #   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
 #   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
 #
@@ -68,6 +69,20 @@
 #            only place Lavish's notion of "nothing was said" is decided.
 #            Task-owned terminal rounds bypass generic silence so their owner
 #            receives the stop-and-conclude instruction.
+# finished   Exit 0 when a firstmate-owned decision page is finished, so the
+#            runner's reconcile may retire its listener; any other exit keeps
+#            it armed. This is the generic `finished` adapter contract
+#            bin/fm-procevent.sh calls with the registration's own argv, and
+#            the only place Lavish's notion of a finished page is decided. A
+#            page is finished when its saved Lavish session has ended, or when
+#            every `data-lavish-question` key it carries is either answered on
+#            the page in a capture firstmate has already handled, or names a
+#            captain call `fm-captain-hold.sh settled` reports finished. A
+#            comment on an option card, a `reconcile` request, and an
+#            unhandled capture are not answers. The bearings board, a page
+#            with no question keys, and anything this command cannot read are
+#            never finished. It reads only; it never closes, reloads, or ends
+#            the page or its session.
 #
 # AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
 # Closing a review surface that carried nothing is the single most common Lavish
@@ -361,6 +376,99 @@ cmd_retire() {
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
   "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
+}
+
+# Whether a firstmate-owned decision page is finished, as the header's
+# `finished` describes. Exit 0 is the only "finished"; every doubt is a 1.
+cmd_finished() {  # <source-id> -- <listener argv>...
+  local id=${1-} artifact real board key
+  local -a keys=() answered=()
+  [ "$#" -ge 4 ] && [ "$2" = -- ] || usage
+  shift 2
+  [ "${1##*/}" = fm-procevent-lavish.sh ] && [ "${2-}" = poll ] || return 1
+  artifact=${3-}
+  [ "$(cmd_source_id "$artifact" 2>/dev/null)" = "$id" ] || return 1
+  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+    || return 1
+  board="$FM_HOME/.lavish/bearings-board.html"
+  if [ -e "$board" ] && [ "$(cmd_source_id "$board" 2>/dev/null)" = "$id" ]; then
+    return 1
+  fi
+  # A session that has ended will never deliver to this listener again.
+  if perl -MJSON::PP -MEncode=decode,FB_CROAK -e '
+    my ($path, $real) = @ARGV;
+    $real = decode("UTF-8", $real, FB_CROAK);
+    open my $file, "<", $path or exit 1;
+    local $/;
+    my $state = eval { decode_json(<$file>) };
+    ref($state) eq "HASH" && ref($state->{sessions}) eq "HASH" or exit 1;
+    my @sessions = grep {
+      ref($_) eq "HASH" && defined($_->{file}) && $_->{file} eq $real
+    } values %{$state->{sessions}};
+    @sessions or exit 1;
+    for (@sessions) { defined($_->{status}) && $_->{status} eq "ended" or exit 1 }
+    exit 0;
+  ' "${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json" "$real" 2>/dev/null; then
+    return 0
+  fi
+  mapfile -t keys < <(perl -ne '
+    print "$1\n" while /data-lavish-question="([^"]*)"/g;
+  ' "$real" 2>/dev/null | sort -u)
+  [ "${#keys[@]}" -gt 0 ] || return 1
+  for key in "${keys[@]}"; do
+    [[ "$key" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || return 1
+  done
+  mapfile -t answered < <(perl -MJSON::PP -e "$(lavish_result_parser)"'
+    use strict; use warnings;
+    my ($inbox, $id, @keys) = @ARGV;
+    my %want = map { $_ => 1 } @keys;
+    my %answered;
+    sub truthy { my ($v) = @_; return JSON::PP::is_bool($v) ? ($v ? 1 : 0) : 0 }
+    opendir(my $dh, $inbox) or exit 0;
+    for my $name (readdir $dh) {
+      next unless $name =~ /\A\Q$id\E\.([0-9]+)\.result\z/;
+      my $path = "$inbox/$name";
+      my $mark = "$inbox/$id.$1.handled";
+      next if -l $path || !-f $path || -l $mark || !-f $mark;
+      my ($form, $want, $items, $malformed) = eval { lavish_result($path, "prompts") };
+      next if !defined($form) || $malformed || @$items != $want;
+      for my $item (@$items) {
+        next unless defined $item->{tag} && $item->{tag} eq "choice";
+        my $prompt = $item->{prompt};
+        next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
+        my $data = eval { decode_json($1) };
+        next unless ref($data) eq "HASH";
+        my $key = $data->{question};
+        next if !defined($key) || ref($key) || !$want{$key};
+        if (defined($data->{schema}) && !ref($data->{schema})
+            && $data->{schema} eq "fm-bearings-answer.v1") {
+          my ($selected, $note) = ($data->{selection}, $data->{note});
+          next if !defined($selected) || ref($selected) || !defined($note) || ref($note);
+          next if $selected eq "reconcile";
+          if (!length($selected)) {
+            next unless length($note);
+            next if truthy($data->{has_options}) && !truthy($data->{free_text});
+          }
+        } elsif (!exists($data->{schema}) && !exists($data->{selection})
+            && !exists($data->{note})) {
+          my $answer = $data->{answer};
+          next if !defined($answer) || ref($answer) || !length($answer);
+          next if $answer eq "reconcile" || index($answer, "reconcile - ") == 0;
+        } else {
+          next;
+        }
+        $answered{$key} = 1;
+      }
+    }
+    print "$_\n" for sort keys %answered;
+  ' "$(fm_procevent_inbox_dir "${FM_STATE_OVERRIDE:-$FM_HOME/state}")" "$id" "${keys[@]}" 2>/dev/null)
+  for key in "${keys[@]}"; do
+    case $'\n'"$(printf '%s\n' "${answered[@]}")"$'\n' in
+      *$'\n'"$key"$'\n'*) continue ;;
+    esac
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" settled "$key" >/dev/null 2>&1 || return 1
+  done
+  return 0
 }
 
 # The bounded quiet retry described in the header. The bound is a constant
@@ -1260,6 +1368,7 @@ cmd_read() {
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
+  finished)  shift; cmd_finished "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
   deliver-reply) shift; cmd_deliver_reply "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
