@@ -1380,6 +1380,37 @@ test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer() {
   pass "a rec A = ...; B = ... option line gets buttons, its recommendation and a free-text answer"
 }
 
+# A worker's keyed decision that numbers its options "(1, recommended) ...;
+# (2) ...; (3) ..." gets a button per option and the recommended one as the
+# recommendation, as the lettered form does, and its asking sentence, not the
+# "Options:" that introduces the list, is the question. The text is a ralph
+# worker's real line.
+test_a_numbered_recommended_option_line_gets_buttons() {
+  local snap="$TMP_ROOT/num-rec.json" p card out line reason
+  line='needs-decision [at=1794925270] [key=app-5750-mr883-undraft]: Should Draft MR https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/883 (APP-5750, test-only fix so test_concurrent_requests_no_cross_contamination can fail; head 98c2eee5, pipeline 544413 green, 0 unresolved threads, not behind main, no approvals) be marked ready for another human reviewer? Options: (1, recommended) you read the one-file diff, then I mark it ready - every ralph round is clean (review clean, QA 6/6 pass, break clean with all binder mutants killed), so only your look is left before it goes to a reviewer; (2) mark it ready now without your read; (3) keep it Draft and say what to change.'
+  reason=${line#*]: }
+  fresh_homes num-rec
+  write_snapshot "$TMP_ROOT/num-rec-base.json"
+  jq --arg r "$reason" '.decisions_open = [
+        {id: "app-5750-ralph", key: "status.app-5750-ralph.app-5750-mr883-undraft", verb: "needs-decision", source: "status",
+         task: "app-5750-ralph", decision_key: "app-5750-mr883-undraft", owner: "app-5750-ralph", reason: $r}]' \
+    "$TMP_ROOT/num-rec-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card=$(jq -c '.captains_call[] | select(.key == "status.app-5750-ralph.app-5750-mr883-undraft")' <<<"$p")
+  assert_equals "option-1|option-2|option-3" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" \
+    "the numbered options are the card's buttons: $card"
+  assert_equals "Mark it ready now without your read|Keep it Draft and say what to change" \
+    "$(jq -r '[.options[1:][].label] | join("|")' <<<"$card")" "each option keeps its text without its number"
+  assert_equals "option-1" "$(jq -r '.recommend_value // "none"' <<<"$card")" "the option marked recommended is the recommendation"
+  jq -e '.question | test("^Should Draft MR .*[?]$")' <<<"$card" >/dev/null \
+    || fail "the asking sentence before \"Options:\" is not the card question: $card"
+  printf '%s\n' "$p" > "$TMP_ROOT/num-rec-payload.json"
+  validates "$TMP_ROOT/num-rec-payload.json" || fail "the payload did not satisfy the board validator"
+  out=$(build_checks "$TMP_ROOT/num-rec-payload.json")
+  assert_not_contains "$out" "undecided-card" "the build flagged the card: $out"
+  pass "a numbered (1, recommended) option line gets buttons and its recommendation"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -1512,4 +1543,5 @@ fm_test_run \
   test_a_card_carries_the_pr_link_its_snapshot_row_recorded \
   test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them \
   test_a_secondmate_decision_is_answerable_from_its_card \
-  test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer
+  test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer \
+  test_a_numbered_recommended_option_line_gets_buttons
