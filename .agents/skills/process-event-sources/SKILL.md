@@ -121,6 +121,7 @@ The crew-hosted recovery ordering and arm-and-acknowledge rule are owned by the 
 : Never append a raw result to a task's status history; that log is a bounded event record, not a payload channel.
 : A source whose adapter returns a terminal verdict for the captured result has already retired itself, except a worker-owned board, which stays registered and keeps its stop-and-conclude note with its owner until that owner acknowledges the terminal round as described above.
   An ordinary ended review needs no cleanup from you and produces no further wake.
+  Reconcile also retires a decision page whose calls are all answered or closed, or whose session has ended, once its captures are handled.
   Retire any other finished source with the adapter's `retire`, which stays safe and idempotent even for one that already retired.
   Retirement stops future completions; it is independent of acknowledging a result already captured, which only `handled` does.
 

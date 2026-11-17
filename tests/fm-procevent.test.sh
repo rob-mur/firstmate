@@ -24,19 +24,19 @@ mkdir -p "$LAVISH_AXI_STATE_DIR"
 
 # Lavish owns this persisted session contract. The fake CLI fixtures exercise
 # its published poll and synchronous reply command boundaries without starting a server.
-lavish_session() {  # <artifact> [session-url]
+lavish_session() {  # <artifact> [session-url] [status]
   perl -MJSON::PP -MCwd=realpath -MDigest::SHA=sha256_hex -MEncode=decode -e '
-    my ($path, $artifact, $url) = @ARGV;
+    my ($path, $artifact, $url, $status) = @ARGV;
     my $real = realpath($artifact) // die "missing fixture artifact";
     my $key = substr(sha256_hex($real), 0, 16);
     my $state = { sessions => {} };
     if (-f $path) { open my $in, "<", $path or die $!; local $/; $state = decode_json(<$in>); }
     $state->{sessions}{$key} = {
-      key => $key, file => decode("UTF-8", $real), status => "open", url => $url,
+      key => $key, file => decode("UTF-8", $real), status => $status, url => $url,
     };
     open my $out, ">", $path or die $!;
     print $out encode_json($state);
-  ' "$LAVISH_AXI_STATE_DIR/state.json" "$1" "${2:-http://127.0.0.1:14387/session/0123456789abcdef}"
+  ' "$LAVISH_AXI_STATE_DIR/state.json" "$1" "${2:-http://127.0.0.1:14387/session/0123456789abcdef}" "${3:-open}"
 }
 
 BLOCKER="$TMP_ROOT/blocker.sh"
@@ -1235,6 +1235,133 @@ PATH="$GONE_BIN:$PATH" pe "$HGONE" reconcile >/dev/null 2>&1 || true
   || fail "a board whose task is still live was retired"
 touch "$GONE_TRIGGER"
 pass "a board whose task has ended is retired instead of left polling"
+
+# --- end-user-aligned regression: a finished decision page stops listening ---
+# A firstmate-owned decision page keeps a long poll and a session open on the
+# one shared Lavish server for as long as it stays armed. Once every question
+# on it is answered on the page itself (in a capture firstmate has handled), or
+# its task's captain call is closed, or its session has ended, reconcile retires
+# its listener. A page with an open question, an answer still unhandled, or
+# only a comment on an option card stays armed, and the bearings board never
+# retires this way.
+HANS="$TMP_ROOT/hans"; new_home "$HANS"
+mkdir -p "$HANS/data" "$HANS/.lavish"
+fm_test_tasks_toml "$HANS/.tasks.toml"
+cat > "$HANS/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] hans-open-call - Pick a release window (kind: captain) (since 2026-11-10) (hold: pick a window) (hold-kind: captain)
+
+## Done
+- [x] hans-closed-call - Pick a mirror (closed 2026-11-12)
+EOF
+HANS_BIN=$(fm_fakebin "$TMP_ROOT/lavish-hans-stub")
+HANS_TRIGGER="$TMP_ROOT/lavish-hans-release"
+export HANS_TRIGGER
+cat > "$HANS_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+while [ ! -e "$HANS_TRIGGER" ]; do sleep 0.05; done
+exit 1
+SH
+chmod +x "$HANS_BIN/lavish-axi"
+hans_page() {  # <artifact> <question-key>...
+  local artifact=$1 key
+  shift
+  {
+    printf '<h1>decision</h1>\n'
+    for key in "$@"; do
+      printf '<form data-lavish-question="%s"><button>go</button></form>\n' "$key"
+    done
+  } > "$artifact"
+}
+# One captured round carrying one answer card, in the published list form.
+hans_capture() {  # <source-id> <seq> <escaped context JSON>
+  mkdir -p "$HANS/state/procevent-inbox"
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "1","Answer\\n\\nContext data:\\n%s","form",choice,"Answer"\n' "$3" \
+    > "$HANS/state/procevent-inbox/$1.$2.result"
+  printf 'lavish\n' > "$HANS/state/procevent-inbox/$1.$2.adapter"
+  chmod 0600 "$HANS/state/procevent-inbox/$1.$2.result" "$HANS/state/procevent-inbox/$1.$2.adapter"
+}
+HANS_ANSWERED="$TMP_ROOT/hans-answered.html"
+HANS_OPEN="$TMP_ROOT/hans-open.html"
+HANS_UNHANDLED="$TMP_ROOT/hans-unhandled.html"
+HANS_COMMENT="$TMP_ROOT/hans-comment.html"
+HANS_ENDED="$TMP_ROOT/hans-ended.html"
+HANS_CLOSED="$TMP_ROOT/hans-closed.html"
+HANS_HELD="$TMP_ROOT/hans-held.html"
+HANS_BOARD="$HANS/.lavish/bearings-board.html"
+hans_page "$HANS_ANSWERED" hans-q1 hans-q2
+hans_page "$HANS_OPEN" hans-q1 hans-q3
+hans_page "$HANS_UNHANDLED" hans-q4
+hans_page "$HANS_COMMENT" hans-q5
+printf '<h1>a page with no questions</h1>\n' > "$HANS_ENDED"
+hans_page "$HANS_CLOSED" hans-closed-call
+hans_page "$HANS_HELD" hans-open-call
+hans_page "$HANS_BOARD" hans-board-q
+for hans_art in "$HANS_ANSWERED" "$HANS_OPEN" "$HANS_UNHANDLED" "$HANS_COMMENT" \
+  "$HANS_ENDED" "$HANS_CLOSED" "$HANS_HELD" "$HANS_BOARD"; do
+  lavish_session "$hans_art"
+done
+fm_test_track_procevent_home "$HANS"
+declare -A hans_id=()
+for hans_name in answered open unhandled comment ended closed held board; do
+  case "$hans_name" in
+    answered) hans_art=$HANS_ANSWERED ;; open) hans_art=$HANS_OPEN ;;
+    unhandled) hans_art=$HANS_UNHANDLED ;; comment) hans_art=$HANS_COMMENT ;;
+    ended) hans_art=$HANS_ENDED ;; closed) hans_art=$HANS_CLOSED ;;
+    held) hans_art=$HANS_HELD ;; board) hans_art=$HANS_BOARD ;;
+  esac
+  hans_id[$hans_name]=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$hans_art")
+  PATH="$HANS_BIN:$PATH" FM_HOME="$HANS" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=30 \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$hans_art" >/dev/null \
+    || fail "the $hans_name decision page could not be armed"
+  wait_for "$FM_PROCEVENT_CLAIM_ROOT/${hans_id[$hans_name]}.claim" \
+    || fail "the $hans_name decision page never started listening"
+done
+# Both questions answered on the page, across two handled rounds; the second
+# is a selection the page labels in words, as real decision pages do.
+hans_capture "${hans_id[answered]}" 1 \
+  '{\"schema\":\"fm-bearings-answer.v1\",\"question\":\"hans-q1\",\"selection\":\"go\",\"note\":\"\"}'
+hans_capture "${hans_id[answered]}" 2 \
+  '{\"schema\":\"fm-bearings-answer.v1\",\"question\":\"hans-q2\",\"selection\":\"Keep them running\",\"note\":\"until Friday\"}'
+# Only one of two questions answered.
+hans_capture "${hans_id[open]}" 1 \
+  '{\"schema\":\"fm-bearings-answer.v1\",\"question\":\"hans-q1\",\"selection\":\"go\",\"note\":\"\"}'
+# Answered, but firstmate has not handled that round yet.
+hans_capture "${hans_id[unhandled]}" 1 \
+  '{\"schema\":\"fm-bearings-answer.v1\",\"question\":\"hans-q4\",\"selection\":\"go\",\"note\":\"\"}'
+# Only a comment on an option card, which is not an answer.
+hans_capture "${hans_id[comment]}" 1 \
+  '{\"schema\":\"fm-bearings-answer.v1\",\"question\":\"hans-q5\",\"selection\":\"\",\"note\":\"why not both?\",\"has_options\":true}'
+# The board's own question, answered and handled.
+hans_capture "${hans_id[board]}" 1 \
+  '{\"schema\":\"fm-bearings-answer.v1\",\"question\":\"hans-board-q\",\"selection\":\"go\",\"note\":\"\"}'
+for hans_round in answered:1 answered:2 open:1 comment:1 board:1; do
+  pe "$HANS" handled "${hans_id[${hans_round%%:*}]}" "${hans_round#*:}" >/dev/null \
+    || fail "the fixture round $hans_round could not be acknowledged"
+done
+lavish_session "$HANS_ENDED" "http://127.0.0.1:14387/session/0123456789abcdef" ended
+PATH="$HANS_BIN:$PATH" pe "$HANS" reconcile >/dev/null 2>&1 || true
+for hans_name in answered ended closed; do
+  [ ! -e "$HANS/state/procevent/${hans_id[$hans_name]}.source" ] \
+    || fail "a finished decision page ($hans_name) stayed armed"
+  [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/${hans_id[$hans_name]}.claim" ] \
+    || fail "a finished decision page ($hans_name) kept its listener polling"
+done
+for hans_name in open unhandled comment held board; do
+  [ -e "$HANS/state/procevent/${hans_id[$hans_name]}.source" ] \
+    || fail "an unfinished decision page ($hans_name) was retired"
+done
+pe "$HANS" handled "${hans_id[unhandled]}" 1 >/dev/null \
+  || fail "the unhandled fixture round could not be acknowledged"
+PATH="$HANS_BIN:$PATH" pe "$HANS" reconcile >/dev/null 2>&1 || true
+[ ! -e "$HANS/state/procevent/${hans_id[unhandled]}.source" ] \
+  || fail "an answered decision page stayed armed after its round was handled"
+[ -e "$HANS/state/procevent/${hans_id[board]}.source" ] \
+  || fail "the bearings board was retired as a finished decision page"
+touch "$HANS_TRIGGER"
+pass "a finished decision page is retired instead of left polling"
 
 # --- end-user-aligned regression: acknowledging a delivered note stops the ring
 # The move into handled/ is the worker's own acknowledgement (the inbox
