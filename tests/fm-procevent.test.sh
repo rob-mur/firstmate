@@ -503,6 +503,27 @@ case "$repeat_out" in
 esac
 pass "an unhandled result survives restart and repeat drains, and only explicit acknowledgement stops its re-announcement"
 
+# --- a re-announcement never stacks a second copy of a wake still queued ------
+# Every capture and every supervision cycle re-announces each unhandled result.
+# While that result's wake is still queued and unacknowledged, another copy tells
+# the supervisor nothing new, and when many boards are captured in a burst the
+# copies multiply into a queue full of repeats that surface after handling.
+HDUP="$TMP_ROOT/hdup"; new_home "$HDUP"
+mkdir -p "$HDUP/state/procevent-inbox"
+printf 'stranded result\n' > "$HDUP/state/procevent-inbox/src-dup.3.result"
+printf 'lavish\n' > "$HDUP/state/procevent-inbox/src-dup.3.adapter"
+chmod 0600 "$HDUP/state/procevent-inbox/src-dup.3.result" "$HDUP/state/procevent-inbox/src-dup.3.adapter"
+pe "$HDUP" reconcile >/dev/null
+pe "$HDUP" reconcile >/dev/null
+pe "$HDUP" reconcile >/dev/null
+[ "$(wake_payloads "$HDUP" | grep -c 'procevent lavish src-dup 3')" = 1 ] \
+  || fail "repeated reconciles stacked copies of a still-queued wake: $(wake_payloads "$HDUP")"
+mv "$HDUP/state/.wake-queue" "$HDUP/state/.wake-queue.drained-1"
+pe "$HDUP" reconcile >/dev/null
+[ "$(wake_payloads "$HDUP" | grep -c 'procevent lavish src-dup 3')" = 1 ] \
+  || fail "an unhandled result was not re-announced once its queued wake was consumed: $(wake_payloads "$HDUP")"
+pass "an unhandled result is re-announced once per consumed wake, never stacked while one is queued"
+
 HRACE="$TMP_ROOT/hrace"; new_home "$HRACE"
 mkdir -p "$HRACE/state/procevent-inbox"
 printf 'racing result\n' > "$HRACE/state/procevent-inbox/racing-src.1.result"
@@ -1221,6 +1242,7 @@ PATH="$ADOPT_BIN:$PATH" FM_HOME="$HNOMETA" \
   || fail "a board was refused for a task that does have an endpoint"
 pass "a worker-owned board is only armed for an owner its feedback can reach"
 
+
 # --- end-user-aligned regression: acknowledging a delivered note stops the ring
 # The move into handled/ is the worker's own acknowledgement (the inbox
 # contract), so a later reconcile that finds the same captured round must
@@ -1696,6 +1718,50 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$MISSING_REPLY_COUNT" LAVISH_SCR
   || fail "a listener whose staged reply was gone still posted something: $(cat "$MISSING_REPLY_LOG")"
 pass "a listener whose staged reply is gone polls the board without one"
 
+# --- a listener backs off while its board server keeps failing ---------------
+# While the shared board server is down, every poll fails at once, so each
+# relaunched listener would poll again within the supervision cycle and spin.
+# A listener whose source's latest captures are an unbroken run of transport
+# errors waits first, longer the longer the run, measured from the latest one.
+HBACK="$TMP_ROOT/hbackoff"; new_home "$HBACK"
+BACK_ART="$TMP_ROOT/backoff-board.html"
+printf '<h1>backoff</h1>\n' > "$BACK_ART"
+lavish_session "$BACK_ART"
+back_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$BACK_ART")
+BACK_INBOX="$HBACK/state/procevent-inbox"
+mkdir -p "$BACK_INBOX"
+back_capture() {  # <seq> <transport|feedback> [seconds-ago]
+  if [ "$2" = transport ]; then
+    printf 'error: Lavish Editor server did not start\ncode: SERVER_ERROR\nhelp[1]: Run lavish-axi server --port 4387\n' \
+      > "$BACK_INBOX/$back_id.$1.result"
+  else
+    printf 'session:\n  status: waiting\nfeedback: ship it\n' > "$BACK_INBOX/$back_id.$1.result"
+  fi
+  [ -z "${3-}" ] || fm_touch_epoch "$(( $(date +%s) - $3 ))" "$BACK_INBOX/$back_id.$1.result"
+}
+back_poll_seconds() {
+  local started
+  started=$(date +%s)
+  PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$TMP_ROOT/backoff-count" LAVISH_SCRIPT=feedback \
+    FM_HOME="$HBACK" FM_LAVISH_POLL_RETRY_DELAY=1 \
+    "$ROOT/bin/fm-procevent-lavish.sh" poll "$BACK_ART" >/dev/null 2>&1 \
+    || fail "a backed-off listener did not deliver the feedback that followed"
+  printf '%s\n' "$(( $(date +%s) - started ))"
+}
+back_capture 1 transport; back_capture 2 transport; back_capture 3 transport
+back_elapsed=$(back_poll_seconds)
+[ "$back_elapsed" -ge 4 ] \
+  || fail "a listener after three straight transport errors polled after ${back_elapsed}s, not the grown 4s back-off"
+back_capture 4 feedback
+back_elapsed=$(back_poll_seconds)
+[ "$back_elapsed" -le 2 ] \
+  || fail "a listener whose latest capture was real feedback still backed off for ${back_elapsed}s"
+for back_seq in $(seq 5 24); do back_capture "$back_seq" transport 58; done
+back_elapsed=$(back_poll_seconds)
+[ "$back_elapsed" -le 6 ] \
+  || fail "a long outage's back-off was not capped and measured from the latest capture: waited ${back_elapsed}s"
+pass "a listener backs off, growing and capped, while its board server keeps failing"
+
 # The accepted loss window is consuming-to-calling and nothing wider: a listener
 # that never reaches the board at all must leave the staged reply for the next
 # one. A malformed retry-delay override is one of the ordinary setup refusals
@@ -1738,32 +1804,45 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$GONE_COUNT" LAVISH_SCRIPT=feedb
   || fail "a listener whose artifact vanished consumed its staged reply anyway"
 pass "a listener whose artifact vanished leaves the staged reply for the next one"
 
-# Exhaustion is news: after the bounded retries the same exact response is
-# captured and announced normally rather than being swallowed forever.
+# An interruption that outlives the bounded retries is still a server restart,
+# not news: it is captured, recorded handled without a wake, and the same
+# listener polls again, so the captain's answer after the restart is the only
+# thing announced. A sustained outage is the `silent` contract's to surface.
 HEXH="$TMP_ROOT/hexh"; new_home "$HEXH"
 EXH_ART="$TMP_ROOT/exhaust-board.html"
 printf '<h1>exhaust</h1>\n' > "$EXH_ART"
 lavish_session "$EXH_ART"
 exh_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$EXH_ART")
 fm_test_track_procevent_home "$HEXH"
-LAVISH_COUNT="$TMP_ROOT/exhaust-count"; LAVISH_SCRIPT="interrupt"
+LAVISH_COUNT="$TMP_ROOT/exhaust-count"
+LAVISH_SCRIPT="interrupt interrupt interrupt interrupt interrupt interrupt interrupt interrupt interrupt interrupt interrupt interrupt interrupt feedback"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$EXH_ART" >/dev/null
-wait_capture "$HEXH" "$exh_id" 200 \
-  || fail "exhaustion produced no captured result"
-[ "$(cat "$LAVISH_COUNT")" = 13 ] \
-  || fail "the retry bound polled $(cat "$LAVISH_COUNT") times, not the first poll plus 12 bounded retries"
-[ "$(count_results "$HEXH" "$exh_id")" = 1 ] \
-  || fail "exhaustion produced $(count_results "$HEXH" "$exh_id") captured results instead of one"
-wait_for "$HEXH/state/.wake-queue" \
-  || fail "the interruption that survives the bound produced no wake"
-assert_contains "$(wake_payloads "$HEXH")" "procevent lavish $exh_id 1" \
-  "the interruption that survives the bound is announced normally"
-assert_grep 'poll response was interrupted' "$(first_result "$HEXH" "$exh_id")" \
-  "the announced result is the exact interruption the server returned"
+for _ in $(seq 1 400); do
+  [ -f "$HEXH/state/procevent-inbox/$exh_id.1.handled" ] \
+    && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$exh_id.claim" ] && break
+  sleep 0.1
+done
+[ -f "$HEXH/state/procevent-inbox/$exh_id.1.handled" ] \
+  || fail "the exhausted interruption was left for the handler instead of recorded handled"
+[ ! -s "$HEXH/state/.wake-queue" ] \
+  || fail "an exhausted interruption woke the fleet: $(wake_payloads "$HEXH" | sort -u)"
+# The runner gave the source back once the capture was handled; the next
+# supervision cycle's reconcile polls the same board again.
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HEXH" reconcile >/dev/null
+wait_for "$HEXH/state/.wake-queue" 200 \
+  || fail "the answer after an exhausted interruption produced no wake"
+[ "$(cat "$LAVISH_COUNT")" = 14 ] \
+  || fail "the listener was polled $(cat "$LAVISH_COUNT") times, not the first poll, 12 bounded retries, and one poll after the quiet capture"
+[ "$(count_results "$HEXH" "$exh_id")" = 2 ] \
+  || fail "an exhausted interruption and the answer produced $(count_results "$HEXH" "$exh_id") captured results instead of two"
+assert_grep 'poll response was interrupted' "$HEXH/state/procevent-inbox/$exh_id.1.result" \
+  "the exhausted interruption is still captured durably"
+[ "$(wake_payloads "$HEXH" | sort -u)" = "check: procevent lavish $exh_id 2" ] \
+  || fail "only the answer after the restart should wake the fleet, not: $(wake_payloads "$HEXH" | sort -u)"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
-  "$ROOT/bin/fm-procevent-lavish.sh" retire "$EXH_ART" >/dev/null
-pass "an interruption that outlives the bounded retries is captured and announced"
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$EXH_ART" >/dev/null 2>&1 || true
+pass "an interruption that outlives the bounded retries is recorded quietly and the listener polls again"
 
 # A different SERVER_ERROR is a genuine error, never a retry: no fail-open drift
 # from the one exact transient response this adapter owns.
@@ -3243,12 +3322,73 @@ printf 'session:\n  file: /a.html\n  status: browser_disconnected\n' > "$SIL"
 silent_says yes "a browser disconnect carries no answer and keeps the session open"
 printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n' > "$SIL"
 silent_says no "a missing session is not a no-op"
-printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n' > "$SIL"
-silent_says no "a server error is not a no-op"
+printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\n' > "$SIL"
+silent_says no "a server error other than an unreachable server is not a no-op"
 printf 'garbage that is not a session block\n' > "$SIL"
 silent_says no "an unreadable result fails closed and is announced"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nfeedback[1]{text}:\n  prompts[0]{x}:\n' > "$SIL"
 silent_says no "indented payload text cannot forge an empty content block"
+
+# A board server that is restarting answers every armed listener with a bare
+# transport error and nothing the captain said. Each such capture is a routine
+# no-op the runner records and re-polls, in the exact shapes lavish-axi prints
+# them, help lines included.
+printf 'error: Lavish Editor server did not start\ncode: SERVER_ERROR\nhelp[1]: Run \140lavish-axi server --port 4387\140 to inspect server startup\n' > "$SIL"
+silent_says yes "a server that did not start yet carries no answer"
+printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\nhelp[2]: Run \140lavish-axi server --verbose\140 or inspect \140~/.lavish-axi/server.log\140 for server startup or crash diagnostics,Re-run the last \140lavish-axi poll <html-file>\140 command after the server is healthy\n' > "$SIL"
+silent_says yes "an interrupted poll carries no answer"
+printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n' > "$SIL"
+silent_says yes "an interrupted poll without help lines carries no answer"
+printf 'error: Lavish Editor server connection failed\ncode: SERVER_ERROR\nhelp[1]: Run \140lavish-axi server --verbose\140\n' > "$SIL"
+silent_says yes "a refused connection carries no answer"
+printf 'error: Lavish Editor poll response was interrupted \ncode: SERVER_ERROR\n' > "$SIL"
+silent_says no "a near-match transport error is not assumed to be one"
+printf 'error: Lavish Editor server did not start\ncode: NOT_FOUND\n' > "$SIL"
+silent_says no "a transport message under another code is not a transport error"
+printf 'error: Lavish Editor server did not start\ncode: SERVER_ERROR\nmessage: the captain wrote this\n' > "$SIL"
+silent_says no "a transport error carrying any other line is announced"
+printf 'error: Lavish Editor server did not start\ncode: SERVER_ERROR\nprompts[1]{tag,text}:\n  "message","late answer"\n' > "$SIL"
+silent_says no "a transport error carrying a captain message is announced"
+printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  ship it\nerror: Lavish Editor server did not start\ncode: SERVER_ERROR\n' > "$SIL"
+silent_says no "a captain answer followed by a transport error is announced"
+
+# A server that stays unreachable is news once, not never and not every poll:
+# the capture that first takes a source's unbroken run of transport errors past
+# five minutes is announced, and every capture before and after it stays quiet.
+OUTAGE="$TMP_ROOT/outage-inbox"; mkdir -p "$OUTAGE"
+outage_now=$(date +%s)
+outage_seq=0
+outage_capture() {  # <seconds-before-now> <body-with-escapes>
+  outage_seq=$((outage_seq + 1))
+  printf '%b' "$2" > "$OUTAGE/outage-src.$outage_seq.result"
+  fm_touch_epoch "$((outage_now - $1))" "$OUTAGE/outage-src.$outage_seq.result"
+}
+outage_says() {  # <seq> <expected: yes|no> <description>
+  if "$ROOT/bin/fm-procevent-lavish.sh" silent "$OUTAGE/outage-src.$1.result" >/dev/null 2>&1; then
+    [ "$2" = yes ] || fail "silent suppressed a result that must reach the handler: $3"
+  else
+    [ "$2" = no ] || fail "silent announced a result that carries no news: $3"
+  fi
+}
+OUTAGE_ERR='error: Lavish Editor server did not start\ncode: SERVER_ERROR\nhelp[1]: Run \140lavish-axi server --port 4387\140 to inspect server startup\n'
+OUTAGE_ANSWER='session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  ship it\n'
+outage_capture 900 "$OUTAGE_ERR"      # 1: an earlier outage
+outage_capture 880 "$OUTAGE_ANSWER"   # 2: the server came back and the captain answered
+outage_capture 700 "$OUTAGE_ERR"      # 3: a new outage starts
+outage_capture 560 "$OUTAGE_ERR"      # 4
+outage_capture 410 "$OUTAGE_ERR"      # 5: 290 seconds into the outage
+outage_capture 395 "$OUTAGE_ERR"      # 6: 305 seconds - the outage is now sustained
+outage_capture 200 "$OUTAGE_ERR"      # 7
+outage_capture 10 "$OUTAGE_ERR"       # 8
+outage_says 3 yes "the first capture of an outage is a restart in progress"
+outage_says 5 yes "an outage under five minutes is still a restart in progress"
+outage_says 6 no "the capture that makes an outage sustained is announced"
+outage_says 6 no "the sustained-outage verdict is the same when the result is re-read"
+outage_says 7 yes "a sustained outage already announced stays quiet"
+outage_says 8 yes "a sustained outage is announced only once"
+outage_capture 0 "$OUTAGE_ANSWER"     # 9: the server is back and the captain answered
+outage_says 9 no "the answer that ends an outage is announced"
+pass "a board server restart is a non-event, and only a sustained outage is announced once"
 
 # A content check that cannot complete is not proof that nothing was said. Root
 # reads through the mode bits, so this drives the real distinction only where
