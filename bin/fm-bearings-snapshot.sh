@@ -1067,25 +1067,35 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
   # A decision whose reason links no PR/MR gains the pr_url its home recorded:
   # the one a task the row tracks recorded (the hold id or origin, the asking
   # task), else, when the reason names a number ("PR 91", "MR 874", "!874",
-  # "#91"), the single PR/MR that home recorded with that number. A hold recorded
-  # with no link (choices.no_link) never takes the PR of a task it tracks, only one its
+  # "#91"), the single PR/MR that home recorded with that number. A bare "#91"
+  # names only a PR/MR in the repository of a link the reason already carries
+  # (prose "#N" is usually an issue), so with no link it names nothing. A
+  # status question a secondmate raised in the main log (owner the mate, no
+  # mate) uses the home of that mate. A hold recorded with no link
+  # (choices.no_link) never takes the PR of a task it tracks, only one its
   # reason names by number.
   | def pr_re: "https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+";
+    def pr_repo: sub("/(?:-/merge_requests|pulls|pull)/[0-9]+$"; "");
+    def in_repo($urls): pr_repo as $p
+      | any($urls[]; if test("/-/") then sub("/-/.*$"; "") == $p
+                     else . == $p or startswith($p + "/") end);
     .decisions_open |= map(
       ((.reason_full // .reason // "") | tostring) as $r
       | if ($r | test(pr_re)) or ((.pr_url // "") != "") then .
         else
           (if .verb == "captain-hold" then (.owner // "(main)")
-           elif .source == "status" then (.mate // "(main)") else "(main)" end) as $home
+           elif .source == "status" then (.mate // .owner // "(main)") else "(main)" end) as $home
           | [ ($ev[$home] // [])[] | select(.kind == "pr" and (.url | test("^" + pr_re + "$"))) ] as $prs
           | (if (.choices.no_link // false) then [] else [.key, .origin, .task] | map(strings) end) as $own
-          | [ $r | scan("(?:\\b(?:pr|mr|pull request|merge request)[[:space:]]*#?|\\B[!#])([0-9]+)(?![0-9])"; "i")
-              | .[0] ] as $nums
+          | [ $r | scan("https://[^[:space:]<>\"()]+") | sub("[.,;:!?]+$"; "") ] as $links
+          | [ $r | scan("(?:\\b(?:pr|mr|pull request|merge request)[[:space:]]*#?|\\B!)([0-9]+)(?![0-9])|\\B#([0-9]+)(?![0-9])"; "i")
+              | if .[1] != null then {n:.[1], bare:true} else {n:.[0], bare:false} end ] as $nums
           | [ $prs[] | select(.task as $t | $own | index($t)) | .url ] as $mine
           | ( if ($nums | length) == 0 then ($mine | unique | if length == 1 then .[0] else null end)
               else first( $nums[] as $n
-                          | ([ $mine[] | select(endswith("/" + $n)) ] | unique) as $m
-                          | ([ $prs[] | .url | select(endswith("/" + $n)) ] | unique) as $any
+                          | def named: endswith("/" + $n.n) and (($n.bare | not) or in_repo($links));
+                          ([ $mine[] | select(named) ] | unique) as $m
+                          | ([ $prs[] | .url | select(named) ] | unique) as $any
                           | if ($m | length) == 1 then $m[0]
                             elif ($any | length) == 1 then $any[0] else empty end ) // null
               end ) as $u
