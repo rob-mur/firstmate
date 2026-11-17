@@ -502,17 +502,17 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     note.setAttribute("role", "alert");
     main.appendChild(note);
     renderBoardError(why + ". The board keeps trying to load it and starts on its own when it arrives; if this stays", note);
-    var tries = 0;
-    var timer = setInterval(function () {
+    var tries = 0, started = false;
+    var stop = everyWhileShown(function () {
       var s = document.createElement("script");
       s.setAttribute("data-lavish-ui", "");
       function done() { if (s.parentNode) s.parentNode.removeChild(s); }
       s.onload = function () {
         done();
         var next = window.FM_BEARINGS_BOARD_DATA;
-        if (timer === null || dataProblem(next)) return;
-        clearInterval(timer);
-        timer = null;
+        if (started || dataProblem(next)) return;
+        started = true;
+        stop();
         main.removeChild(note);
         kept.forEach(function (k) { k[0].hidden = k[1]; });
         data = next;
@@ -522,6 +522,21 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       s.src = DATA_FILE + "?r=boot" + (++tries);
       document.body.appendChild(s);
     }, 3000);
+  }
+
+  /* Run <fn> every <ms> while the tab is shown. A hidden tab runs no timer at
+     all; showing it again runs <fn> at once and restarts the timer. Returns a
+     stop function. */
+  function everyWhileShown(fn, ms) {
+    var timer = null, stopped = false;
+    function sync(now) {
+      var run = !stopped && !document.hidden;
+      if (!run && timer !== null) { clearInterval(timer); timer = null; }
+      if (run && timer === null) { timer = setInterval(fn, ms); if (now) fn(); }
+    }
+    document.addEventListener("visibilitychange", function () { sync(true); });
+    sync(false);
+    return function () { stopped = true; sync(false); };
   }
 
   function startBoard() {
@@ -536,8 +551,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
-  function renderHeader() {
+  function renderProvenance() {
     document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
+  }
+  function renderHeader() {
+    renderProvenance();
     var callTotal = data.captains_call.length;
     document.getElementById("bb-call-sub").textContent =
       callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
@@ -1385,7 +1403,13 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
      text, or an answer waiting in the queue) keeps its old content until they
      are done. A departed card always goes, busy or not: its decision no longer
      waits on the captain, so nothing on the page may keep it on the board. */
-  var deferred = false;
+  var deferred = false, pinnedKeys = [];
+  /* whether a change held back by the last apply is still held: a pinned
+     card is still busy, or a drag is still under way */
+  function pinsHeld() {
+    if (dragKey !== null) return true;
+    return pinnedKeys.some(function (k) { var rec = cardByKey[k]; return !!rec && cardBusy(rec); });
+  }
   function cardBusy(rec) {
     var state = rec.target.hidden.value;
     if (state === "queued") return true;
@@ -1827,9 +1851,10 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
 
   function applyData(next) {
     var pinned = false;
+    pinnedKeys = [];
     var calls = next.captains_call.map(function (c) {
       var rec = cardByKey[c.key];
-      if (rec && rec.sig !== itemSig(c) && cardBusy(rec)) { pinned = true; return rec.item; }
+      if (rec && rec.sig !== itemSig(c) && cardBusy(rec)) { pinned = true; pinnedKeys.push(c.key); return rec.item; }
       return c;
     });
     var merged = {};
@@ -1929,40 +1954,77 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     try { window.location.reload(); } catch (e) { return false; }
     return true;
   }
-  var liveJson = JSON.stringify(data);
+  /* AN IDLE BOARD COSTS NOTHING. build writes bearings-board.stamp.js, a
+     one-line file naming the stamp of the data it just published (the data
+     carries the same stamp as data_stamp), so a poll reads that line and
+     loads, parses and compares the data only when the stamp moved. Data
+     whose only change is its build time updates the provenance line and
+     nothing else. A board built before the stamp file existed, or a stamp
+     load that fails, falls back to reading the data on every poll. The
+     re-apply of a change held back for a busy card waits until that card is
+     no longer busy, and polling stops while the tab is hidden (see
+     everyWhileShown). */
+  var STAMP_FILE = "bearings-board.stamp.js";
+  function contentJson(d) {
+    var o = {};
+    Object.keys(d).forEach(function (k) { if (k !== "generated" && k !== "data_stamp") o[k] = d[k]; });
+    return JSON.stringify(o);
+  }
+  function stampOf(d) { return typeof d.data_stamp === "string" ? d.data_stamp : ""; }
+  var liveJson = contentJson(data);
+  var liveData = data, seenStamp = stampOf(data);
   var polling = null, pollWaits = 0, pollSeq = 0;
-  function pollData() {
-    if (!document.body) return;
-    /* a load that never answered is dropped after a few rounds */
-    if (polling) {
-      if (++pollWaits < 5) return;
-      if (polling.parentNode) polling.parentNode.removeChild(polling);
-    }
-    pollWaits = 0;
+  function loadQuiet(file, then) {
     var s = document.createElement("script");
     /* a poll that races a rebuild is retried on the next round, not
        reported to Lavish as a page failure */
     s.setAttribute("data-lavish-ui", "");
     polling = s;
-    function done() {
+    function done(ok) {
       if (s.parentNode) s.parentNode.removeChild(s);
-      if (polling === s) polling = null;
+      if (polling !== s) return;
+      polling = null;
+      then(ok);
     }
-    s.onload = function () {
-      done();
-      var next = window.FM_BEARINGS_BOARD_DATA;
-      if (dataProblem(next)) return;
-      if (takeNewCode(next)) return;
-      var json = JSON.stringify(next);
-      if (json === liveJson && !deferred) return;
-      liveJson = json;
-      try { applyData(next); } catch (e) { /* keep the last good board on screen */ }
-    };
-    s.onerror = done;
-    s.src = DATA_FILE + "?r=" + (++pollSeq);
+    s.onload = function () { done(true); };
+    s.onerror = function () { done(false); };
+    s.src = file + "?r=" + (++pollSeq);
     document.body.appendChild(s);
   }
-  setInterval(pollData, 3000);
+  function applyQuiet(next) {
+    try { applyData(next); } catch (e) { /* keep the last good board on screen */ }
+  }
+  function settle() {
+    if (takeNewCode(liveData)) return;
+    if (deferred && !pinsHeld()) applyQuiet(liveData);
+  }
+  function pollData() {
+    if (!document.body || document.hidden) return;
+    /* a load that never answered is dropped after a few rounds */
+    if (polling) {
+      if (++pollWaits < 5) return;
+      if (polling.parentNode) polling.parentNode.removeChild(polling);
+      polling = null;
+    }
+    pollWaits = 0;
+    window.FM_BEARINGS_BOARD_STAMP = undefined;
+    loadQuiet(STAMP_FILE, function (ok) {
+      var stamp = window.FM_BEARINGS_BOARD_STAMP;
+      if (ok && typeof stamp === "string" && stamp && stamp === seenStamp) { settle(); return; }
+      loadQuiet(DATA_FILE, function (loaded) {
+        var next = window.FM_BEARINGS_BOARD_DATA;
+        if (!loaded || dataProblem(next)) return;
+        liveData = next;
+        seenStamp = stampOf(next);
+        if (takeNewCode(next)) return;
+        var json = contentJson(next);
+        if (json !== liveJson) { liveJson = json; applyQuiet(next); return; }
+        if (next.generated !== data.generated) { data.generated = next.generated; renderProvenance(); }
+        if (deferred && !pinsHeld()) applyQuiet(next);
+      });
+    });
+  }
+  everyWhileShown(pollData, 3000);
   } catch (e) {
     renderBoardError("The board data could not be rendered");
   }
