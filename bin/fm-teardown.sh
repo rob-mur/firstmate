@@ -49,12 +49,16 @@
 # refresh_remote_refs has updated those refs from each remote when the local ones
 # do not show the work, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
+# the forge reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
+# its base branch instead of the default branch. A task whose recorded pr= is
+# a Forgejo pull request is the exception to reachability: pushing its branch to
+# the forge makes the work reachable while the pull request is still open, so
+# that task must pass the merged-PR or content proof even when pushed. GitHub
+# and GitLab tasks keep the reachability rule.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -1808,7 +1812,8 @@ content_in_default() {
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
+# reachable from any remote-tracking branch (or, for a recorded Forgejo pull
+# request, whether or not they are)? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
@@ -2245,11 +2250,8 @@ validate_worktree_teardown_safety() {
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
-    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
-    if [ -z "$branch" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
-    fi
+    read_teardown_safety_branch
+    branch=$TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY
     if ! work_is_landed "$branch"; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
@@ -2262,6 +2264,34 @@ validate_worktree_teardown_safety() {
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
+  elif [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = forgejo ]; then
+    # Work pushed to a Forgejo branch is reachable from a remote-tracking ref
+    # while its pull request is still open, so for a recorded Forgejo pull
+    # request that reachability is not landing: the record must show it merged
+    # with this work, or the content must already be in the base branch.
+    read_teardown_safety_branch
+    branch=$TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY
+    if ! work_is_landed "$branch"; then
+      if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
+        echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
+        echo "Restore or upgrade Git and retry the content check." >&2
+      elif [ -n "${FM_PR_RECORD_STATE:-}" ]; then
+        echo "REFUSED: worktree $WT has work on a forge branch only: Forgejo pull request $PR_URL (state $FM_PR_RECORD_STATE, merged $FM_PR_RECORD_MERGED) does not show it merged, and its content is not in the base branch." >&2
+      else
+        echo "REFUSED: worktree $WT has work on a forge branch only: Forgejo pull request $PR_URL could not be read to prove it merged, and its content is not in the base branch." >&2
+      fi
+      echo "Merge the pull request, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  fi
+}
+
+# Sets TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY, the worktree branch the
+# landed-work proof looks up, once per teardown so the post-reap re-check uses
+# the same branch.
+read_teardown_safety_branch() {
+  if [ -z "${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}" ]; then
+    TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   fi
 }
 
