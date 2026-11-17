@@ -3363,6 +3363,7 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 - The doorbell rings only when that idempotent write creates a fresh inbox record; filing the note into `handled/` is the worker's own acknowledgement of the delivery, so a later reconcile never moves an already-filed note back into the active inbox or re-rings its owner, and re-delivery of a note still open in the inbox is left to the steering inbox's own re-ring ladder.
 - A task-owned source with an unhandled capture is not relaunched, so delivery failure cannot consume a round and start another poll.
 - That record is the only ownership evidence there is, so while any captured round of it is unacknowledged every retirement path refuses - the runner's own terminal retirement and an explicit `retire` alike - and the refusal names the acknowledgement that releases it.
+- A task-owned source with no unhandled capture whose task's endpoint record is gone is retired by the next reconcile, so a finished task leaves no listener holding a poll on the shared server.
 
 **Conclude a terminal round**
 
