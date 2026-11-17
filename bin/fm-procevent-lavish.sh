@@ -9,6 +9,7 @@
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh reconciles <result-file>
 #   fm-procevent-lavish.sh pages <result-file>
+#   fm-procevent-lavish.sh priority <result-file>
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
@@ -135,6 +136,14 @@
 # accounted for. `silent` also holds a result whose every queued item is a page
 # prompt, once `fm-board-page.sh routed` confirms each one reached its page, so
 # a page's answer goes to the page's agent and never wakes the handler.
+#
+# `priority` is this adapter's half of the board-priority seam in
+# bin/fm-procevent.sh. It prints, as one compact JSON line, the
+# `fm-bearings-priority.v1` Context data of the last prompt tagged `priority`
+# in the result - the most recent ranking the board sent - and nothing when no
+# such prompt carries a valid one. It records nothing; bin/fm-board-priority.sh
+# `record` owns that. It exits 3 like `answers` when the result is not fully
+# accounted for.
 #
 # It wraps the published `lavish-axi poll` and `lavish-axi reply` interfaces,
 # verified against 0.1.80. `poll` long-polls indefinitely; `reply` exits only
@@ -964,6 +973,38 @@ page_rows() {  # all|only <result-file>
   ' "$mode" "$file" "$base" "$ended"
 }
 cmd_pages() { page_rows all "$@"; }
+
+# The `priority` line described in the header.
+cmd_priority() {
+  local file=${1-}
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  perl -MJSON::PP -e "$(lavish_result_parser)"'
+    use strict; use warnings;
+    my ($path) = @ARGV;
+    my ($form, $want, $items, $malformed) = lavish_result($path, "prompts");
+    defined $form or exit 1;
+    if ($malformed || @$items != $want) {
+      print STDERR "error: the result is not fully accounted for: declared $want, parsed ",
+        scalar(@$items), ", malformed $malformed\n";
+      exit 3;
+    }
+    my $last;
+    for my $item (@$items) {
+      my %f = %$item;
+      next unless defined $f{tag} && $f{tag} eq "priority";
+      next unless defined $f{prompt} && $f{prompt} =~ /Context data:\s*(\{.*\})\s*\z/s;
+      my $data = eval { decode_json($1) };
+      next unless ref($data) eq "HASH" && defined($data->{schema}) && !ref($data->{schema})
+        && $data->{schema} eq "fm-bearings-priority.v1"
+        && ref($data->{keys}) eq "ARRAY" && !grep { !defined || ref } @{$data->{keys}};
+      next if exists $data->{order} && !(ref($data->{order}) eq "ARRAY"
+        && !grep { !defined || ref } @{$data->{order}});
+      $last = $data;
+    }
+    print JSON::PP->new->utf8->canonical->encode($last), "\n" if defined $last;
+  ' "$file"
+}
 cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 
 # Present one already-captured result for a handler. Body lines are prefixed
@@ -1102,6 +1143,7 @@ case "${1-}" in
   answers)   shift; cmd_answers "$@" ;;
   reconciles) shift; cmd_reconciles "$@" ;;
   pages)     shift; cmd_pages "$@" ;;
+  priority)  shift; cmd_priority "$@" ;;
   read)      shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
