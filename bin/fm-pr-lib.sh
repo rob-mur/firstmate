@@ -1407,6 +1407,39 @@ FIELDS
   FM_PR_RECORD_HEAD=$head
 }
 
+# Whether one GitHub pull request, GitLab merge request, or Forgejo pull
+# request takes its head from a repository other than the one it targets - a
+# fork contribution. Returns 0 only when the forge record says so; a
+# same-repository request, any other provider, a missing tool, or any read
+# failure returns 1, so a caller treats an unknown as same-repository.
+fm_pr_head_is_cross_repository() {  # <pr-url>
+  local login answer
+  fm_pr_url_parse "$1" || return 1
+  case "$FM_PR_PROVIDER" in
+    github)
+      command -v gh >/dev/null 2>&1 || return 1
+      answer=$(gh pr view "$FM_PR_URL" --json isCrossRepository --jq .isCrossRepository 2>/dev/null) || return 1
+      ;;
+    gitlab)
+      command -v glab >/dev/null 2>&1 || return 1
+      command -v jq >/dev/null 2>&1 || return 1
+      answer=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$FM_PR_NUMBER" -R "https://$FM_PR_HOST/$FM_PR_PATH" -F json 2>/dev/null \
+        | jq -r 'if (.source_project_id | type) == "number" and (.target_project_id | type) == "number"
+                 then (.source_project_id != .target_project_id | tostring) else error("no project ids") end' 2>/dev/null) || return 1
+      ;;
+    forgejo)
+      command -v jq >/dev/null 2>&1 || return 1
+      login=$(fm_pr_forgejo_login "$FM_PR_HOST") || return 1
+      [ -n "$login" ] || return 1
+      answer=$(tea api --login "$login" --repo "$FM_PR_PATH" "/repos/{owner}/{repo}/pulls/$FM_PR_NUMBER" 2>/dev/null \
+        | jq -r 'if (.head.repo.id | type) == "number" and (.base.repo.id | type) == "number"
+                 then (.head.repo.id != .base.repo.id | tostring) else error("no repository ids") end' 2>/dev/null) || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$answer" = true ]
+}
+
 # gerrit-axi resolves its server from the current directory's origin remote
 # first, so the host is passed explicitly from the parsed identity and a read
 # outside a clone still reaches the right server. A change number is
