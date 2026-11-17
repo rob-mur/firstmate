@@ -229,6 +229,13 @@
 # data load that fails or breaks as a reason to wait and re-read, never as a
 # dead board (the template's waitForData).
 #
+# A HOME WITH ITS OWN CODE KEEPS ITS OWN TEMPLATE. When $FM_HOME carries its
+# own bin/fm-bearings-board.sh and that is not this file, build installs only a
+# template byte-identical to that home's own; otherwise it writes nothing (no
+# page, code, or data, so the open page does not reload), logs the refusal,
+# naming both roots, to state/.board-refresh.log, and exits non-zero. A home
+# with no code of its own takes the build from whichever code root serves it.
+#
 # PAGES SHOWN IN PLACE. build adds `pages` to the board data: one
 # {id, title, href} row per live page registered through bin/fm-board-page.sh
 # (its header owns registration, the page folders, and the one refresh policy of
@@ -293,6 +300,26 @@ publish_if_changed() {  # <staged> <dest> <what>
     printf 'fm-bearings-board: cannot publish the %s\n' "$3" >&2
     return 1
   fi
+}
+
+# A home that carries its own board code (its own bin/fm-bearings-board.sh) has
+# its board installed only from its own template. A build from another code
+# root whose template differs stops here, before writing anything, and says so
+# in the home's refresh log.
+refuse_foreign_template() {
+  local own="$FM_HOME/bin/fm-bearings-board.sh" own_template code_root msg
+  [ -f "$own" ] || return 0
+  [ ! "$own" -ef "${BASH_SOURCE[0]}" ] || return 0
+  own_template="$FM_HOME/.agents/skills/bearings/assets/board-template.html"
+  ! cmp -s -- "$TEMPLATE" "$own_template" || return 0
+  code_root=$(cd "$SCRIPT_DIR/.." && pwd)
+  msg="refused a board build from code root $code_root: home $FM_HOME carries its own board code and its template differs, so the installed board is left unchanged"
+  if [ -d "$STATE" ]; then
+    printf '%s %s\n' "$(date -u +%FT%TZ)" "$msg" >>"$STATE/.board-refresh.log"
+    tail -n 20 "$STATE/.board-refresh.log" >"$STATE/.board-refresh.log.tmp" 2>/dev/null \
+      && mv "$STATE/.board-refresh.log.tmp" "$STATE/.board-refresh.log"
+  fi
+  fail "$msg"
 }
 
 validate_payload() {  # <data.json>
@@ -757,6 +784,7 @@ command_build() {
   [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "board template is missing: $TEMPLATE"
   [ "$(grep -cxF "$DATA_SCRIPT" "$TEMPLATE")" -eq 1 ] \
     || fail "board template does not load the board data file exactly once: $TEMPLATE"
+  refuse_foreign_template
   code=$(cksum < "$TEMPLATE" | awk '{print $1 "-" $2}')
   stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-bearings-board.XXXXXX") \
     || fail "cannot stage the board page"
