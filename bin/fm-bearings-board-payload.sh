@@ -540,12 +540,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     # The heading of a text that lists its own options comes from the text
     # before the options: the sentence that introduces them when it ends in a
     # colon ("Merge PR 13: (1) ..."), else its asking sentence, without a
-    # trailing colon or dash.
+    # trailing colon or dash. Words that only introduce the options
+    # ("... reviewer? Options: (1) ...") are not that sentence.
     # A last sentence led by a decision label ("Captain call: the re-run must
     # either") is the heading; the card question drops that label.
     def decision_label: "^(?:Captain(?:\u0027s)? (?:call|decision)|Decision(?: needed)?)[[:space:]]*:[[:space:]]*";
     def lead_sentence:
       gsub("[[:space:]]+"; " ") | sub("^ "; "")
+      | sub("(?:^|(?<=[.!?]) )(?:the )?(?:options|choices|alternatives)(?: (?:are|would be))?[[:space:]]*:[[:space:]]*$"; ""; "i")
       | ([ scan("[^[:space:]].*?(?:[.?!](?=[[:space:]]|$)|$)") | select(length > 0) ][-1] // "") as $last
       | if ($last | test(decision_label + "[^[:space:]]"; "i"))
         then $last
