@@ -1348,6 +1348,38 @@ test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them(
   pass "a card shows every option its text refers to, or says it does not list them"
 }
 
+# A worker's keyed grill question that lists its options as "rec A = ...;
+# B = ...; C = ..." gets a button per option, the "rec" option as the
+# recommendation, the question as its heading, and a free-text answer, and the
+# build accepts it. The text is the BCR grill worker's real line.
+test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer() {
+  local snap="$TMP_ROOT/rec-eq.json" p card out line reason
+  line='needs-decision [key=grill-bcr-r1] [at=1794917099]: Q1 what does BCR ship on 10 Dec? rec A = dry-run beta, no writes anywhere, on in prod behind Beta (~6 tickets: flag+upload/parse [APP-5860 rewritten, dummy page dropped], match+notice dry run, outcome CSV, money rows, policy prompt, link prompt); B = A + Confirm in dev/stg (one-way doors, stretch); C = skeleton only. Facts: APP-5860 not built, all 12 Submitted/untagged, no release::2026-12-10 tag, prototype predates spec by 1 day. Assumed A1-A9 from priors. Full round: /home/rob/repos/firstmate/data/bcr-dec10-grill/round-1.md'
+  reason=${line#*: }
+  fresh_homes rec-eq
+  write_snapshot "$TMP_ROOT/rec-eq-base.json"
+  jq --arg r "$reason" '.decisions_open = [
+        {id: "bcr-dec10-grill", key: "status.bcr-dec10-grill.grill-bcr-r1", verb: "needs-decision", source: "status",
+         task: "bcr-dec10-grill", decision_key: "grill-bcr-r1", owner: "bcr-dec10-grill", reason: $r}]' \
+    "$TMP_ROOT/rec-eq-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card=$(jq -c '.captains_call[] | select(.key == "status.bcr-dec10-grill.grill-bcr-r1")' <<<"$p")
+  assert_equals "option-a|option-b|option-c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" \
+    "the options A, B and C written as A = ... are the card's buttons: $card"
+  assert_equals "Dry-run beta, no writes anywhere, on in prod behind Beta (~6 tickets: flag+upload/parse [APP-5860 rewritten, dummy page dropped], match+notice dry run, outcome CSV, money rows, policy prompt, link prompt)|A + Confirm in dev/stg (one-way doors, stretch)|Skeleton only" \
+    "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "each option keeps its full text without the rec mark"
+  assert_equals "option-a" "$(jq -r '.recommend_value // "none"' <<<"$card")" "the option marked rec is the recommendation"
+  assert_equals "bcr-dec10-grill: Q1 what does BCR ship on 10 Dec?" "$(jq -r .title <<<"$card")" "the question heads the card"
+  assert_equals "true" "$(jq -r .allow_freeform <<<"$card")" "the card takes a free-text answer"
+  jq -e '.about | test("Facts: APP-5860 not built") and (test(" = ") | not)' <<<"$card" >/dev/null \
+    || fail "the card body is not the text around the options: $card"
+  printf '%s\n' "$p" > "$TMP_ROOT/rec-eq-payload.json"
+  validates "$TMP_ROOT/rec-eq-payload.json" || fail "the payload did not satisfy the board validator"
+  out=$(build_checks "$TMP_ROOT/rec-eq-payload.json")
+  assert_not_contains "$out" "undecided-card" "the build flagged the card: $out"
+  pass "a rec A = ...; B = ... option line gets buttons, its recommendation and a free-text answer"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -1479,4 +1511,5 @@ fm_test_run \
   test_a_freeze_or_a_hold_that_says_it_is_no_decision_waits_instead_of_asking \
   test_a_card_carries_the_pr_link_its_snapshot_row_recorded \
   test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them \
-  test_a_secondmate_decision_is_answerable_from_its_card
+  test_a_secondmate_decision_is_answerable_from_its_card \
+  test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer

@@ -119,7 +119,8 @@
 # needs a link (`links` or `pr_url`) unless it carries `no_link: true`. A card
 # with `from_status: true` (a worker status question or a review page the
 # generator raised, which has no hold to record choices on) needs only the
-# prompt and a way to answer. The booleans `free_text`, `no_link`,
+# prompt; the board always gives it a free-text answer box, so it always has a
+# way to answer. The booleans `free_text`, `no_link`,
 # `options_inferred` and `from_status` are optional. Exempt are a merge card (its type is the
 # question) and a page-backed card, one carrying `off_board` or with no options
 # and a Lavish page link, whose decision is on that page. A card that fails is
@@ -503,7 +504,7 @@ undecided_cards() {  # <data.json>
               and ($raised or (.title | asks | not)) and ($action | not)
          then "question (\($prompts[0] | if length > 80 then .[:79] + "…" else . end) is not a question)"
          else empty end),
-        (if (.options | length) == 0 and .allow_freeform != true
+        (if (.options | length) == 0 and .allow_freeform != true and ($raised | not)
          then "options (no options and no free-text answer)"
          elif ($raised | not) and .free_text != true and ($action | not)
               and ((.options | length) == 0 or .options_inferred == true)
