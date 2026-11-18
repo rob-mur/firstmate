@@ -147,7 +147,8 @@
 #                      bin/fm-board-priority.sh holds the captain's ranking, ranked rows
 #                      come first in that order, and unranked rows keep snapshot order after.
 #   omitted         -> charted_more, from the `gates showing N of M` surface.
-#   open_mrs        -> open_mrs: the captain's open GitLab MRs that no task records,
+#   open_mrs        -> open_mrs: the captain's open GitLab MRs (authored or awaiting
+#                      their review) that the rest of the board does not show,
 #                      as information rows {key, repo, title, url, state} - never
 #                      decision cards. The section is absent when the snapshot has
 #                      no open_mrs (not requested, or GitLab unavailable).
