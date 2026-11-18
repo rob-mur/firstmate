@@ -705,14 +705,19 @@ test_the_board_rebuilds_during_an_active_away_window() {
   pass "the board rebuilds during an active away window while a chat bearings read still refuses"
 }
 
-# A home whose payload fails while $home/payload-fail exists, and whose fm-send
-# is a stub that records each message and exits with $home/send-status (0 if absent).
+# A home whose payload fails while $home/payload-fail exists, carries the
+# Captain's Call cards set_calls last named, and whose fm-send is a stub that
+# records each message and exits with $home/send-status (0 if absent).
 make_notify_home() {  # <name> <with-board-keeper: 0|1>
   local home
   home=$(make_home "$1")
   build_initial_board "$home"
-  printf '#!/usr/bin/env bash\n[ ! -e "%s/payload-fail" ] || exit 1\nexec "%s" "$@"\n' \
-    "$home" "$ROOT/bin/fm-bearings-board-payload.sh" > "$home/flaky-payload"
+  cat > "$home/flaky-payload" <<SH
+#!/usr/bin/env bash
+[ ! -e "$home/payload-fail" ] || exit 1
+[ ! -e "$home/calls.json" ] || set -- --copy "$home/calls.json" "\$@"
+FM_BEARINGS_BOARD_PR_CHECK=0 exec "$ROOT/bin/fm-bearings-board-payload.sh" "\$@"
+SH
   cat > "$home/send-stub" <<SH
 #!/usr/bin/env bash
 { printf 'FM_HOME=%s\\n' "\$FM_HOME"; printf '%s\\n' "\$@"; printf -- '--\\n'; } >> "$home/sends"
@@ -736,13 +741,31 @@ sends() {  # <home>
   if [ -f "$1/sends" ]; then grep -c '^--$' "$1/sends"; else echo 0; fi
 }
 
+failure_notices() {  # <home>
+  if [ -f "$1/sends" ]; then grep -c '^The bearings board build is failing\.$' "$1/sends"; else echo 0; fi
+}
+
+# The board's Captain's Call becomes one merge card per <key>.
+set_calls() {  # <home> <key...>
+  local home=$1
+  shift
+  jq -n '{captains_call_extra: [$ARGS.positional[] | {key: ., type: "merge", repo: "widgets",
+    title: ("Merge " + .), risk: "low", pr_url: "https://github.com/acme/widgets/pull/7",
+    options: [{value: "merge", label: "Merge"}]}]}' --args "$@" > "$home/calls.json"
+}
+
+# The last message sent, less its trailing separator.
+last_send() {  # <home>
+  awk '/^--$/ { last = cur; cur = ""; next } { cur = cur $0 "\n" } END { printf "%s", last }' "$1/sends"
+}
+
 test_a_failure_episode_tells_board_keeper_once() {
   local home
   home=$(make_notify_home notify-once 1)
   : > "$home/payload-fail"
   notify_refresh "$home" && fail "a failed payload reported success"
   notify_refresh "$home" && fail "a second failed payload reported success"
-  assert_equals "1" "$(sends "$home")" "two failures in one episode did not send exactly one notice"
+  assert_equals "1" "$(failure_notices "$home")" "two failures in one episode did not send exactly one notice"
   grep -qx 'board-keeper' "$home/sends" || fail "the notice did not go to board-keeper: $(cat "$home/sends")"
   grep -qx "FM_HOME=$home" "$home/sends" || fail "the notice was not sent from this home"
   grep -q '^[0-9TZ:-]* payload generation failed$' "$home/sends" || fail "the notice lacks the failure line: $(cat "$home/sends")"
@@ -751,7 +774,7 @@ test_a_failure_episode_tells_board_keeper_once() {
   notify_refresh "$home" || fail "the recovering build failed: $(tail -3 "$home/state/.board-refresh.log")"
   : > "$home/payload-fail"
   notify_refresh "$home" && fail "a failed payload after recovery reported success"
-  assert_equals "2" "$(sends "$home")" "a failure after a successful build did not send a new notice"
+  assert_equals "2" "$(failure_notices "$home")" "a failure after a successful build did not send a new notice"
   pass "a failure episode tells board-keeper once, and a failure after a success is news again"
 }
 
@@ -782,6 +805,53 @@ test_a_failing_send_never_changes_the_build_result() {
   pass "a failing send never changes the build result"
 }
 
+test_a_captain_call_change_tells_board_keeper_once() {
+  local home msg
+  home=$(make_notify_home calls-change 1)
+  set_calls "$home" call-a call-b
+  notify_refresh "$home" || fail "the first rebuild failed: $(tail -3 "$home/state/.board-refresh.log")"
+  assert_equals "1" "$(sends "$home")" "the first rebuild did not send exactly one message"
+  msg=$(last_send "$home")
+  grep -qx 'board-keeper' <<<"$msg" || fail "the message did not go to board-keeper: $msg"
+  grep -qx "FM_HOME=$home" <<<"$msg" || fail "the message was not sent from this home"
+  grep -qx 'Joined: call-a call-b' <<<"$msg" || fail "the first message does not name every key as joined: $msg"
+  grep -qx 'Left: none' <<<"$msg" || fail "the first message names keys that left: $msg"
+  notify_refresh "$home" || fail "the unchanged rebuild failed"
+  assert_equals "1" "$(sends "$home")" "an unchanged Captain's Call sent a message"
+  set_calls "$home" call-b call-c
+  notify_refresh "$home" || fail "the changed rebuild failed"
+  assert_equals "2" "$(sends "$home")" "a changed Captain's Call did not send exactly one message"
+  msg=$(last_send "$home")
+  grep -qx 'Joined: call-c' <<<"$msg" || fail "the message does not name the key that joined: $msg"
+  grep -qx 'Left: call-a' <<<"$msg" || fail "the message does not name the key that left: $msg"
+  notify_refresh "$home" || fail "the second unchanged rebuild failed"
+  assert_equals "2" "$(sends "$home")" "an unchanged Captain's Call after a change sent a message"
+  pass "a rebuild tells board-keeper once when the Captain's Call changes and never when it does not"
+}
+
+test_no_call_change_message_without_a_board_keeper_route() {
+  local home
+  home=$(make_notify_home calls-none 0)
+  set_calls "$home" call-a
+  notify_refresh "$home" || fail "the rebuild failed"
+  set_calls "$home" call-b
+  notify_refresh "$home" || fail "the changed rebuild failed"
+  assert_equals "2" "$(rebuilt_count "$home")" "the board was not rebuilt twice"
+  assert_equals "0" "$(sends "$home")" "a message was sent with no board-keeper route"
+  pass "no Captain's Call message is sent without a board-keeper route"
+}
+
+test_a_failing_call_change_send_never_fails_the_rebuild() {
+  local home rc
+  home=$(make_notify_home calls-send-fails 1)
+  printf '7\n' > "$home/send-status"
+  set_calls "$home" call-a
+  rc=0; notify_refresh "$home" || rc=$?
+  assert_equals "0" "$rc" "a failing send failed the rebuild"
+  assert_equals "1" "$(sends "$home")" "the failing send was not attempted"
+  pass "a failing Captain's Call send never fails the rebuild"
+}
+
 fm_test_run \
   test_a_home_without_a_board_is_left_alone \
   test_the_board_is_rebuilt_only_when_fleet_state_changes \
@@ -809,4 +879,7 @@ fm_test_run \
   test_the_board_rebuilds_during_an_active_away_window \
   test_a_failure_episode_tells_board_keeper_once \
   test_no_notice_without_a_board_keeper_route \
-  test_a_failing_send_never_changes_the_build_result
+  test_a_failing_send_never_changes_the_build_result \
+  test_a_captain_call_change_tells_board_keeper_once \
+  test_no_call_change_message_without_a_board_keeper_route \
+  test_a_failing_call_change_send_never_fails_the_rebuild
