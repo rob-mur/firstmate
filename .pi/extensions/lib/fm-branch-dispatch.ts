@@ -326,7 +326,7 @@ function statusFileIdentity(path: string): string {
 }
 
 // The per-task presentation-cursor rows (task, identity, presented offset,
-// backstop), in the format bin/fm-classify-lib.sh writes. Null when the cursor
+// backstop, optional anchor), in the format bin/fm-classify-lib.sh writes. Null when the cursor
 // is absent or malformed, so every span read falls back to the whole log.
 function readPresentationCursor(state: string): Map<string, { ident: string; offset: number } | null> | null {
   try {
@@ -335,8 +335,9 @@ function readPresentationCursor(state: string): Map<string, { ident: string; off
     const rows = new Map<string, { ident: string; offset: number } | null>();
     for (const row of readFileSync(path, "utf8").split("\n")) {
       if (!row) continue;
-      const [task, ident, offset, backstop = "", ...extra] = row.split("\t");
-      if (!task || !ident || !/^[0-9]+$/.test(offset ?? "") || !/^[0-9]*$/.test(backstop) || extra.length > 0) return null;
+      const [task, ident, offset, backstop = "", anchor = "", ...extra] = row.split("\t");
+      if (!task || !ident || !/^[0-9]+$/.test(offset ?? "") || !/^[0-9]*$/.test(backstop)) return null;
+      if (!/^([0-9]+:[0-9a-f]+)?$/.test(anchor) || extra.length > 0) return null;
       rows.set(task, rows.has(task) ? null : { ident, offset: Number(offset) });
     }
     return rows;
