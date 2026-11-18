@@ -103,6 +103,31 @@ if [ "${1:-}" = config ]; then
   printf 'gitlab.example.com\n'; exit 0
 fi
 path=${*: -1}
+# FAKE_GLAB_MANY=<n> serves n uncovered MRs !901.. in project 42 instead, each
+# with a passing pipeline and one approval; every detail call records how many
+# detail calls were running at once so a test can prove the reads are bounded.
+if [ -n "${FAKE_GLAB_MANY:-}" ]; then
+  case "$path" in
+    merge_requests\?*reviewer_id=393\&*) echo '[]'; exit 0 ;;
+    merge_requests\?*)
+      i=1; sep='['
+      while [ "$i" -le "$FAKE_GLAB_MANY" ]; do
+        n=$((900 + i))
+        printf '%s{"iid":%s,"project_id":42,"title":"Change %s","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/%s","references":{"full":"grp/app/aegis!%s"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T%02d:00:00Z"}' \
+          "$sep" "$n" "$n" "$n" "$n" "$i"
+        sep=','; i=$((i + 1))
+      done
+      echo ']'; exit 0 ;;
+    projects/42/merge_requests/*)
+      active="$NET_LOG.active"; mkdir -p "$active"; : > "$active/$$"
+      sleep 0.3; ls "$active" | wc -l >> "$NET_LOG.concurrency"; rm -f "$active/$$"
+      case "$path" in
+        */approvals) echo '{"approved":true,"approvals_left":0,"approved_by":[{"user":{"username":"ana"}}]}' ;;
+        *) echo '{"head_pipeline":{"status":"success"}}' ;;
+      esac
+      exit 0 ;;
+  esac
+fi
 case "$path" in
   user) echo '{"id":393,"username":"captain"}' ;;
   merge_requests\?*reviewer_id=393\&*)
@@ -1746,6 +1771,35 @@ test_include_mrs_drops_archived_project_mrs() {
   [ "$(grep -c 'projects/42$' "$home/net.log")" = 1 ] || fail "one project call per project: $(cat "$home/net.log")"
   ! grep -q 'projects/619/merge_requests' "$home/net.log" || fail "an archived project's MR needs no detail call"
   pass "an MR whose project is archived is dropped; an unreadable project keeps its MRs"
+}
+
+# Every MR the list shows gets its CI and approvals read, however many there
+# are, while the reads stay bounded in parallelism.
+test_include_mrs_reads_detail_for_every_listed_mr() {
+  local home fakebin json max
+  home=$(make_home mrs-many); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(FAKE_GLAB_MANY=13 FM_BEARINGS_MR_DETAIL_PARALLEL=3 run "$home" "$fakebin" --include-mrs --json 2>/dev/null) \
+    || fail "--include-mrs run failed"
+  printf '%s' "$json" | jq -e '
+    (.open_mrs | length) == 13
+    and all(.open_mrs[]; .state | (contains("CI passing") and contains("1 approval")))
+  ' >/dev/null || fail "every listed MR must carry its CI and approvals: $json"
+  [ "$(grep -c 'projects/42/merge_requests/9[0-9]*$' "$home/net.log")" = 13 ] \
+    && [ "$(grep -c 'projects/42/merge_requests/9[0-9]*/approvals$' "$home/net.log")" = 13 ] \
+    || fail "one detail and one approvals call per listed MR: $(cat "$home/net.log")"
+  max=$(sort -n "$home/net.log.concurrency" | tail -n 1)
+  [ "$max" -gt 1 ] || fail "detail reads must run in parallel (max $max at once)"
+  [ "$max" -le 6 ] || fail "at most 3 MRs (6 calls) may be read at once, saw $max"
+  # A list longer than the kept rows reads only the rows it keeps.
+  : > "$home/net.log"
+  json=$(FAKE_GLAB_MANY=13 FM_BEARINGS_MRS=11 run "$home" "$fakebin" --include-mrs --json 2>/dev/null) \
+    || fail "--include-mrs run failed"
+  printf '%s' "$json" | jq -e '(.open_mrs | length) == 11 and all(.open_mrs[]; .state | contains("CI passing"))' >/dev/null \
+    || fail "every kept MR must carry its CI: $json"
+  [ "$(grep -c 'projects/42/merge_requests/9[0-9]*$' "$home/net.log")" = 11 ] \
+    || fail "only the kept MRs need a detail call: $(cat "$home/net.log")"
+  pass "--include-mrs reads CI and approvals for every listed MR, a few at a time"
 }
 
 # A glab failure, a hang, a missing glab or no host never breaks the snapshot: the
@@ -4213,6 +4267,7 @@ fm_test_run \
   test_include_mrs_lists_mrs_awaiting_the_captains_review \
   test_include_mrs_ignores_records_the_view_does_not_show \
   test_include_mrs_drops_archived_project_mrs \
+  test_include_mrs_reads_detail_for_every_listed_mr \
   test_include_mrs_failure_degrades \
   test_include_mrs_lists_a_recorded_mr_its_underway_row_does_not_name \
   test_include_mrs_lists_an_mr_another_row_only_waits_on \
