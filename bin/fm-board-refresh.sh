@@ -83,6 +83,12 @@
 # A failed build is logged to state/.board-refresh.log (last 20 lines kept, a
 # repeated skip logged once) and never changes the caller's exit status beyond
 # this script's own.
+# When data/secondmates.md routes a board-keeper secondmate, the first failed
+# build of an episode (a payload that failed or a build that was refused) also
+# sends board-keeper that log line through bin/fm-send.sh, bounded to
+# FM_BOARD_REFRESH_NOTIFY_TIMEOUT seconds (default 20) with its outcome ignored.
+# state/.board-refresh.failure-notified marks the episode as told; the next
+# rebuilt board clears it, so the next failure is news again.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,12 +106,16 @@ SUM="$STATE/.board-refresh.sum"
 INPUTS="$STATE/.board-refresh.inputs"
 LAVISH_DIR="$STATE/.board-refresh.lavish-dir"
 LOG="$STATE/.board-refresh.log"
+NOTIFIED="$STATE/.board-refresh.failure-notified"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DEBOUNCE="${FM_BOARD_REFRESH_DEBOUNCE:-3}"
 MIN_INTERVAL="${FM_BOARD_REFRESH_MIN_INTERVAL:-60}"
 MAX_AGE="${FM_BOARD_REFRESH_MAX_AGE:-300}"
 LOCK_TTL="${FM_BOARD_REFRESH_LOCK_TTL:-300}"
+NOTIFY_TIMEOUT="${FM_BOARD_REFRESH_NOTIFY_TIMEOUT:-20}"
+# FM_BOARD_REFRESH_SEND replaces the fm-send command (tests only).
+SEND="${FM_BOARD_REFRESH_SEND:-$SCRIPT_DIR/fm-send.sh}"
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 # FM_BOARD_REFRESH_PAYLOAD replaces the payload command (tests only).
 PAYLOAD="${FM_BOARD_REFRESH_PAYLOAD:-$SCRIPT_DIR/fm-bearings-board-payload.sh}"
@@ -160,8 +170,24 @@ take_lock() {
 }
 
 log() {
-  printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"
+  LOG_LINE="$(date -u +%FT%TZ) $*"
+  printf '%s\n' "$LOG_LINE" >>"$LOG"
   tail -n 20 "$LOG" >"$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+}
+
+# A failed build: log it and, once per episode, tell board-keeper (see header).
+log_failure() {
+  log "$@"
+  [ ! -e "$NOTIFIED" ] || return 0
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh" 2>/dev/null || return 0
+  secondmate_registry_line_for_id "$DATA/secondmates.md" board-keeper || return 0
+  : >"$NOTIFIED" 2>/dev/null || return 0
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh" 2>/dev/null || return 0
+  FM_HOME="$FM_HOME" fm_run_timed "$NOTIFY_TIMEOUT" "$SEND" board-keeper \
+    "$LOG_LINE
+The bearings board build is failing." </dev/null >/dev/null 2>&1 || true
 }
 
 # A skip repeats on every request, so it is logged only when it is news.
@@ -278,7 +304,7 @@ refresh_once() {
   if ! "$PAYLOAD" >"$tmp" 2>>"$LOG"; then
     rm -f "$tmp"
     [ -z "$inputs" ] || printf '%s\n' "$inputs" >"$INPUTS"
-    log "payload generation failed"
+    log_failure "payload generation failed"
     return 1
   fi
   [ -z "$inputs" ] || printf '%s\n' "$inputs" >"$INPUTS"
@@ -290,12 +316,12 @@ refresh_once() {
   fi
   printf '%s\n' "$sum" >"$SUM"
   if out=$("$SCRIPT_DIR/fm-bearings-board.sh" build --no-reopen "$tmp" 2>&1); then
-    rm -f "$tmp"
+    rm -f "$tmp" "$NOTIFIED"
     log "rebuilt board"
     return 0
   fi
   rm -f "$tmp"
-  log "board build refused: $(printf '%s' "$out" | tail -n 1)"
+  log_failure "board build refused: $(printf '%s' "$out" | tail -n 1)"
   return 1
 }
 
