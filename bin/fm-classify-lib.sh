@@ -1093,7 +1093,7 @@ EOF
 # that handled/ layout), which is an answer that arrived without a closing
 # resolved line.
 status_worker_wait_verb() {  # <status-file>
-  local f=$1 last verb key own rec
+  local f=$1 last verb key own
   last=$(last_status_line "$f")
   [ -n "$last" ] || return 1
   status_line_verb "$last" verb
@@ -1104,10 +1104,19 @@ status_worker_wait_verb() {  # <status-file>
     "$key"$'\t'"$verb"$'\t'*|*$'\n'"$key"$'\t'"$verb"$'\t'*) ;;
     *) return 1 ;;
   esac
-  for rec in "${f%.status}.inbox/handled"/*.msg; do
-    [ "$rec" -nt "$f" ] && return 1
-  done
+  status_inbox_answered_since "$f" && return 1
   printf '%s' "$verb"
+}
+
+# 0 when the task's steering inbox holds a record the worker acknowledged after
+# its status file last changed (bin/fm-task-inbox-lib.sh owns that handled/
+# layout): an answer that arrived without a closing resolved line.
+status_inbox_answered_since() {  # <status-file>
+  local f=$1 rec
+  for rec in "${f%.status}.inbox/handled"/*.msg; do
+    [ "$rec" -nt "$f" ] && return 0
+  done
+  return 1
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
@@ -2758,6 +2767,43 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   [ -n "$human" ] && [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
   printf '%s\n' "$run"
+}
+
+# 0, printing `needs-decision` or `blocked`, when crew <id> is parked at its
+# prompt on a question or blocker it raised itself and nobody has answered yet.
+# Both halves are required. The task's own decision fold
+# (status_own_open_decisions, so a supervisor-reserved key never counts) must
+# still hold an open record of that verb - read from the whole log, so a later
+# line for some other key does not end it - and bin/fm-crew-state.sh must report
+# `parked` (an open needs-decision) or `blocked` read from the status log. The
+# status-log source is what says nothing else is going on: a busy pane or an
+# executing run step outranks the log there and reports another source, and a
+# parked no-mistakes gate reports run-step, which crew_gate_awaits_human_decision
+# owns. A steering-inbox answer the worker acknowledged after its status file
+# last changed ends the wait, as it does for status_worker_wait_verb.
+# The fold read is cheap and comes first; the crew-state read is taken only when
+# the fold holds an own open wait at all. Same cost and caveat as
+# crew_absorb_class otherwise.
+crew_parked_on_own_wait() {  # <id> <status-file> -> verb on stdout
+  local id=$1 f=$2 own line state src want
+  [ -n "$id" ] || return 1
+  own=$(status_own_open_decisions "$f")
+  case "$own" in *$'\t'needs-decision$'\t'*|*$'\t'blocked$'\t'*) ;; *) return 1 ;; esac
+  status_inbox_answered_since "$f" && return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = status-log ] || return 1
+  case "$state" in
+    parked) want=needs-decision ;;
+    blocked) want=blocked ;;
+    *) return 1 ;;
+  esac
+  case "$own" in
+    *$'\t'"$want"$'\t'*) printf '%s' "$want" ;;
+    *) return 1 ;;
+  esac
 }
 
 # 0 if crew <id>'s authoritative current state is an attributed no-mistakes run
