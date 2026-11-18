@@ -4125,6 +4125,92 @@ test_a_reconciled_re_hold_raises_the_card_again() {
   pass "a reconciled re-hold newer than the captain's board answer raises the card again"
 }
 
+# A main->mate steer in the documented inbox record format. The keys become
+# handoff-key headers, the explicit marker fm-send.sh --handoff-key writes.
+write_steer_record() {  # <state-dir> <task> <seq> <at> <handoff-keys> <body>
+  local dir=$1/$2.inbox/handled key
+  mkdir -p "$dir"
+  {
+    printf 'schema=fm-task-inbox.v1\nat=%s\nbody-terminator=1\n' "$4"
+    for key in $5; do printf 'handoff-key=%s\n' "$key"; done
+    printf -- '--\n%s\n' "$6"
+  } > "$dir/$3.msg"
+}
+
+# The defect's card-hygiene steers name the very keys that must stay in front of
+# the captain, so each row must stay on Captain's Call.
+DEFECT_HOLDS="cd-810-infra-home cd-870-version-file cd-882-mr-run cd-882-name cd-908-runner-rerun cd-915-stable-lag gke-cp-lockdown-rollout runner-fuse-rollout"
+
+write_defect_steer_fixture() {  # <home>
+  local home=$1 mate id
+  write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  for id in $DEFECT_HOLDS; do
+    sed -i '/^## Queued/a\
+- [ ] '"$id"' - Decide '"$id"' (repo: firstmate) (kind: captain) (since 2026-11-16) (hold: '"$id"' needs a captain call) (hold-kind: captain)\
+  Captain hold set: 2026-11-16T10:00:00Z' "$mate/data/backlog.md"
+  done
+  write_steer_record "$home/state" mate 337 2026-11-16T15:02:18Z "" \
+    "Your own card cd-870-version-file already asks the real question"
+  write_steer_record "$home/state" mate 352 2026-11-17T09:40:18Z "" \
+    "Keep the captain hold only and resolve key cd-810-infra-home as a duplicate"
+  write_steer_record "$home/state" mate 363 2026-11-17T13:47:23Z "" \
+    "You re-raised #882 as cd-882-name and cd-882-mr-run ... close the old ones"
+  write_steer_record "$home/state" mate 382 2026-11-17T20:18:57Z "" \
+    "cards cd-908-runner-rerun and cd-915-stable-lag are held off the board ... re-raise it as a clean keyed needs-decision"
+  write_steer_record "$home/state" mate 009 2026-11-17T09:40:22Z "" \
+    "gke-cp-lockdown-rollout is both a plain keyed needs-decision and captain-hold-... Keep the captain hold"
+  # The mate closes the plain duplicate key that shares the hold's id.
+  printf 'resolved [key=runner-fuse-rollout] [at=%s]: duplicate of the captain hold\n' \
+    "$(date -u -d 2026-11-17T09:40:30Z +%s)" | tee -a "$home/state/mate.status" >> "$mate/state/mate.status"
+}
+
+handed_defect_holds() {  # <json> -> sorted ids of the defect holds that read as handed off
+  printf '%s' "$1" | jq -r --arg ids "$DEFECT_HOLDS" '($ids | split(" ")) as $ids
+    | [.decisions_open[] | select(.verb == "captain-hold" and (.key as $k | $ids | index($k)))
+       | select(.handed_at != null) | .key] | sort | join(",")'
+}
+
+test_a_steer_that_only_names_a_key_never_hands_its_card_off() {
+  local home fakebin json
+  home=$(make_home handoff-prose); write_defect_steer_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg ids "$DEFECT_HOLDS" '($ids | split(" ")) as $ids
+      | [.decisions_open[] | select(.verb == "captain-hold" and (.key as $k | $ids | index($k)))] | length == 8' >/dev/null \
+    || fail "the fixture does not raise the eight defect holds: $json"
+  assert_equals "" "$(handed_defect_holds "$json")" \
+    "a steer that only names a key, or a plain-key resolved line, handed a captain call off"
+  pass "a card-hygiene steer that names a key and a plain-key resolved line keep the call on Captain's Call"
+}
+
+test_only_a_marked_steer_or_the_hold_mirror_hands_a_card_off() {
+  local home fakebin json mate
+  home=$(make_home handoff-marker); write_defect_steer_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  fakebin=$(make_fakebin "$home")
+  # A marked steer that still tells the worker to wait for the captain hands nothing off.
+  write_steer_record "$home/state" mate 400 2026-11-18T08:00:00Z "cd-810-infra-home" \
+    "Keep the hold held: the captain decides cd-810-infra-home."
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "" "$(handed_defect_holds "$json")" "a marked steer with wait-for-the-captain wording handed a call off"
+  # The marker hands off only the key it names, whatever the body says.
+  write_steer_record "$home/state" mate 401 2026-11-18T09:00:00Z "cd-810-infra-home cd-882-name" \
+    "The captain chose option two; go ahead and ship it."
+  # The hold's answered or released mirror line closes that hold.
+  printf 'resolved [key=captain-hold-gke-cp-lockdown-rollout-1] [at=%s]: answered\n' \
+    "$(date -u -d 2026-11-18T09:30:00Z +%s)" >> "$home/state/mate.status"
+  json=$(run "$home" "$fakebin" --json)
+  assert_equals "cd-810-infra-home,cd-882-name,gke-cp-lockdown-rollout" "$(handed_defect_holds "$json")" \
+    "only a marked steer and the hold mirror should hand a call off"
+  printf '%s' "$json" | jq -e '.decisions_open[] | select(.key == "cd-810-infra-home")
+      | .handed_via == "steer" and .handed_task == "mate" and .handed_at == "2026-11-18T09:00:00Z"' >/dev/null \
+    || fail "a marked steer does not say when or to whom it handed the call: $json"
+  printf '%s' "$json" | jq -e '.decisions_open[] | select(.key == "gke-cp-lockdown-rollout") | .handed_via == "resolved"' >/dev/null \
+    || fail "the hold mirror resolved line did not hand the call off: $json"
+  pass "only a steer marked with the key, never wait wording, or the hold mirror hands a call off"
+}
+
 test_a_hold_gains_the_pr_link_its_home_recorded() {
   local home fakebin json
   home=$(make_home hold-pr-link); write_fixture "$home"
@@ -4314,6 +4400,8 @@ fm_test_run \
   test_a_board_answer_hands_off_every_kind_of_card_until_it_is_raised_again \
   test_a_board_answer_from_another_page_is_ignored \
   test_a_reconciled_re_hold_raises_the_card_again \
+  test_a_steer_that_only_names_a_key_never_hands_its_card_off \
+  test_only_a_marked_steer_or_the_hold_mirror_hands_a_card_off \
   test_a_hold_gains_the_pr_link_its_home_recorded \
   test_a_no_link_hold_does_not_take_its_origins_pr \
   test_a_mate_question_takes_only_its_own_repos_pr_link \

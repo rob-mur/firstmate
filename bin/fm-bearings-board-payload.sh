@@ -40,8 +40,9 @@
 #     when the same home has a higher round of the same base in decisions, work
 #     under way, landed work, or gates;
 #   - a decision the snapshot marks handed (handed_at: after it was last raised,
-#     a steer naming it went to the task it tracks, a resolved line closed its
-#     key, or the captain marked it out of date on the board) is a waiting row
+#     a steer marked with its key by fm-send.sh --handoff-key went to the task
+#     it tracks, the hold's answered or released mirror line closed it, or the
+#     captain answered it or marked it out of date on the board) is a waiting row
 #     saying who has it, until the worker raises a fresh question;
 #   - a status row that only announces a page or PR is live or ready
 #     (is_announcement in bin/fm-bearings-question-lib.sh) is never a card: its

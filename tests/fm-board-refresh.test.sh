@@ -438,11 +438,13 @@ add_steerable_task() {  # <home> <id>
   fm_write_meta "$1/state/$2.meta" "task=$2" "repo=alpha" "kind=ship" "window=sess:fm-$2" "harness=claude"
 }
 
-steer() {  # <home> <task> <text>
-  in_home "$1" env FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$2" "$3" >/dev/null 2>&1
+steer() {  # <home> <task> <text> [fm-send option...]
+  local home=$1 task=$2 text=$3
+  shift 3
+  in_home "$home" env FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$task" "$@" "$text" >/dev/null 2>&1
 }
 
-test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting() {
+test_a_marked_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting() {
   local home later
   [ -n "$TASKS_AXI_BIN" ] || { pass "skip: tasks-axi not found"; return; }
   home=$(make_hold_home handed-steer)
@@ -452,7 +454,7 @@ test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting() {
   build_initial_board "$home"
   in_home "$home" "$REFRESH" || fail "baseline refresh failed"
   sleep 1.1
-  steer "$home" t1 "Keep board-call held: the captain decides." || fail "the wait steer failed"
+  steer "$home" t1 "Keep board-call held: the captain decides." --handoff-key board-call || fail "the wait steer failed"
   payload "$home" "$home/wait.json"
   assert_equals "board-call" "$(card_keys "$home/wait.json" captains_call board-call)" \
     "a steer telling the worker to wait for the captain took the card away"
@@ -460,7 +462,11 @@ test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting() {
   payload "$home" "$home/other.json"
   assert_equals "board-call" "$(card_keys "$home/other.json" captains_call board-call)" \
     "a steer that does not name the decision took the card away"
-  steer "$home" t1 "The captain chose option two for board-call; go ahead and ship it." || fail "the answering steer failed"
+  steer "$home" t1 "The captain chose option two for board-call; go ahead and ship it." || fail "the unmarked steer failed"
+  payload "$home" "$home/unmarked.json"
+  assert_equals "board-call" "$(card_keys "$home/unmarked.json" captains_call board-call)" \
+    "a steer that only names the decision without the hand-off marker took the card away"
+  steer "$home" t1 "Go ahead and ship option two." --handoff-key board-call || fail "the answering steer failed"
   await_rebuilds "$home" 2 || fail "a steer did not refresh the open board"
   grep -q 'With t1 since' "$home/.lavish/bearings-board.data.js" || fail "the open board does not show the handed decision as waiting on t1"
   payload "$home" "$home/handed.json"
@@ -471,7 +477,7 @@ test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting() {
   payload "$home" "$home/again.json"
   assert_equals "board-call" "$(card_keys "$home/again.json" captains_call '^board-call$')" \
     "a fresh question from the worker did not bring the decision back as a card"
-  pass "a steer that hands a decision to its worker moves the card to waiting until the worker asks again"
+  pass "a steer marked as handing a decision to its worker moves the card to waiting until the worker asks again"
 }
 
 test_a_board_reconcile_request_moves_the_card_to_waiting_at_once() {
@@ -868,7 +874,7 @@ fm_test_run \
   test_lavish_axi_is_found_without_it_on_path_or_retried_later \
   test_a_captain_hold_and_its_answer_rebuild_the_board \
   test_every_open_captain_hold_has_exactly_one_board_row \
-  test_a_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting \
+  test_a_marked_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting \
   test_a_board_reconcile_request_moves_the_card_to_waiting_at_once \
   test_an_answered_hold_ranked_first_never_returns_as_a_card \
   test_a_done_task_ranked_first_never_renders_as_a_card \
