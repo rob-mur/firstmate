@@ -1242,12 +1242,16 @@ EOF
 $(printf '%s' "$mr_uncovered" | jq -r --argjson cap "$FM_BEARINGS_MRS" '.[:$cap][] | "\(.project_id)\t\(.iid)"')
 EOF
       wait
-      mr_details=$(for f in "$mr_tmp"/d-* "$mr_tmp"/a-*; do
+      # The detail map grows with every listed MR, so it reaches jq as a file:
+      # an argument that size overflows the kernel's argument limit.
+      for f in "$mr_tmp"/d-* "$mr_tmp"/a-*; do
           [ -f "$f" ] || continue
           jq -c --arg k "${f##*/}" 'select(type == "object") | {key:$k, value:.}' "$f" 2>/dev/null
-        done | jq -s 'from_entries')
-      [ -n "$mr_details" ] || mr_details='{}'
-      OPEN_MRS=$(printf '%s' "$mr_uncovered" | jq -c --argjson det "$mr_details" --argjson cap "$FM_BEARINGS_MRS" '
+        done | jq -s 'from_entries' > "$mr_tmp/details"
+      [ -s "$mr_tmp/details" ] || printf '{}' > "$mr_tmp/details"
+      OPEN_MRS=$(printf '%s' "$mr_uncovered" | jq -c --slurpfile detf "$mr_tmp/details" --argjson cap "$FM_BEARINGS_MRS" '
+        $detf[0] as $det
+        |
         def merge_state:
           if .draft == true or .detailed_merge_status == "draft_status" then "draft"
           elif .has_conflicts == true or .detailed_merge_status == "conflict" then "has conflicts"
@@ -1285,13 +1289,18 @@ EOF
     fi
   fi
 fi
-MODEL=$(printf '%s' "$MODEL" | jq --arg mrs "$MR_STATUS" --argjson open_mrs "$OPEN_MRS" \
+# open_mrs reaches jq as a file for the same argument-limit reason.
+open_mrs_file=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-open-mrs.XXXXXX")
+printf '%s' "$OPEN_MRS" > "$open_mrs_file"
+MODEL=$(printf '%s' "$MODEL" | jq --arg mrs "$MR_STATUS" --slurpfile open_mrs_f "$open_mrs_file" \
   --argjson include_mrs "$INCLUDE_MRS" --argjson cap "$FM_BEARINGS_MRS" '
-  .omitted as $om
+  $open_mrs_f[0] as $open_mrs
+  | .omitted as $om
   | del(.omitted) + {mrs:$mrs}
   + (if $open_mrs == null then {} else {open_mrs:$open_mrs} end)
   + {omitted: ($om + (if $include_mrs == 1 then [] else [{surface:"captain'"'"'s open GitLab MRs", reveal:"--include-mrs"}] end))}') \
-  || { echo "fm-bearings-snapshot: MR projection failed" >&2; exit 1; }
+  || { rm -f "$open_mrs_file"; echo "fm-bearings-snapshot: MR projection failed" >&2; exit 1; }
+rm -f "$open_mrs_file"
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"
