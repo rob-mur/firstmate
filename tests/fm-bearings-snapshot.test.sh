@@ -86,7 +86,9 @@ SH
   # records its URL), !880 (no task covers it), !8 (no task covers it; its URL
   # is a prefix of !870's and !880's, so only an exact match may cover it) and
   # keeper!1 (its project 619 is archived, so it is not really open). Project 7
-  # answers 404, so its archived state is unknown and its MR stays.
+  # answers 404, so its archived state is unknown and its MR stays. The captain
+  # is user 393; with FAKE_GLAB_REVIEWER=1 they are a requested reviewer on !846
+  # (someone else's MR) and on their own !880, otherwise on nothing.
   cat > "$fb/glab" <<'SH'
 #!/usr/bin/env bash
 echo "glab $*" >> "$NET_LOG"
@@ -102,6 +104,14 @@ if [ "${1:-}" = config ]; then
 fi
 path=${*: -1}
 case "$path" in
+  user) echo '{"id":393,"username":"captain"}' ;;
+  merge_requests\?*reviewer_id=393\&*)
+    if [ "${FAKE_GLAB_REVIEWER:-0}" != 1 ]; then echo '[]'; exit 0; fi
+    cat <<'JSON'
+[{"iid":846,"project_id":42,"title":"Teammate pricing change","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/846","references":{"full":"grp/app/aegis!846"},"draft":false,"detailed_merge_status":"not_approved","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T10:00:00Z"},
+ {"iid":880,"project_id":42,"title":"Bump the dependencies","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880","references":{"full":"grp/app/aegis!880"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T08:30:00Z"}]
+JSON
+    ;;
   merge_requests\?*)
     cat <<'JSON'
 [{"iid":870,"project_id":42,"title":"APP-5556 covered change","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/870","references":{"full":"grp/app/aegis!870"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-10T09:00:00Z"},
@@ -1546,16 +1556,20 @@ test_perl_fallback_bounds_github_call() {
 test_include_mrs_lists_only_uncovered_mrs() {
   local home fakebin json err
   home=$(make_home mrs); write_fixture "$home"
-  # A backlog note records !870's URL, so a task covers it.
-  printf '  Follow-up for https://gitlab.example.com/grp/app/aegis/-/merge_requests/870 once CI passes.\n' \
-    >> "$home/data/backlog.md"
+  # A queued row the view shows names !870 by its full reference, so it covers it.
+  sed -i '/^## Queued/a\
+- [ ] mr-870-follow - Land grp/app/aegis!870 (repo: aegis) (kind: ship)' \
+    "$home/data/backlog.md"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   err="$home/mrs.err"
   json=$(run "$home" "$fakebin" --include-mrs --json 2>"$err") || fail "--include-mrs run failed: $(cat "$err")"
   grep -q "merge_requests?scope=created_by_me&state=opened" "$home/net.log" \
     || fail "--include-mrs must list the captain's open MRs: $(cat "$home/net.log")"
   grep -q -- '--hostname gitlab.example.com' "$home/net.log" || fail "glab must target the configured host"
-  [ "$(grep -c 'merge_requests?' "$home/net.log")" = 1 ] || fail "one list call per build: $(cat "$home/net.log")"
+  [ "$(grep -c 'merge_requests?scope=created_by_me' "$home/net.log")" = 1 ] \
+    && [ "$(grep -c 'merge_requests?scope=all&state=opened&reviewer_id=393&' "$home/net.log")" = 1 ] \
+    && [ "$(grep -c 'merge_requests?' "$home/net.log")" = 2 ] \
+    || fail "one authored and one review list call per build: $(cat "$home/net.log")"
   ! grep -q 'projects/42/merge_requests/870' "$home/net.log" || fail "a covered MR needs no detail call"
   printf '%s' "$json" | jq -e '
     (.open_mrs | map(.url)) == ["https://gitlab.example.com/grp/app/aegis/-/merge_requests/880",
@@ -1575,12 +1589,59 @@ test_include_mrs_covers_by_task_meta_and_reference() {
     "window=firstmate:fm-ship-task" "worktree=$home/projects/ship-wt" "project=firstmate" \
     "harness=claude" "kind=ship" "mode=no-mistakes" \
     "pr=https://gitlab.example.com/grp/app/aegis/-/merge_requests/880"
-  printf '  Waiting on grp/app/aegis!8 review.\n' >> "$home/data/backlog.md"
+  sed -i '/^## Queued/a\
+- [ ] mr-8-review - Review grp/app/aegis!8 (repo: aegis) (kind: ship)' "$home/data/backlog.md"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   json=$(run "$home" "$fakebin" --include-mrs --json 2>/dev/null)
   printf '%s' "$json" | jq -e '(.open_mrs | map(.key)) == ["mr-42-870"]' >/dev/null \
-    || fail "task meta pr= and a full reference must cover their MRs: $json"
-  pass "an MR a task records by URL or full reference stays with that task"
+    || fail "task meta pr= and a full reference on a queued row must cover their MRs: $json"
+  pass "an MR a task shows by URL or full reference stays with that task"
+}
+
+# MRs awaiting the captain's review are the captain's open MRs too: the snapshot
+# asks GitLab who the captain is and lists the MRs they review next to the ones
+# they authored, once each.
+test_include_mrs_lists_mrs_awaiting_the_captains_review() {
+  local home fakebin json err
+  home=$(make_home mrs-review); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  err="$home/mrs.err"
+  json=$(FAKE_GLAB_REVIEWER=1 run "$home" "$fakebin" --include-mrs --json 2>"$err") \
+    || fail "--include-mrs run failed: $(cat "$err")"
+  grep -q 'api --hostname gitlab.example.com user$' "$home/net.log" \
+    || fail "the captain's GitLab id must come from the user call: $(cat "$home/net.log")"
+  grep -q 'merge_requests?scope=all&state=opened&reviewer_id=393&' "$home/net.log" \
+    || fail "the review list must ask for the captain's id: $(cat "$home/net.log")"
+  printf '%s' "$json" | jq -e '
+    (.open_mrs | map(.key)) == ["mr-42-846", "mr-42-880", "mr-42-870", "mr-7-8"]
+    and (.open_mrs[0] | .repo == "aegis" and .title == "Teammate pricing change"
+         and .url == "https://gitlab.example.com/grp/app/aegis/-/merge_requests/846"
+         and (.state | startswith("needs approval")))
+  ' >/dev/null || fail "an MR awaiting the captain's review must be listed once, beside their own: $json"
+  pass "--include-mrs lists the MRs awaiting the captain's review beside their own"
+}
+
+# Coverage follows what the view shows. A Done record or the tail of a status
+# line that the underway row cuts short names an MR the board never shows, so it
+# must not hide that MR from the open-MR rows.
+test_include_mrs_ignores_records_the_view_does_not_show() {
+  local home fakebin json
+  home=$(make_home mrs-unshown); write_fixture "$home"
+  printf -- '- [x] mr-880-decision - Decide https://gitlab.example.com/grp/app/aegis/-/merge_requests/880 (repo: aegis) (kind: captain) (merged 2026-07-10)\n' \
+    >> "$home/data/backlog.md"
+  fm_write_meta "$home/state/aegis-wait.meta" \
+    "window=firstmate:fm-aegis-wait" "worktree=$home/projects/ship-wt" "project=aegis" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'working: waiting on the release pipeline, the staging smoke run and the reviewer before the follow-up grp/app/aegis!8\n' \
+    > "$home/state/aegis-wait.status"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --include-mrs --all-in-flight --json 2>/dev/null) || fail "--include-mrs run failed"
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[] | select(.id == "aegis-wait") | .doing | select(test("grp/app/aegis!8") | not)] | length) == 1
+  ' >/dev/null || fail "the fixture must cut the !8 reference off the underway row: $json"
+  printf '%s' "$json" | jq -e '(.open_mrs | map(.key)) == ["mr-42-880", "mr-42-870", "mr-7-8"]' >/dev/null \
+    || fail "a Done record or a cut-off status tail must not hide an open MR: $json"
+  pass "an MR named only where the view does not show it still gets its own row"
 }
 
 # The board payload built live (no --snapshot) asks the snapshot for the
@@ -4090,6 +4151,8 @@ fm_test_run \
   test_include_prs_is_the_only_fetch_path \
   test_include_mrs_lists_only_uncovered_mrs \
   test_include_mrs_covers_by_task_meta_and_reference \
+  test_include_mrs_lists_mrs_awaiting_the_captains_review \
+  test_include_mrs_ignores_records_the_view_does_not_show \
   test_include_mrs_drops_archived_project_mrs \
   test_include_mrs_failure_degrades \
   test_live_board_payload_carries_the_open_mrs \

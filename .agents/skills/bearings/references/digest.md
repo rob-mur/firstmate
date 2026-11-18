@@ -9,7 +9,7 @@ For a contribution wake or linked-issue filing, go directly to `references/contr
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
    The default performs bounded concurrent remote-ledger reads for registered remote homes under one shared snapshot budget and may refresh the parent-side cache.
    Only pass `--include-prs` when the captain asks for repository-wide live GitHub PR enrichment.
-   Pass `--include-mrs` when the captain asks about their open GitLab MRs: it adds `open_mrs`, the ones no task records, each with one state line and its full URL, and the board payload already includes them.
+   Pass `--include-mrs` when the captain asks about their open GitLab MRs: it adds `open_mrs`, the ones they authored or are asked to review that the rest of the view does not show, each with one state line and its full URL, and the board payload already includes them.
    Registered owned contributions use the cached `contributions` projection independently of that opt-in; no invocation-time forge discovery is needed to read it.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.

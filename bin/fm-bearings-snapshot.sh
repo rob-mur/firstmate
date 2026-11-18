@@ -22,18 +22,22 @@
 # (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
 # never ambiguous.
 #
-# --include-mrs lists the captain's open GitLab MRs that no task records, as
+# --include-mrs lists the captain's open GitLab MRs - those they authored and those
+# they are a requested reviewer on - that this view shows nowhere else, as
 # open_mrs{key,repo,title,url,state,updated} with one state line each (merge state,
-# CI, approvals, unresolved threads, last activity). It makes one read-only
-# `glab api merge_requests?scope=created_by_me&state=opened` call against the host
-# in FM_BEARINGS_GITLAB_HOST or glab's configured host, plus bounded detail and
+# CI, approvals, unresolved threads, last activity). It makes three read-only calls
+# against the host in FM_BEARINGS_GITLAB_HOST or glab's configured host - `glab api
+# user` for the captain's id, `merge_requests?scope=created_by_me&state=opened` and
+# `merge_requests?scope=all&state=opened&reviewer_id=<id>` - plus bounded detail and
 # approvals reads for the first FM_BEARINGS_MR_DETAIL_MAX uncovered MRs, each call
 # bounded by FM_BEARINGS_MR_TIMEOUT seconds; at most FM_BEARINGS_MRS rows are kept.
 # GitLab keeps an MR open after its project is archived, so one bounded
 # `projects/<id>` read per distinct project (at most FM_BEARINGS_MR_PROJECT_MAX)
 # drops the MRs of an archived project; a project it cannot read keeps its MRs.
 # An MR is covered only when its exact URL or full reference (group/project!iid)
-# appears in this home's task meta, backlog or snapshot - never by a fuzzy match. A
+# appears in this view's own projected output (an underway row, a decision, a
+# recorded PR, a queued item) - never by a fuzzy match, and never by a Done record
+# or a status line the view cuts short, since the board would then show it nowhere. A
 # missing glab, no host, no auth, a failure or a timeout leaves open_mrs out, sets
 # the mrs: line to `unavailable (...)`, logs one stderr line, and exits 0.
 #
@@ -226,8 +230,9 @@ Opt-in surfaces: --fields bodies|paths|actions|endpoints|gate-text
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs),
   --include-mrs (adds open_mrs{key,repo,title,url,state,updated}: the captain's open
-  GitLab MRs no task records by URL or full reference; the mrs: line says whether
-  they were checked or unavailable).
+  GitLab MRs, authored or awaiting their review, that the rest of this view does not
+  show by URL or full reference; the mrs: line says whether they were checked or
+  unavailable).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 --include-mrs bounds: FM_BEARINGS_GITLAB_HOST (default: glab's configured host),
   FM_BEARINGS_MR_TIMEOUT seconds per glab call (10), FM_BEARINGS_MR_DETAIL_MAX MRs
@@ -1126,16 +1131,19 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
         end)')
 
 # --- optional live GitLab MR listing ----------------------------------------
-# Under --include-mrs only: the captain's open GitLab MRs that no task records.
-# One bounded list call against the configured host, one bounded project read per
-# distinct project to drop MRs of an archived project, then one bounded detail and
-# approvals call per uncovered MR (at most FM_BEARINGS_MR_DETAIL_MAX of them, run
-# in parallel). Read-only. An MR is covered when its exact web_url or full
-# reference (group/project!iid), not followed by another digit, appears anywhere
-# in the canonical snapshot (task meta pr=, backlog lines and notes, secondmate
-# records) or in the projected model; there is no fuzzy match. A missing glab, no
-# host, or a failed or timed-out call leaves open_mrs out, says so on the mrs
-# line, and writes one line to stderr; it never fails the snapshot.
+# Under --include-mrs only: the captain's open GitLab MRs, authored or awaiting
+# their review, that the rest of this view does not show. One bounded user call
+# for the captain's id and two bounded list calls against the configured host
+# (merged by project and iid), one bounded project read per distinct project to
+# drop MRs of an archived project, then one bounded detail and approvals call per
+# uncovered MR (at most FM_BEARINGS_MR_DETAIL_MAX of them, run in parallel).
+# Read-only. An MR is covered when its exact web_url or full reference
+# (group/project!iid), not followed by another digit, appears in the projected
+# model; there is no fuzzy match. The canonical snapshot is deliberately not
+# consulted: its Done records and full status lines name MRs the board never
+# shows, which would hide them from every card and row. A missing glab, no host,
+# or a failed or timed-out call leaves open_mrs out, says so on the mrs line, and
+# writes one line to stderr; it never fails the snapshot.
 MR_STATUS='not_requested (run: /bearings include MRs)'
 OPEN_MRS=null
 if [ "$INCLUDE_MRS" = 1 ]; then
@@ -1150,13 +1158,19 @@ if [ "$INCLUDE_MRS" = 1 ]; then
     case "$mr_host" in *[!A-Za-z0-9.:-]*) mr_host="" ;; esac
     if [ -z "$mr_host" ]; then
       mr_unavailable "no GitLab host configured"
-    elif ! mr_list=$(glab_bounded api --hostname "$mr_host" \
+    elif ! mr_uid=$(glab_bounded api --hostname "$mr_host" user 2>/dev/null \
+          | jq -er 'select(type == "object" and (.id | type) == "number") | .id' 2>/dev/null) \
+      || ! mr_authored=$(glab_bounded api --hostname "$mr_host" \
         "merge_requests?scope=created_by_me&state=opened&per_page=100" 2>/dev/null) \
-      || ! printf '%s' "$mr_list" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      || ! mr_reviewing=$(glab_bounded api --hostname "$mr_host" \
+        "merge_requests?scope=all&state=opened&reviewer_id=$mr_uid&per_page=100" 2>/dev/null) \
+      || ! mr_list=$(printf '%s\n%s\n' "$mr_authored" "$mr_reviewing" \
+        | jq -s -c 'if length == 2 and all(.[]; type == "array")
+                    then add | map(select(type == "object")) | unique_by([.project_id, .iid]) else error("not a list") end' 2>/dev/null); then
       mr_unavailable "glab api failed or timed out on $mr_host"
     else
       mr_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-mrs.XXXXXX")
-      printf '%s\n%s\n' "$SNAP" "$MODEL" > "$mr_tmp/known"
+      printf '%s\n' "$MODEL" > "$mr_tmp/known"
       # Uncovered MRs, newest activity first.
       mr_uncovered=$(printf '%s' "$mr_list" | jq -c --rawfile known "$mr_tmp/known" '
         def recorded($s): ($s | length) > 0 and
