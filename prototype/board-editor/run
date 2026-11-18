@@ -3,13 +3,26 @@
 
     prototype/board-editor/run              open the board listing in ${EDITOR:-nvim}
     prototype/board-editor/run <card-key>   open one card on its own
+    prototype/board-editor/run <page-id>    open one page on its own
 
 Reads every captain call from bin/fm-captain-calls.sh (read-only) for the home
 in TUI_BOARD_HOME (default /home/rob/repos/firstmate), or from a saved copy of
-its JSON in TUI_BOARD_CALLS_JSON. Keeps prototype/board/ (or TUI_BOARD_DIR)
-across runs: board.md lists the cards in three sections, "With captain",
+its JSON in TUI_BOARD_CALLS_JSON. Keeps the board folder across runs, by
+default ~/.local/share/fm-board-prototype/board (or TUI_BOARD_DIR), outside
+any worktree: board.md lists the cards in three sections, "With captain",
 "Broken" and "With firstmate"; cards/<key>.md holds one card. A run never
 deletes a card.
+
+A card whose call links a Lavish page ("page:<id>") gets the page as a
+markdown file, pages/<id>.md, converted from the home's
+.lavish/pages/<id>/page.html by prototype/board-editor/pages.py with no text of
+its own beyond fixed labels. Each part of the page sits under a marker line
+"<!-- block: <id> -->". The captain writes anywhere in the page: every line
+added or changed since the run last wrote the page is theirs (a line starting
+"//" is theirs even with no earlier copy), tied to the block above it; a letter
+on its own line picks that block's option. A run records each comment once and
+writes the acknowledgement line under it. When the source page changes, the run
+rebuilds the file and carries every comment over to the same place.
 
 Cards are built only from the source records, with no text of the run's own
 beyond fixed labels: the question is laid out as a heading, bullets and a
@@ -27,13 +40,15 @@ line moves to "With firstmate". The captain's order of "With captain" is kept.
 A call that leaves the source while still with the captain (or broken) leaves
 the board; its card file stays. A card with firstmate stays listed there.
 
-To open a card, press Enter (or gf) anywhere on its line in board.md: when the
-editor is nvim or vim, the run maps both keys in that buffer only to open the
-card in a NEW TAB, so :q (or :wq) on the card closes its tab and returns to
-board.md. In another editor use <C-w>gf on the line, or :tabedit cards/<key>.md.
-Answers, broken-card reports and a new order are appended to
-prototype/outbox.jsonl (or TUI_BOARD_OUTBOX) ONLY, once each; nothing reaches
-the board, its priority file, the backlog or a worker. Standard library only.
+To open a card, press Enter (or gf) anywhere on its line in board.md, and to
+open a page, on its line in the card: when the editor is nvim or vim, the run
+loads prototype/board-editor/board.vim, which maps both keys in the board's
+markdown buffers to open the named file in a NEW TAB, so :q (or :wq) closes the
+tab and returns to the one before. In another editor use <C-w>gf on the line.
+Answers, comments, broken-card and broken-page reports and a new order are
+appended to ~/.local/share/fm-board-prototype/outbox.jsonl (or
+TUI_BOARD_OUTBOX) ONLY, once each; nothing reaches the board, its priority
+file, the backlog or a worker. Standard library only.
 """
 
 from __future__ import annotations
@@ -51,15 +66,25 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import pages  # noqa: E402  (prototype/board-editor/pages.py)
+
 CALLS_SCRIPT = HERE.parent.parent / "bin" / "fm-captain-calls.sh"
 HOME = os.environ.get("TUI_BOARD_HOME", "/home/rob/repos/firstmate")
 SAVED = os.environ.get("TUI_BOARD_CALLS_JSON")
-OUTBOX = Path(os.environ.get("TUI_BOARD_OUTBOX", str(HERE.parent / "outbox.jsonl")))
-BOARD = Path(os.environ.get("TUI_BOARD_DIR", str(HERE.parent / "board")))
+# A fixed place outside any worktree, so the board and its outbox outlive the worktree of the run.
+DATA = Path.home() / ".local" / "share" / "fm-board-prototype"
+OUTBOX = Path(os.environ.get("TUI_BOARD_OUTBOX", str(DATA / "outbox.jsonl")))
+BOARD = Path(os.environ.get("TUI_BOARD_DIR", str(DATA / "board")))
 CARDS = BOARD / "cards"
+PAGES = BOARD / "pages"
 # Per card: <key>.md is the last text the run wrote or recorded, <key>.json its source record,
 # and <key>.answered marks that the captain answered it.
 SEEN = BOARD / ".seen"
+# Per page: <id>.md is the last text the run wrote or recorded, <id>.built.md the page as built
+# (no captain text, no acknowledgements), <id>.json its source metadata, version and options.
+PAGE_SEEN = SEEN / "pages"
+PAGE_LINK = re.compile(r"^page:([A-Za-z0-9][A-Za-z0-9._-]*)$")
 LINT = Path(os.environ.get("TUI_BOARD_LINT", str(Path.home() / ".claude/skills/plainspeak-publish/scripts/lint")))
 WIDTH = 78
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
@@ -247,6 +272,10 @@ def render_card(card: dict, settled: bool, content: list[str], faults: list[str]
     if links:
         out += ["", "Links:"]
         for label, url in links:
+            if m := PAGE_LINK.match(url or ""):
+                found = page_source(m.group(1))[0].is_file()
+                out.append(f"- {label or 'Page'}: " + (f"pages/{m.group(1)}.md" if found else f"{url} (not found)"))
+                continue
             state = f" ({states[url]})" if url in states else ""
             out.append(f"- {label + ': ' if label else ''}{url}{state}")
     out.append("")
@@ -311,8 +340,8 @@ def interpret(card: dict, text: str) -> dict:
     return record
 
 
-def recorded(kind: str, field: str) -> set[tuple[str, str]]:
-    """(key, field) of every outbox record of one kind: what a run already reported."""
+def recorded(kind: str, *fields: str) -> set[tuple]:
+    """(key, *fields) of every outbox record of one kind: what a run already reported."""
     seen = set()
     for line in (OUTBOX.read_text().splitlines() if OUTBOX.exists() else []):
         try:
@@ -320,14 +349,22 @@ def recorded(kind: str, field: str) -> set[tuple[str, str]]:
         except ValueError:
             continue
         if r.get("kind") == kind:
-            seen.add((r.get("key"), r.get(field)))
+            seen.add((r.get("key"), *(r.get(f) for f in fields)))
     return seen
+
+
+def ack_line(now: str) -> str:
+    return f"Received by firstmate at {now} UTC - waiting on firstmate."
+
+
+def is_ack(line: str) -> bool:
+    return bool(ACK.match(line))
 
 
 def acknowledge(key: str, now: str) -> None:
     path = card_path(key)
     lines = path.read_text().rstrip("\n").splitlines()
-    lines += ["", f"Received by firstmate at {now} UTC - waiting on firstmate."]
+    lines += ["", ack_line(now)]
     write_lines(path, lines)
     write_lines(SEEN / f"{key}.md", lines)
 
@@ -402,6 +439,137 @@ def report_broken(live: dict, broken: dict[str, list[str]], now: str) -> list[di
     return records
 
 
+# ---------------------------------------------------------------- pages
+
+def page_source(page_id: str) -> tuple[Path, Path]:
+    return Path(HOME) / ".lavish" / "pages" / page_id / "page.html", Path(HOME) / "state" / "pages" / page_id / "page.json"
+
+
+def page_path(page_id: str) -> Path:
+    return PAGES / f"{page_id}.md"
+
+
+def page_record(page_id: str) -> dict:
+    saved = PAGE_SEEN / f"{page_id}.json"
+    return json.loads(saved.read_text()) if saved.exists() else {}
+
+
+def linked_pages(cards: list[dict]) -> list[str]:
+    ids: list[str] = []
+    for card in cards:
+        for link in card.get("links") or []:
+            if (m := PAGE_LINK.match(link.get("url") or "")) and m.group(1) not in ids:
+                ids.append(m.group(1))
+    return ids
+
+
+def collect_pages(now: str) -> list[dict]:
+    """Record every comment written in a page since the run last wrote it, once, and acknowledge it there."""
+    records, already = [], recorded("comment", "block", "text")
+    for path in sorted(PAGES.glob("*.md")) if PAGES.exists() else []:
+        pid = path.name[:-3]
+        lines = read_lines(path) or []
+        groups = pages.captain_groups(read_lines(PAGE_SEEN / f"{pid}.md"), lines, is_ack)
+        if not groups:
+            continue
+        saved = page_record(pid)
+        skip = {i for g in groups for i in range(g.start, g.end)} | {i for i, l in enumerate(lines) if is_ack(l)}
+        acks = []
+        for g in groups:
+            text = pages.text_of(g.lines)
+            if not text:
+                continue
+            block = pages.block_at(lines, g.start)
+            if (f"page:{pid}", block, text) not in already:
+                r = {"kind": "comment", "key": f"page:{pid}", "page": pid,
+                     "task": (saved.get("page") or {}).get("task"), "block": block, "text": text,
+                     "after": pages.agent_line_above(lines, g.start, skip)}
+                if g.was:
+                    r["was"] = "\n".join(g.was)
+                info = (saved.get("blocks") or {}).get(block) or {}
+                if pick := pages.interpret(text, info.get("picks") or []):
+                    r["pick"] = pick
+                if info.get("notes"):
+                    r["note_field"] = info["notes"][0]
+                records.append(r)
+                already.add((f"page:{pid}", block, text))
+            if not (g.end < len(lines) and is_ack(lines[g.end])):
+                acks.append(g.end)
+        for at in sorted(acks, reverse=True):
+            lines.insert(at, ack_line(now))
+        write_lines(path, lines)
+        write_lines(PAGE_SEEN / f"{pid}.md", lines)
+    return records
+
+
+def build_pages(page_ids: list[str]) -> dict[str, dict[str, list[str]]]:
+    """Build each linked page from its source, or rebuild it when the source changed, keeping captain text.
+
+    Returns the lint faults of each broken page, by block.
+    """
+    code = (HERE / "pages.py").read_text()
+    broken: dict[str, dict[str, list[str]]] = {}
+    for pid in page_ids:
+        html_path, meta_path = page_source(pid)
+        if not html_path.is_file():
+            continue
+        html = html_path.read_text()
+        meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+        source = version([html, json.dumps(meta, sort_keys=True), code])
+        saved, path = page_record(pid), page_path(pid)
+        if saved.get("source") == source and path.exists():
+            if saved.get("faults"):
+                broken[pid] = saved["faults"]
+            continue
+        blocks = pages.convert(html)
+        faults: dict[str, list[str]] | None = {}
+        for b in blocks:
+            f = lint(pages.lint_lines(b.lines))
+            if f is None:
+                faults = None
+                break
+            if f:
+                faults[b.id] = f
+        fresh = pages.render_page(pid, meta, blocks, faults, source)
+        now_lines = read_lines(path)
+        out = fresh if now_lines is None else pages.place_chunks(
+            fresh, pages.captain_chunks(read_lines(PAGE_SEEN / f"{pid}.built.md"), now_lines, is_ack))
+        write_lines(path, out)
+        write_lines(PAGE_SEEN / f"{pid}.md", out)
+        write_lines(PAGE_SEEN / f"{pid}.built.md", fresh)
+        record = {"page": meta, "source": source, "faults": faults or {}, "checked": faults is not None,
+                  "blocks": {b.id: {"picks": b.picks, "notes": b.notes} for b in blocks if b.picks or b.notes}}
+        (PAGE_SEEN / f"{pid}.json").write_text(json.dumps(record, indent=1) + "\n")
+        if faults:
+            broken[pid] = faults
+    return broken
+
+
+def report_broken_pages(broken: dict[str, dict[str, list[str]]], now: str) -> list[dict]:
+    """Report each broken page version to firstmate once, acknowledged under the page's check line.
+
+    A rebuild writes the check line afresh, so the acknowledgement of a version already reported is
+    put back with the time it was first received.
+    """
+    records = []
+    when = {(k, v): (at or "")[:16].replace("T", " ") for k, v, at in recorded("broken", "version", "at")}
+    for pid, faults in broken.items():
+        saved = page_record(pid)
+        received = when.get((f"page:{pid}", saved.get("source")))
+        if received is None:
+            received = now
+            records.append({"kind": "broken", "key": f"page:{pid}", "page": pid,
+                            "task": (saved.get("page") or {}).get("task"), "version": saved.get("source"),
+                            "blocks": faults})
+        lines = read_lines(page_path(pid)) or []
+        at = next((i for i, l in enumerate(lines) if l.startswith("Check: ") and "of this page" in l), None)
+        if at is not None and not (at + 1 < len(lines) and is_ack(lines[at + 1])):
+            lines.insert(at + 1, ack_line(received))
+            write_lines(page_path(pid), lines)
+            write_lines(PAGE_SEEN / f"{pid}.md", lines)
+    return records
+
+
 def board_order(lines: list[str] | None) -> dict[str, list[str]]:
     """The card keys listed in each section; a card line before any section counts as with the captain."""
     order: dict[str, list[str]] = {WITH_CAPTAIN: [], BROKEN: [], WITH_FIRSTMATE: []}
@@ -446,6 +614,7 @@ def render_board(model: dict, live: dict, settled: set[str], places: dict[str, l
         + (f" (built {built}Z)" if built else ""),
         "",
         "- Press Enter on a card line to open it in a new tab. Close it with :q.",
+        "- In a card, press Enter on a page line to open that page in a new tab.",
         "- Write your answer at the bottom of the card. Save it with :wq.",
         "- Move a line to change the order (dd, then p).",
         "- Save and quit everything with :wqa.",
@@ -498,6 +667,18 @@ def emit(records: list[dict], now_iso: str) -> None:
             for k in r.get("missing", []):
                 print(f"    (line removed: {k})")
             continue
+        if r["kind"] == "broken" and "page" in r:
+            print(f"  broken page {r['page']} ({len(r['blocks'])} parts):")
+            for block, faults in r["blocks"].items():
+                for fault in faults:
+                    print(f"    | {block}: {fault}")
+            continue
+        if r["kind"] == "comment":
+            pick = f" picked {r['pick']['label']!r}" if "pick" in r else ""
+            print(f"  comment on page {r['page']}, part {r['block']}:{pick}")
+            for line in r["text"].splitlines():
+                print(f"    | {line}")
+            continue
         if r["kind"] == "broken":
             print(f"  broken card {r['key']}:")
             for fault in r["faults"]:
@@ -522,35 +703,47 @@ def main(argv: list[str]) -> int:
     calls, to_close = list(model.get("calls") or []), list(model.get("to_close") or [])
     live = {c["key"]: c for c in calls + to_close}
     settled = {c["key"] for c in to_close}
-    if argv and argv[0] not in live and not card_path(argv[0]).exists():
-        print(f"No card with key {argv[0]!r}. Cards now:", file=sys.stderr)
+    page_ids = linked_pages(calls + to_close)
+    target = "board.md"
+    if argv and (argv[0] in live or card_path(argv[0]).exists()):
+        target = f"cards/{argv[0]}.md"
+    elif argv and (argv[0] in page_ids or page_path(argv[0]).exists()):
+        target = f"pages/{argv[0]}.md"
+    elif argv:
+        print(f"No card or page with key {argv[0]!r}. Cards now:", file=sys.stderr)
         for k in live:
             print(f"  {k}", file=sys.stderr)
+        if page_ids:
+            print("Pages now:", file=sys.stderr)
+            for k in page_ids:
+                print(f"  {k}", file=sys.stderr)
         return 2
 
     # Answers saved since the last run (in an earlier session or by hand) are recorded first,
     # then every card not answered is built from its source and checked, and broken ones reported.
     now_iso, now = stamp()
-    records = collect(live, settled, now)
+    # Comments are recorded before any page is rebuilt, so every comment has its acknowledgement
+    # when the rebuild carries it over.
+    records = collect(live, settled, now) + collect_pages(now)
     broken, checked = build(live, settled)
-    records += report_broken(live, broken, now)
+    page_broken = build_pages(page_ids)
+    records += report_broken(live, broken, now) + report_broken_pages(page_broken, now)
     emit(records, now_iso)
     places = placement(live, settled, broken, read_lines(BOARD / "board.md"))
     board_written = render_board(model, live, settled, places, broken, checked)
     write_lines(BOARD / "board.md", board_written)
-    if not any(places.values()):
+    if not argv and not any(places.values()):
         print("No captain calls and nothing with firstmate; nothing to answer.")
         return 0
+    if not (BOARD / target).exists():
+        print(f"No file {target}: its source page is not in {HOME}.", file=sys.stderr)
+        return 2
 
-    # Run from the board folder so cards/<key>.md resolves for gf and the editor's own paths.
-    target = f"cards/{argv[0]}.md" if argv else "board.md"
+    # Run from the board folder so cards/<key>.md and pages/<id>.md resolve for gf and the editor's own paths.
     editor = shlex.split(os.environ.get("EDITOR") or "nvim")
-    if not argv and Path(editor[0]).name in ("nvim", "vim"):
-        # A buffer-local mapping on board.md only (a modeline cannot map keys):
-        # gf and Enter open the card named on the line in a new tab; a line with no card does nothing.
-        open_card = ("nnoremap <buffer> <silent> gf <Cmd>let b:fm_card = matchstr(getline('.'), 'cards/[^ )]\\+\\.md')"
-                     "<Bar>if b:fm_card != ''<Bar>exe 'tabedit' fnameescape(b:fm_card)<Bar>endif<CR>")
-        editor += ["-c", open_card, "-c", "nmap <buffer> <CR> gf"]
+    if Path(editor[0]).name in ("nvim", "vim"):
+        # gf and Enter on a line naming cards/<key>.md or pages/<id>.md open it in a new tab.
+        editor += ["-S", str(HERE / "board.vim")]
     rc = subprocess.run(editor + [target], cwd=BOARD).returncode
     if rc != 0:
         print(f"The editor exited with status {rc}; nothing recorded now. Saved answers are recorded on the next run.")
@@ -568,7 +761,7 @@ def main(argv: list[str]) -> int:
         records.append(rec)
     stray = [l for l in added_lines(board_written, board_after)
              if l.strip() and not CARD_LINE.search(l) and l not in board_written]
-    records += collect(live, settled, now)
+    records += collect(live, settled, now) + collect_pages(now)
     # The captain's order is kept; answered cards move to With firstmate.
     places = placement(live, settled, broken, board_after)
     write_lines(BOARD / "board.md", render_board(model, live, settled, places, broken, checked))
@@ -577,7 +770,7 @@ def main(argv: list[str]) -> int:
         for l in stray:
             print(f"  {l}")
     if not records:
-        print("No new order and no answers; nothing captured.")
+        print("No new order, no answers and no comments; nothing captured.")
         return 0
     emit(records, now_iso)
     return 0
