@@ -532,13 +532,18 @@ working: still parked at that gate'
   unarmed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
   unset FM_FAKE_CREW_STATE_LOG
 
-  [ "$unarmed_probes" -eq 0 ] \
-    || fail "an unarmed home spent $unarmed_probes current-state read(s) on a parked gate over three thresholds"
+  # The fixture's fold holds an open own needs-decision, so every home spends
+  # exactly one read per threshold asking whether the worker is parked on it
+  # (crew_parked_on_own_wait); the run-step verdict refuses that account. Any
+  # read beyond those three is the parked-gate consult the flag must guard.
+  [ "$unarmed_probes" -eq 3 ] \
+    || fail "an unarmed home spent $unarmed_probes current-state read(s) over three thresholds, not the 3 own-wait reads"
 
   # The same fixture with only the flag added, counted the same way, so the
-  # zero above is the flag's doing rather than a fixture that could never have
-  # reached the reader: one armed threshold must spend a read. A guard placed
-  # after the consult instead of before it would make both counts nonzero.
+  # count above is the flag's doing rather than a fixture that could never have
+  # reached the reader: one armed threshold must spend a read beyond the
+  # own-wait read. A guard placed after the consult instead of before it would
+  # put the extra reads in both counts.
   dir=$(wedge_threshold_fixture parked-gate-armed-probe-count "$escalated" 2000)
   arm_parked_gate "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -549,8 +554,8 @@ working: still parked at that gate'
   ack_stopped_cycle "$state" || fail "could not acknowledge the armed control recheck"
   armed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
   unset FM_FAKE_CREW_STATE_LOG
-  [ "$armed_probes" -gt 0 ] \
-    || fail "the armed control spent no current-state read, so the probe count proves nothing"
+  [ "$armed_probes" -gt 1 ] \
+    || fail "the armed control spent no parked-gate read beyond the own-wait read, so the probe count proves nothing"
   pass "with config/wedge-defer-parked-gate absent a parked gate keeps the unchanged ladder, wording and reads"
 }
 
@@ -737,6 +742,159 @@ test_wedge_threshold_worker_wait_is_off_until_armed() {
   [ ! -e "$state/.waiting-resurfaced-$key" ] \
     || fail "an unarmed home wrote the worker-wait recheck throttle"
   pass "with config/wedge-defer-worker-wait absent a worker blocker keeps the byte-identical wedge reason"
+}
+
+# --- a worker parked on its own open decision, with no flag armed -----------
+# A worker that asked firstmate something and is idle at its prompt waiting for
+# the answer is parked, not wedged. Its crew state says so (`parked` or
+# `blocked`, read from the status log), and its own decision fold still holds
+# the question open, so in every home the wedge timer defers it to the bounded
+# recheck instead of climbing the ladder towards demand-deep-inspection. The
+# newest status line does not have to be the question: a worker that folds one
+# key into another writes a `resolved` line for the old key after it, which
+# ends the opt-in newest-line evidence above but leaves the question open.
+# A live background shell (a page listener, a monitor) changes nothing here: it
+# shows on the pane but the crew state still reads parked.
+
+# Replace a wedge fixture's pane text, keeping the lane stably stale at the new
+# text so the next poll still goes straight to the wedge timer.
+set_wedge_pane_text() {  # <case-dir> <text>
+  local dir=$1 text=$2 key
+  key=$(watch_window_key test:fm-wedge)
+  printf '%s' "$text" > "$dir/pane.txt"
+  printf '%s' "$(hash_text "$text")" > "$dir/state/.hash-$key"
+  printf '%s' "$(hash_text "$text")" > "$dir/state/.stale-$key"
+}
+
+PARKED_PANE_WITH_SHELL='> 
+  bypass permissions on · 1 background shell running · down arrow to manage'
+
+PARKED_LOG='working: grilling the plan
+needs-decision [key=grill-r4]: pick the round four direction
+needs-decision [key=grill-map]: confirm the merged map
+resolved [key=map]: folded into grill-map'
+
+test_wedge_threshold_defers_a_worker_parked_on_an_open_decision() {
+  local dir state fakebin out capture window key n reported
+  local parked='state: parked · source: status-log · confirm the merged map'
+  window="test:fm-wedge"; key=$(watch_window_key "$window")
+
+  dir=$(wedge_threshold_fixture parked-decision-fresh "$PARKED_LOG" 0)
+  set_wedge_pane_text "$dir" "$PARKED_PANE_WITH_SHELL"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  [ ! -e "$dir/config/wedge-defer-worker-wait" ] && [ ! -e "$dir/config/wedge-defer-parked-gate" ] \
+    || fail "the parked-decision fixture armed an opt-in flag, so it proves nothing"
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$parked" absorb \
+      || fail "a worker parked on its own open decision wedge-escalated at threshold $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a parked worker queued a wedge wake inside the recheck cadence: $(cat "$state/.wake-queue")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a parked worker was reported as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a parked worker counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+
+  # The live shape: the lane already climbed the ladder before this fix, so its
+  # count stands at 5. Past the recheck cadence it re-surfaces once as the wait
+  # it is, aged from the status file, and never as a demand for deep inspection.
+  dir=$(wedge_threshold_fixture parked-decision-aged "$PARKED_LOG" 2000)
+  set_wedge_pane_text "$dir" "$PARKED_PANE_WITH_SHELL"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf '5\n' > "$state/.wedge-escalations-$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$parked" exit \
+    || fail "a parked worker older than the recheck cadence was never rechecked: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the parked-decision recheck"
+  reported=$(wedge_reported_wait_secs "$out")
+  [ -n "$reported" ] && [ "$reported" -ge 1900 ] \
+    || fail "the parked-decision recheck reported '${reported}'s rather than the decision's age: $(cat "$out")"
+  grep -F 'declared decision, awaiting firstmate' "$out" >/dev/null \
+    || fail "the parked-decision recheck did not name its evidence and firstmate: $(cat "$out")"
+  grep -F 'answer the reported decision' "$out" >/dev/null \
+    || fail "the parked-decision recheck lost its decision-specific action: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "the parked-decision recheck was worded as a possible wedge: $(cat "$out")"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null \
+    && fail "a parked worker drew demand-deep-inspection: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key")" -eq 5 ] \
+    || fail "the parked-decision recheck changed the escalation count"
+
+  # An open blocker the worker raised is the same kind of wait on firstmate.
+  dir=$(wedge_threshold_fixture parked-blocker-aged \
+    'blocked [key=creds]: need the staging key
+resolved [key=old-creds]: superseded by creds' 2000)
+  set_wedge_pane_text "$dir" "$PARKED_PANE_WITH_SHELL"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" \
+    'state: blocked · source: status-log · need the staging key' exit \
+    || fail "a worker blocked on its own open blocker was never rechecked: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the parked-blocker recheck"
+  grep -F 'declared blocker, awaiting firstmate' "$out" >/dev/null \
+    || fail "the parked-blocker recheck did not name its evidence and firstmate: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a worker blocked on its own open blocker was reported as a possible wedge: $(cat "$out")"
+  pass "with no flag armed a worker parked on its own open decision or blocker, background shell or not, is rechecked as a wait and never wedge-escalated"
+}
+
+# The other direction: nothing above takes the ladder from a lane that is not
+# parked on a question it asked. Each of these still escalates on the unchanged
+# schedule and wording, through to demand-deep-inspection.
+test_wedge_threshold_still_escalates_a_worker_with_no_open_decision() {
+  local dir state fakebin out capture window n case_spec log verdict case_n=0
+  window="test:fm-wedge"
+
+  # A genuine wedge: no open decision, idle pane with a background shell.
+  dir=$(wedge_threshold_fixture no-decision-wedge 'working: wiring the client' 0)
+  set_wedge_pane_text "$dir" "$PARKED_PANE_WITH_SHELL"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" \
+      'state: working · source: status-log · wiring the client' exit \
+      || fail "a wedged worker with no open decision stopped escalating at threshold $n"
+    ack_stopped_cycle "$state" || fail "could not acknowledge wedge escalation $n"
+    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
+      || fail "a wedged worker with no open decision did not reach escalation $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
+    || fail "a wedged worker lost the demand-deep-inspection wording: $(cat "$out")"
+
+  # Each case below holds no wait the worker is owed an answer to:
+  #   - its question was answered (a resolved line for the same key);
+  #   - the only open record is a supervisor-reserved key;
+  #   - the fold holds the question but crew state reads a busy pane, so the
+  #     worker is not parked at its prompt;
+  #   - an answer arrived in the steering inbox after the question.
+  for case_spec in \
+    'needs-decision [key=scope]: narrow or broad
+resolved [key=scope]: narrow|state: working · source: status-log · narrow' \
+    'blocked [key=remote-reply-continuity-mate1]: the remote reply mirror stopped
+resolved [key=other]: unrelated|state: blocked · source: status-log · the remote reply mirror stopped' \
+    'needs-decision [key=scope]: narrow or broad
+resolved [key=other]: unrelated|state: working · source: pane · harness busy (busy hook)' \
+    'needs-decision [key=scope]: narrow or broad
+resolved [key=other]: unrelated|state: parked · source: status-log · narrow or broad|handled'; do
+    log=${case_spec%%|*}
+    verdict=${case_spec#*|}; verdict=${verdict%|handled}
+    case_n=$((case_n + 1))
+    dir=$(wedge_threshold_fixture "no-open-wait-$case_n" "$log" 2000)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    case "$case_spec" in
+      *'|handled')
+        mkdir -p "$state/wedge.inbox/handled"
+        printf 'schema=fm-task-inbox.v1\n--\ngo narrow\n' > "$state/wedge.inbox/handled/001.msg"
+        ;;
+    esac
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$verdict" exit \
+      || fail "a lane with no open wait never escalated: ${case_spec}: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the no-open-wait escalation"
+    grep -Ex 'stale: test:fm-wedge \(idle [0-9]+s, possible wedge, escalation 1\)' "$out" >/dev/null \
+      || fail "a lane with no open wait did not keep the unchanged wedge reason: ${case_spec}: $(cat "$out")"
+  done
+  pass "a worker with no open decision of its own, an answered one, a busy pane, or an inbox answer keeps the unchanged ladder through demand-deep-inspection"
 }
 
 # --- a wait record that does not carry every field is refused ----------------
@@ -983,6 +1141,8 @@ fm_test_run \
   test_wedge_threshold_parked_gate_is_off_until_armed \
   test_wedge_threshold_defers_to_a_worker_blocker \
   test_wedge_threshold_worker_wait_is_off_until_armed \
+  test_wedge_threshold_defers_a_worker_parked_on_an_open_decision \
+  test_wedge_threshold_still_escalates_a_worker_with_no_open_decision \
   test_wedge_defer_refuses_a_half_filled_wait_record \
   test_wedge_threshold_defers_to_an_executing_validation_run \
   test_wedge_threshold_escalates_when_no_run_is_executing \
