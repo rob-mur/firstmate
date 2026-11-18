@@ -62,7 +62,9 @@
 #                      wins) with reconcile secondary. A hold that recorded its
 #                      choices (`choices` from bin/fm-captain-hold.sh hold --option,
 #                      --free-text, --link, --no-link) uses them instead: its options
-#                      are the card's, its links lead the card's `links` (`page:<id>`
+#                      are the card's (an option recorded with no label shows the
+#                      reason's own option at its place when every option is bare
+#                      and the counts match, else its value in plain words), its links lead the card's `links` (`page:<id>`
 #                      becomes `{page}`), and it carries `free_text`/`no_link` when it
 #                      declared them; a hold that recorded no options carries
 #                      `options_inferred`, which `build` refuses; a worker status
@@ -359,6 +361,11 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       capture("^https://[^/]+/.+/(?<r>[^/]+)/-/").r
     else null end;
   def nz($d): if . == null or . == "" or . == "-" then $d else . end;
+  # A bare option value in plain words: a known review-gate value reads as its
+  # phrase, any other slug as its words.
+  def option_words:
+    {"cleared-merge": "Cleared to merge", "changes-needed": "Changes requested"}[.]
+    // (gsub("[-_.]+"; " ") | sub("^ +"; "") | sub(" +$"; "") | cap);
   def pr_for($id; $contrib; $recorded):
     ( ([$contrib[] | select(.task == $id) | .url][0])
       // ([$recorded[] | select(.id == $id) | .url][0]) ) as $u
@@ -672,8 +679,23 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                                       | if any(.[]; (.url // ("page:" + .page)) == $k) then . else . + [$l] end)
               | .[:8] ) as $ls
           | if ($ls | length) > 0 then .links = $ls else . end
-          | if (($ch.options // []) | length) > 0
-            then .options = [ $ch.options[] | objects | . as $o | {value: $o.value, label: (($o.label // "") | nz($o.value))} ]
+          # A recorded option with no label of its own (the snapshot gives it
+          # its value) is shown in words: when every recorded option is bare
+          # and the reason lists the same number of its own options, each takes
+          # the reason option at its place, recommendation included; else its
+          # value reads as words (option_words).
+          | ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
+              | map(nz(null) | select(. != null) | clean_reason | option_parse | select(. != null)) | .[0] ) as $own
+          | [ ($ch.options // [])[] | objects ] as $ro
+          | ($ro | all(((.label // "") | nz(null)) as $l | $l == null or $l == .value)) as $bare
+          | if ($ro | length) > 0
+            then (if $bare and $own != null and ($own.options | length) == ($ro | length)
+                  then .options = [ range(0; $ro | length) as $i | {value: $ro[$i].value, label: $own.options[$i].label} ]
+                       | ([ range(0; $ro | length) | select($own.options[.].value == $own.recommend) ][0]) as $ri
+                       | if $ri != null then .recommend_value = $ro[$ri].value else . end
+                  else .options = [ $ro[] | . as $o | (($o.label // "") | nz(null)) as $l
+                                    | {value: $o.value,
+                                       label: (if $l == null or $l == $o.value then ($o.value | option_words) else $l end)} ] end)
                  | del(.malformed)
             elif ($d.verb // "") == "captain-hold" and ($ch.free_text != true) then .options_inferred = true
             else . end
