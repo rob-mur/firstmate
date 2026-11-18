@@ -12,7 +12,10 @@
 # cd-870-version-file, captain-hold-cd-810-infra-home-1,
 # captain-hold-cd-882-name-1, captain-hold-cd-882-mr-run-1,
 # captain-hold-cd-915-stable-lag-1, captain-hold-gke-cp-lockdown-rollout-1 and
-# captain-hold-runner-fuse-rollout-1.
+# captain-hold-runner-fuse-rollout-1. It also holds a question from one of main's
+# own workers, like bcr-dec10-grill's grill-bcr-r4 (APP-3655) that the model
+# missed, and checks the work-hours rule: outside work hours a work-project item
+# is held, not shown. Every run pins the clock with FM_CAPTAIN_CALLS_CLOCK.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -141,6 +144,21 @@ resolved [corr=1b2a95cd9375d31e] [at=$LATER]: [key=gke-cp-lockdown-rollout] Dupl
 resolved [corr=6e7f621d04e20555] [at=$LATER]: [key=runner-fuse-rollout] Duplicate of the captain card runner-fuse-rollout.
 EOF
 
+  # Main's own workers: a live task (it has a .meta record) with an open
+  # question on a YouTrack issue, a live personal task, and a finished task
+  # whose log stays behind with no record.
+  cat > "$home/state/bcr-grill.status" <<EOF
+needs-decision [key=bcr-close-5860] [at=$BEFORE]: May I close APP-5860?
+resolved [key=bcr-close-5860] [at=$LATER]: APP-5860 closed
+needs-decision [key=grill-bcr-r4] [at=$LATER]: Should the engine get its own tickets, since no subtask of APP-3655 owns it?
+paused [key=grill-bcr-r4] [at=$LATER]: waiting for the captain's answer
+EOF
+  : > "$home/state/bcr-grill.meta"
+  printf 'needs-decision [key=name-pick] [at=%s]: Which name for the mount helper?\n' "$LATER" \
+    > "$home/state/home-task.status"
+  : > "$home/state/home-task.meta"
+  printf 'needs-decision [key=old-ask] [at=%s]: An old question?\n' "$BEFORE" > "$home/state/old-task.status"
+
   # A remote mate's status reaches the same parent log.
   printf 'needs-decision [key=captain-hold-far-plan-1] [at=%s]: captain hold far-plan: Which plan?\n' \
     "$BEFORE" > "$home/state/far.status"
@@ -164,12 +182,15 @@ EOF
   printf '%s\n' "$home"
 }
 
+# A Wednesday noon, inside work hours, unless a test sets CALLS_CLOCK.
+CALLS_CLOCK=2026-11-18T12:00
+
 run_calls() {  # <home> <pr-states-file or "off">  -> JSON on stdout
   local home=$1 prs=$2
   if [ "$prs" = off ]; then
-    FM_CAPTAIN_CALLS_PR_CHECK=0 in_home "$home" "$CALLS"
+    FM_CAPTAIN_CALLS_CLOCK=$CALLS_CLOCK FM_CAPTAIN_CALLS_PR_CHECK=0 in_home "$home" "$CALLS"
   else
-    FM_CAPTAIN_CALLS_PR_STATES="$prs" in_home "$home" "$CALLS"
+    FM_CAPTAIN_CALLS_CLOCK=$CALLS_CLOCK FM_CAPTAIN_CALLS_PR_STATES="$prs" in_home "$home" "$CALLS"
   fi
 }
 
@@ -396,6 +417,55 @@ test_all_nine_misfiled_calls_are_present() {
   pass "all nine calls the board misfiled are visible as calls or in to_close"
 }
 
+test_main_worker_question_is_a_call() {
+  local out
+  out=$(run_calls "$FIXTURE" off) || fail "fm-captain-calls failed"
+  expect_where "$out" bcr-grill.grill-bcr-r4 calls "a live main worker's open question"
+  assert_equals "main-worker|main|bcr-grill|grill-bcr-r4|true" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "bcr-grill.grill-bcr-r4") | "\(.source)|\(.home)|\(.task)|\(.decision_key)|\(.decision)"')" \
+    "the worker call names main, its task and its key"
+  expect_where "$out" home-task.name-pick calls "a live personal worker's question"
+  expect_where "$out" bcr-grill.bcr-close-5860 absent "a worker key resolved by the worker"
+  expect_where "$out" old-task.old-ask absent "a finished task with no record"
+  assert_equals "bcr-grill,home-task" "$(printf '%s\n' "$out" | jq -r '.workers | join(",")')" \
+    "the live workers whose logs were read"
+  assert_equals "cd,runner-image,far,quiet" "$(printf '%s\n' "$out" | jq -r '[.homes[].id] | join(",")')" \
+    "workers are not listed as secondmates"
+  pass "a live main worker's open question is a call; a resolved key or a finished task is not"
+}
+
+test_work_items_show_in_work_hours() {
+  local out
+  out=$(run_calls "$FIXTURE" off) || fail "fm-captain-calls failed"
+  assert_equals "true" "$(printf '%s\n' "$out" | jq -r '.work_hours.open')" "Wednesday noon is work hours"
+  expect_where "$out" bcr-grill.grill-bcr-r4 calls "a YouTrack question in work hours"
+  expect_where "$out" aegis-880-held calls "an aegis hold in work hours"
+  pass "work-project items show in work hours"
+}
+
+test_work_items_are_held_outside_work_hours() {
+  local out clock
+  for clock in 2026-11-21T12:00 2026-11-18T19:30 2026-11-18T08:59 2026-11-18T18:00; do
+    out=$(CALLS_CLOCK=$clock run_calls "$FIXTURE" off) || fail "fm-captain-calls failed at $clock"
+    assert_equals "false" "$(printf '%s\n' "$out" | jq -r '.work_hours.open')" "$clock is outside work hours"
+    expect_where "$out" bcr-grill.grill-bcr-r4 skipped "a YouTrack question at $clock"
+    expect_where "$out" aegis-880-held skipped "an aegis hold at $clock"
+    assert_contains "$(printf '%s\n' "$out" | jq -r '.skipped[] | select(.key == "aegis-880-held") | .why')" \
+      "held until work hours" "the held item says why"
+    expect_where "$out" home-task.name-pick calls "a personal worker question at $clock"
+    expect_where "$out" plain-call calls "a personal hold at $clock"
+    expect_where "$out" cd.cd-870-version-file calls "a personal secondmate call at $clock"
+  done
+  out=$(CALLS_CLOCK=2026-11-18T09:00 run_calls "$FIXTURE" off) || fail "fm-captain-calls failed"
+  expect_where "$out" aegis-880-held calls "an aegis hold at 09:00"
+  out=$(CALLS_CLOCK=2026-11-21T12:00 FM_CAPTAIN_CALLS_WORK_HOURS=off run_calls "$FIXTURE" off) \
+    || fail "fm-captain-calls failed"
+  expect_where "$out" aegis-880-held calls "an aegis hold with the rule off"
+  CALLS_CLOCK=noon run_calls "$FIXTURE" off >/dev/null 2>&1
+  expect_code 2 $? "a malformed clock"
+  pass "outside work hours (weekend, evening, early morning) work-project items are held; others show"
+}
+
 test_reads_without_writing() {
   local before after
   before=$(find "$FIXTURE" -path "$FIXTURE/prs-none.tsv" -prune -o -type f -print0 | sort -z | xargs -0 md5sum)
@@ -425,6 +495,9 @@ test_unreadable_backlog_exits_1() {
 }
 
 fm_test_run \
+  test_main_worker_question_is_a_call \
+  test_work_items_show_in_work_hours \
+  test_work_items_are_held_outside_work_hours \
   test_settled_merge_ask_goes_to_close_not_calls \
   test_settled_secondmate_merge_ask_goes_to_close \
   test_answered_non_decision_goes_to_close \
