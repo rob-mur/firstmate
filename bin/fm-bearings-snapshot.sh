@@ -886,23 +886,28 @@ MODEL=$(printf '%s' "$SNAP" | jq \
 
 # --- handed-off decisions -----------------------------------------------------
 # A decision row is handed off when, after the decision was last raised, the
-# captain's answer or the work it waits on went to a worker. The evidence is the
-# durable record of each home involved, never the hold reason: a steer (state/
-# <task>.inbox, pending or handled) whose body names the decision as a whole
-# word - the hold id, sent to a task the hold tracks (the hold id, its recorded
+# captain's answer or the work it waits on went to a worker. An open decision
+# is the captain's until it resolves, so a hand-off needs positive evidence in
+# the durable record of each home involved, never the hold reason and never
+# prose: a steer (state/<task>.inbox, pending or handled) whose record carries
+# the explicit `handoff-key=<key>` header that `fm-send.sh --handoff-key` writes
+# - the hold id, sent to a task the hold tracks (the hold id, its recorded
 # origin, or a task a `captain-held` line names) or, for a hold a secondmate
 # owns, from main to that secondmate; or the decision key, sent to the task that
-# raised it (a `default` key is never named, so only a resolved line hands it);
-# a `resolved [key=...]` line for the hold or its parent-log mirror; a
+# raised it (a `default` key is never marked, so only the board hands it); the
+# hold's parent-log mirror `resolved [key=captain-hold-<id>-<n>]` line, which
+# bin/fm-captain-hold.sh writes when the hold is answered or released; a
 # pending reconcile request for it, which the captain's board selection records
 # when a card is out of date; or the captain's own answer to that card on the
 # board (board_answer_records), which hands every kind of row - a captain hold
 # in any home, a status question, and a review page - so a card the captain
-# answered or marked out of date never asks again. A steer that does not name the decision (a page
-# feedback relay, a process rule) or merely mentions it to some other task is
-# not a hand-off, and neither is one that tells the worker to wait for the
-# captain (for example "stay parked until the captain answers" or "keep the
-# question held: the captain decides"). The decision is raised at the latest of its hold set stamp, its
+# answered or marked out of date never asks again. A steer whose text only
+# names a key (a duplicate cleanup, a re-raise request, a process rule) is not
+# a hand-off, and neither is a marked steer that tells the worker to wait for
+# the captain (for example "stay parked until the captain answers" or "keep the
+# question held: the captain decides"). A `resolved` line whose plain key only
+# equals the hold id (a worker closing its own duplicate key) is not a hand-off
+# either. The decision is raised at the latest of its hold set stamp, its
 # latest hold reconciled stamp (a re-hold after a reconcile request), and
 # every needs-decision or blocked line its tracked tasks append, so a worker
 # that raises a fresh question puts the decision back in front of the captain;
@@ -919,12 +924,12 @@ handoff_records() {  # <home-label> <state-dir>
       -o -path "$st/*.status" -o -path "$st/*.meta" -o -path "$st/reconcile-requests/*.request" \) -print0 2>/dev/null \
     | xargs -0 -r awk -v label="$label" -v st="$st/" '
       function flush() {
-        if (kind == "S" && at != "") printf "%s\tS\t%s\t%s\t%s\n", label, task, at, body
+        if (kind == "S" && at != "") printf "%s\tS\t%s\t%s\t%s\t%s\n", label, task, at, keys, body
         if (kind == "R" && at != "") printf "%s\tR\t%s\t%s\t\n", label, task, at
       }
       function oneline(s) { gsub(/[\t\r\n]/, " ", s); return s }
       FNR == 1 {
-        flush(); kind = ""; at = ""; body = ""; inbody = 0
+        flush(); kind = ""; at = ""; body = ""; keys = ""; inbody = 0
         rel = substr(FILENAME, length(st) + 1)
         if (rel ~ /\.inbox\//) { kind = "S"; task = rel; sub(/\.inbox\/.*$/, "", task) }
         else if (rel ~ /^reconcile-requests\//) { kind = "R"; task = rel; sub(/^.*\//, "", task); sub(/\.request$/, "", task) }
@@ -935,6 +940,7 @@ handoff_records() {  # <home-label> <state-dir>
       kind == "S" && !inbody {
         if ($0 == "--") inbody = 1
         else if ($0 ~ /^at=/) at = substr($0, 4)
+        else if ($0 ~ /^handoff-key=[A-Za-z0-9._-]+$/) keys = keys (keys == "" ? "" : " ") substr($0, 13)
         next
       }
       kind == "S" { if (length(body) < 2000) body = substr(body " " oneline($0), 1, 2000); next }
@@ -1014,7 +1020,8 @@ trap 'rm -f "$HANDOFF_EVIDENCE"' EXIT
     def epoch: if test("^[0-9]+$") then tonumber
                else (try fromdateiso8601 catch null) end;
     [ split("\n")[] | select(length > 0) | split("\t")
-      | if .[1] == "S" then {home:.[0], kind:"steer", task:.[2], at:(.[3] | epoch), body:(.[4] // "")}
+      | if .[1] == "S" then {home:.[0], kind:"steer", task:.[2], at:(.[3] | epoch),
+                             handoff_keys:((.[4] // "") | split(" ") | map(select(length > 0))), body:(.[5] // "")}
         elif .[1] == "R" then {home:.[0], kind:"request", task:.[2], at:(.[3] | epoch)}
         elif .[1] == "B" then {home:.[0], kind:"board", key:.[2], at:(.[3] | epoch), selection:(.[4] // "")}
         elif .[1] == "P" then {home:.[0], kind:"pr", task:.[2], url:(.[3] // "")}
@@ -1033,8 +1040,12 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
   def names($id): test($id | word_re);
   def wait_steer:
     test("(once|when|until|after) the captain (answers|decides|replies|rules|responds)|the captain (decides|will decide)|stay(s)? parked|keep (it|the [a-z -]+) held|wait(ing|s)? (for|on) the captain|until the captain"; "i");
-  def handoff_steers($recs; $after):
+  # Marked steers after the raise that hand off $key: only the explicit
+  # handoff-key header counts, and a marked steer that still tells the worker
+  # to wait for the captain does not.
+  def handoff_steers($recs; $after; $key):
     [ $recs[] | select(.kind == "steer" and .at != null and .at > $after)
+      | select((.handoff_keys // []) | index($key))
       | select(.body | wait_steer | not) ];
   # The earliest hand-off after the raise, as the flat fields a row gains.
   def handed($cands; $raised):
@@ -1067,13 +1078,13 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
                 | select((.task as $t | $tracked | index($t)) or (.key | test($mirror))) | .at ]
               + [ ($row.hold_set | set_epoch) // 0, ($row.hold_reconciled | set_epoch) // 0 ] | max) as $raised
            | handed(
-               [ handoff_steers($recs; $raised)[]
-                 | select((.task as $t | $tracked | index($t)) and (.body | names($id)))
+               [ handoff_steers($recs; $raised; $id)[]
+                 | select(.task as $t | $tracked | index($t))
                  | . + {via:"steer"} ]
-               + [ handoff_steers([ $main[] | select($home != "(main)" and .task == $home) ]; $raised)[]
-                   | select(.body | names($id)) | . + {via:"steer"} ]
+               + [ handoff_steers([ $main[] | select($home != "(main)" and .task == $home) ]; $raised; $id)[]
+                   | . + {via:"steer"} ]
                + [ $scope[] | select(.kind == "status" and .verb == "resolved" and .at != null and .at > $raised)
-                   | select(.key == $id or (.key | test($mirror))) | . + {via:"resolved"} ]
+                   | select(.key | test($mirror)) | . + {via:"resolved"} ]
                + [ $recs[] | select(.kind == "request" and .task == $id and .at != null and .at > $raised)
                    | . + {via:"reconcile", task:"firstmate"} ]
                + board_answers($row.key; $raised);
@@ -1086,8 +1097,8 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
                 | select(.verb == "needs-decision" or .verb == "blocked") | .at ] | max) as $raised
            | if $raised == null then {}
              else handed(
-               [ handoff_steers([ $recs[] | select(.task == $task) ]; $raised)[]
-                 | select($k != "default" and (.body | names($k))) | . + {via:"steer"} ]
+               [ handoff_steers([ $recs[] | select(.task == $task) ]; $raised; $k)[]
+                 | select($k != "default") | . + {via:"steer"} ]
                + board_answers($row.key; $raised);
                $raised) end
          elif .source == "review-page" then
