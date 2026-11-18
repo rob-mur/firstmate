@@ -28,9 +28,10 @@
 # CI, approvals, unresolved threads, last activity). It makes three read-only calls
 # against the host in FM_BEARINGS_GITLAB_HOST or glab's configured host - `glab api
 # user` for the captain's id, `merge_requests?scope=created_by_me&state=opened` and
-# `merge_requests?scope=all&state=opened&reviewer_id=<id>` - plus bounded detail and
-# approvals reads for the first FM_BEARINGS_MR_DETAIL_MAX uncovered MRs, each call
-# bounded by FM_BEARINGS_MR_TIMEOUT seconds; at most FM_BEARINGS_MRS rows are kept.
+# `merge_requests?scope=all&state=opened&reviewer_id=<id>` - plus one detail and one
+# approvals read for every MR it lists, at most FM_BEARINGS_MR_DETAIL_PARALLEL MRs
+# at a time, each call bounded by FM_BEARINGS_MR_TIMEOUT seconds; at most
+# FM_BEARINGS_MRS rows are kept.
 # GitLab keeps an MR open after its project is archived, so one bounded
 # `projects/<id>` read per distinct project (at most FM_BEARINGS_MR_PROJECT_MAX)
 # drops the MRs of an archived project; a project it cannot read keeps its MRs.
@@ -158,7 +159,7 @@ FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
 FM_BEARINGS_MRS=${FM_BEARINGS_MRS:-20}
-FM_BEARINGS_MR_DETAIL_MAX=${FM_BEARINGS_MR_DETAIL_MAX:-10}
+FM_BEARINGS_MR_DETAIL_PARALLEL=${FM_BEARINGS_MR_DETAIL_PARALLEL:-10}
 FM_BEARINGS_MR_PROJECT_MAX=${FM_BEARINGS_MR_PROJECT_MAX:-20}
 FM_BEARINGS_MR_TIMEOUT=${FM_BEARINGS_MR_TIMEOUT:-10}
 case "$FM_BEARINGS_MR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_MR_TIMEOUT=10 ;; esac
@@ -178,7 +179,7 @@ validate_bound FM_BEARINGS_UNHEALTHY "$FM_BEARINGS_UNHEALTHY"
 validate_bound FM_BEARINGS_PR_REPOS "$FM_BEARINGS_PR_REPOS"
 validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 validate_bound FM_BEARINGS_MRS "$FM_BEARINGS_MRS"
-validate_bound FM_BEARINGS_MR_DETAIL_MAX "$FM_BEARINGS_MR_DETAIL_MAX"
+validate_bound FM_BEARINGS_MR_DETAIL_PARALLEL "$FM_BEARINGS_MR_DETAIL_PARALLEL"
 validate_bound FM_BEARINGS_MR_PROJECT_MAX "$FM_BEARINGS_MR_PROJECT_MAX"
 
 usage() {
@@ -233,9 +234,10 @@ Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   full reference; the mrs: line says whether they were checked or unavailable).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 --include-mrs bounds: FM_BEARINGS_GITLAB_HOST (default: glab's configured host),
-  FM_BEARINGS_MR_TIMEOUT seconds per glab call (10), FM_BEARINGS_MR_DETAIL_MAX MRs
-  read in detail (10), FM_BEARINGS_MR_PROJECT_MAX projects checked for archiving
-  (20), FM_BEARINGS_MRS rows kept (20).
+  FM_BEARINGS_MR_TIMEOUT seconds per glab call (10), FM_BEARINGS_MR_DETAIL_PARALLEL
+  listed MRs read in detail at a time (10; every listed MR is read),
+  FM_BEARINGS_MR_PROJECT_MAX projects checked for archiving (20),
+  FM_BEARINGS_MRS rows kept (20).
 EOF
 }
 
@@ -1116,7 +1118,9 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
 # for the captain's id and two bounded list calls against the configured host
 # (merged by project and iid), one bounded project read per distinct project to
 # drop MRs of an archived project, then one bounded detail and approvals call per
-# uncovered MR (at most FM_BEARINGS_MR_DETAIL_MAX of them, run in parallel).
+# listed MR (every one of the FM_BEARINGS_MRS kept, so none shows CI or approvals
+# unknown for want of a read), in waves of at most FM_BEARINGS_MR_DETAIL_PARALLEL
+# MRs so a long list neither fans out unboundedly nor runs past a few timeouts.
 # Read-only. An MR is covered when its exact web_url or full reference
 # (group/project!iid), not followed by another digit, appears in a projected
 # section the board shows (decisions, gates, landed, captain contributions), is
@@ -1207,12 +1211,12 @@ EOF
       i=0
       while IFS=$'\t' read -r pid iid; do
         [ -n "$pid" ] || continue
+        if [ "$i" -gt 0 ] && [ $((i % FM_BEARINGS_MR_DETAIL_PARALLEL)) = 0 ]; then wait; fi
         i=$((i + 1))
-        [ "$i" -le "$FM_BEARINGS_MR_DETAIL_MAX" ] || break
         ( glab_bounded api --hostname "$mr_host" "projects/$pid/merge_requests/$iid" > "$mr_tmp/d-$pid-$iid" 2>/dev/null || rm -f "$mr_tmp/d-$pid-$iid" ) &
         ( glab_bounded api --hostname "$mr_host" "projects/$pid/merge_requests/$iid/approvals" > "$mr_tmp/a-$pid-$iid" 2>/dev/null || rm -f "$mr_tmp/a-$pid-$iid" ) &
       done <<EOF
-$(printf '%s' "$mr_uncovered" | jq -r '.[] | "\(.project_id)\t\(.iid)"')
+$(printf '%s' "$mr_uncovered" | jq -r --argjson cap "$FM_BEARINGS_MRS" '.[:$cap][] | "\(.project_id)\t\(.iid)"')
 EOF
       wait
       mr_details=$(for f in "$mr_tmp"/d-* "$mr_tmp"/a-*; do
