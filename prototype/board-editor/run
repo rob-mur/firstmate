@@ -6,26 +6,44 @@
 
 Reads every captain call from bin/fm-captain-calls.sh (read-only) for the home
 in TUI_BOARD_HOME (default /home/rob/repos/firstmate), or from a saved copy of
-its JSON in TUI_BOARD_CALLS_JSON. Writes prototype/board/: board.md lists every
-call, one line each, then the settled items to close; cards/<key>.md holds one
-card. To open a card, press Enter (or gf) anywhere on its line in board.md:
-when the editor is nvim or vim, the run maps both keys in that buffer only to
-open the card in a NEW TAB, so :q (or :wq) on the card closes its tab and
-returns to board.md. In another editor use <C-w>gf on the line, or
-:tabedit cards/<key>.md. Move call lines in board.md to reorder; write an answer at the
-bottom of a card file. When the editor exits, a new order and every answer are
-appended to prototype/outbox.jsonl ONLY; nothing reaches the board, its
-priority file, the backlog or a worker. Standard library only.
+its JSON in TUI_BOARD_CALLS_JSON. Keeps prototype/board/ (or TUI_BOARD_DIR)
+across runs: board.md lists the cards in three sections, "With captain",
+"Broken" and "With firstmate"; cards/<key>.md holds one card. A run never
+deletes a card.
+
+Cards are built only from the source records, with no text of the run's own
+beyond fixed labels: the question is laid out as a heading, bullets and a
+labelled option list, never reworded. Each card's question text is checked
+with the plainspeak lint (TUI_BOARD_LINT, default the plainspeak-publish
+skill's scripts/lint). A card that fails goes to "Broken" with its faults
+written at its top, and the run reports it to firstmate once per card version
+and appends the acknowledgement line. When the lint is not installed, cards
+are marked unchecked on the board, not passed.
+
+A run makes cards for new calls, rebuilds the cards not answered when their
+source changes, and leaves a card the captain wrote in alone, except for one
+acknowledgement line it appends when it records the answer. Then that card's
+line moves to "With firstmate". The captain's order of "With captain" is kept.
+A call that leaves the source while still with the captain (or broken) leaves
+the board; its card file stays. A card with firstmate stays listed there.
+
+To open a card, press Enter (or gf) anywhere on its line in board.md: when the
+editor is nvim or vim, the run maps both keys in that buffer only to open the
+card in a NEW TAB, so :q (or :wq) on the card closes its tab and returns to
+board.md. In another editor use <C-w>gf on the line, or :tabedit cards/<key>.md.
+Answers, broken-card reports and a new order are appended to
+prototype/outbox.jsonl (or TUI_BOARD_OUTBOX) ONLY, once each; nothing reaches
+the board, its priority file, the backlog or a worker. Standard library only.
 """
 
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -37,10 +55,18 @@ CALLS_SCRIPT = HERE.parent.parent / "bin" / "fm-captain-calls.sh"
 HOME = os.environ.get("TUI_BOARD_HOME", "/home/rob/repos/firstmate")
 SAVED = os.environ.get("TUI_BOARD_CALLS_JSON")
 OUTBOX = Path(os.environ.get("TUI_BOARD_OUTBOX", str(HERE.parent / "outbox.jsonl")))
-BOARD = HERE.parent / "board"
+BOARD = Path(os.environ.get("TUI_BOARD_DIR", str(HERE.parent / "board")))
+CARDS = BOARD / "cards"
+# Per card: <key>.md is the last text the run wrote or recorded, <key>.json its source record,
+# and <key>.answered marks that the captain answered it.
+SEEN = BOARD / ".seen"
+LINT = Path(os.environ.get("TUI_BOARD_LINT", str(Path.home() / ".claude/skills/plainspeak-publish/scripts/lint")))
 WIDTH = 78
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
 CARD_LINE = re.compile(r"(?:^|[\s(])cards/([^\s)]+)\.md\b")
+ANSWER_MARK = "Your answer (write below this line):"
+ACK = re.compile(r"^Received by firstmate at (\d{4}-\d\d-\d\d \d\d:\d\d) UTC - waiting on firstmate\.$")
+WITH_CAPTAIN, BROKEN, WITH_FIRSTMATE = "## With captain", "## Broken", "## With firstmate"
 
 
 def load_model() -> dict:
@@ -56,9 +82,15 @@ def load_model() -> dict:
     return json.loads(proc.stdout)
 
 
+# ---------------------------------------------------------------- text layout
+
+def squash(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
 def wrap(text: str, indent: str = "", rest: str | None = None) -> list[str]:
-    text = re.sub(r"\s+", " ", text or "").strip()
-    return textwrap.wrap(text, WIDTH, initial_indent=indent, subsequent_indent=indent if rest is None else rest,
+    return textwrap.wrap(squash(text), WIDTH, initial_indent=indent,
+                         subsequent_indent=indent if rest is None else rest,
                          break_long_words=False, break_on_hyphens=False) or [indent.rstrip()]
 
 
@@ -68,10 +100,89 @@ def question(card: dict) -> str:
 
 def headline(card: dict, limit: int = 110) -> str:
     """The asking sentence: up to the first '?', else the first sentence, kept short."""
-    q = re.sub(r"\s+", " ", question(card)).strip()
+    q = squash(URL.sub("", question(card)))
     m = re.match(r"(.+?\?)(\s|$)", q) or re.match(r"(.+?[.!])(\s|$)", q)
     head = m.group(1) if m else q
     return head if len(head) <= limit else head[: limit - 3].rstrip() + "..."
+
+
+URL = re.compile(r"https?://[^\s<>]+?(?=[.,;:)\]]*(?:\s|$))")
+# A list marker starts the text or follows ". ", ": ", "; ", "? " or "! ":
+# (a) or (a, recommended) an option; D1: or A1 a labelled item; "Recommended:" a recommendation.
+MARK = re.compile(r"(?:^|(?<=[.:;?!] ))(?:\((?P<opt>[a-z])(?P<rec>,\s*recommended)?\)"
+                  r"|(?P<lab>[A-Z]\d{1,2})(?::|(?= ))|(?P<recd>Recommended(?: [A-Z])?:))\s*")
+ABBREV = re.compile(r"(?:\be\.g|\bi\.e|\betc|\bvs)\.$")
+
+
+def sentences(text: str) -> list[str]:
+    parts: list[str] = []
+    for piece in re.split(r"(?<=[.?!])\s+(?=[A-Z0-9(\"'])", squash(text)):
+        if parts and ABBREV.search(parts[-1]):
+            parts[-1] += " " + piece
+        else:
+            parts.append(piece)
+    return [p for p in parts if p]
+
+
+def layout(text: str) -> tuple[str, list[tuple], list[str]]:
+    """Split a source question into (heading, blocks, urls) with no rewording.
+
+    Blocks are ("bullet", text), ("header", text), ("option", letter, text, recommended)
+    and ("label", label, text), in source order.
+    """
+    urls = list(dict.fromkeys(URL.findall(text or "")))
+    text = squash(URL.sub("(link below)", text or ""))
+    text = re.sub(r":\s*\(link below\)", " (link below)", text)
+    marks = list(MARK.finditer(text))
+    pre = [s for s in sentences(text[: marks[0].start()] if marks else text) if s != "(link below)"]
+    heading = pre[0] if pre else ""
+    blocks: list[tuple] = [("bullet", s) for s in pre[1:]]
+    if marks and len(pre) > 1 and pre[-1].endswith(":"):
+        blocks[-1] = ("header", pre[-1])
+    for i, m in enumerate(marks):
+        body = sentences(text[m.end(): marks[i + 1].start() if i + 1 < len(marks) else len(text)])
+        body = [s for s in body if s != "(link below)"]
+        first, rest = (body[0] if body else "").rstrip(" ;,"), body[1:]
+        if m.group("opt"):
+            blocks.append(("option", m.group("opt"), first, bool(m.group("rec"))))
+        elif m.group("lab"):
+            blocks.append(("label", m.group("lab") + ":", first))
+        else:
+            blocks.append(("bullet", f"{m.group('recd')} {first}"))
+        for j, s in enumerate(rest):
+            last_before_mark = j == len(rest) - 1 and i + 1 < len(marks)
+            blocks.append(("header", s) if last_before_mark and s.endswith(":") else ("bullet", s))
+    if blocks and blocks[-1][0] == "header":
+        blocks[-1] = ("bullet", blocks[-1][1])
+    return heading, blocks, urls
+
+
+def item(text: str, recommended: bool = False) -> str:
+    """A list item ends with a full stop, so the lint reads each item as its own sentence."""
+    text = text.rstrip(" .") + (" (recommended)" if recommended else "")
+    return text if text.endswith(("?", "!")) else text + "."
+
+
+def render_blocks(blocks: list[tuple]) -> list[str]:
+    out: list[str] = []
+    prev = None
+    for b in blocks:
+        kind = "list" if b[0] in ("option", "label") else b[0]
+        if b[0] == "header":
+            out += ["", b[1]]
+        elif kind == "list":
+            if prev not in ("list", "header"):
+                out += ["", "Options:"] if b[0] == "option" else [""]
+            if b[0] == "option":
+                out += wrap(item(b[2], b[3]), f"  {b[1]}) ", "     ")
+            else:
+                out += wrap(item(b[2]), f"  {b[1]} ", " " * (len(b[1]) + 3))
+        else:
+            if prev not in ("bullet", None):
+                out.append("")
+            out += wrap(b[1], "- ", "  ")
+        prev = kind
+    return out
 
 
 def origin(card: dict) -> str:
@@ -82,95 +193,86 @@ def origin(card: dict) -> str:
     return f"secondmate {card.get('home')}" + (" (remote)" if card.get("remote") else "")
 
 
-def board_line(card: dict) -> str:
-    repo = f"  [{card['repo']}]" if card.get("repo") else ""
-    home = {"main-hold": "", "main-worker": "  (main worker)"}.get(card.get("source"), f"  ({card.get('home')})")
-    return f"cards/{card['key']}.md  {headline(card)}{repo}{home}"
-
-
-def render_board(model: dict) -> list[str]:
-    calls, to_close = model.get("calls") or [], model.get("to_close") or []
-    built = (model.get("generated") or "")[11:16]
-    n = len(calls)
-    out = [
-        f"# Captain's calls: {n} call{'s' if n != 1 else ''}" + (f" (built {built}Z)" if built else ""),
-        "",
-        "One call per line, in board order. Move a line to reorder it (dd, then p).",
-        "Open a card: press Enter (or gf) anywhere on its line. It opens in a new tab;",
-        "in the card, :wq (or :q) closes the tab and brings you back here. gt / gT switch tabs.",
-        "(Enter and gf are set up for nvim and vim. In another editor: <C-w>gf, or :tabedit cards/<key>.md.)",
-        "Write answers at the bottom of the card files. When done, save all and quit: :wqa",
-        "To send nothing at all, quit with :qa!",
-        "",
-        "PROTOTYPE: the order and answers are written only to prototype/outbox.jsonl.",
-        "",
-    ]
-    hours = model.get("work_hours") or {}
-    held = [s for s in model.get("skipped") or [] if "work hours" in s.get("why", "")]
-    if hours.get("open") is False:
-        out += [f"Outside work hours: {len(held)} work item{'s' if len(held) != 1 else ''} held until work hours (under Not calls now).", ""]
-    out += [board_line(c) for c in calls]
-    if to_close:
-        out += ["", f"## To close: {len(to_close)} settled, not decisions (not calls; the order here is not recorded)", ""]
-        for c in to_close:
-            out.append(board_line(c))
-            out += wrap(f"settled: {(c.get('evidence') or {}).get('settled_by', '')}", "    ")
-    skipped = model.get("skipped") or []
-    missing = [h["id"] for h in model.get("homes") or [] if h.get("status_log") != "read"]
-    if skipped or missing:
-        out += ["", "## Not calls now", ""]
-        out += [l for s in skipped for l in wrap(f"{s['key']}: {s['why']}", "  ", "    ")]
-        if missing:
-            out += wrap("No status log read for: " + ", ".join(missing), "  ", "    ")
-    return out
-
-
-def render_card(card: dict, settled: bool) -> list[str]:
-    """One card file: the question first, then context, options, links, answer area."""
-    kind = "decision" if card.get("decision") else "not a decision (merge ask or review)"
-    out = [
-        f"Card {card['key']}   From: {origin(card)}" + (f"   Repo: {card['repo']}" if card.get("repo") else ""),
-        "Write your answer at the bottom. A letter on its own, like  b , picks that option.",
-        "Opened from the board in a tab: :wq (or :q) closes this tab and returns to the board.",
-        "Opened on its own: save and quit with :wq",
-        "",
-    ]
+def card_content(card: dict, settled: bool) -> list[str]:
+    """The question part of a card, built from the source record only: the part the lint checks."""
+    heading, blocks, _ = layout(question(card))
+    out = ["# " + squash(heading or headline(card))]  # one line: vim wraps it on screen
+    body: list[str] = []
     if settled:
-        ev = card.get("evidence") or {}
-        out += ["SETTLED - TO CLOSE, NOT A CALL. Nothing here closes it.", ""]
-        out += wrap(f"Settled by: {ev.get('settled_by', '')}") + wrap(f"Evidence: {ev.get('text', '')}")
-        out += ["Close with:", f"  {card.get('close_with', '')}", ""]
-    out += [f"## {headline(card)}", ""]
-    if headline(card) != re.sub(r"\s+", " ", question(card)).strip():
-        out += wrap(question(card)) + [""]
-    if card.get("title") and card.get("title") not in (card.get("question"), card.get("decision_key")):
-        out += wrap(f"About: {card['title']}")
-    out.append(f"Kind: {kind}")
-    if card.get("task") and card.get("task") != card["key"]:
-        out.append(f"Task: {card['task']}")
-    if card.get("decision_key"):
-        out.append(f"Key: {card['decision_key']}")
-    if card.get("raised_at"):
-        out.append(f"Raised: {card['raised_at']}")
+        settled_by = (card.get("evidence") or {}).get("settled_by", "")
+        body += wrap(f"Settled: {settled_by}. Firstmate closes it. No answer is needed.", "- ", "  ")
     if card.get("blocked_by"):
-        out += wrap("Waiting on: " + ", ".join(card["blocked_by"]))
-    out.append("")
+        body += wrap(item("Waiting on: " + ", ".join(card["blocked_by"])), "- ", "  ")
+    body += render_blocks(blocks)
+    out += [""] + body if body and body[0] else body
     options = card.get("options") or []
     if options:
-        out.append("Options:")
+        out += ["", "Options:"]
         for letter, o in zip(LETTERS, options):
-            out += wrap(f"{o.get('label')}", f"  {letter}) ", "     ")
-        out.append("")
-    states = {p["url"]: p["state"] for p in card.get("prs") or []}
-    links = card.get("links") or []
-    if links:
-        out.append("Links:")
-        for link in links:
-            state = f"  ({states[link['url']]})" if link.get("url") in states else ""
-            out.append(f"  {link.get('label') or 'link'}: {link.get('url')}{state}")
-        out.append("")
-    out += ["Your answer (write below this line):", "", ""]
+            out += wrap(item(f"{o.get('label') or o.get('value')}"), f"  {letter}) ", "     ")
     return out
+
+
+def lint(lines: list[str]) -> list[str] | None:
+    """The plainspeak lint's faults for some text ([] when it passes), or None when the lint is not installed."""
+    if not LINT.is_file():
+        return None
+    # A label line such as "Options:" or "Place:" has no full stop, so the lint would join it to the
+    # next sentence; it is a label, not a sentence, so it is left out of the check.
+    text = "\n".join(l for l in lines if not (l[:1] not in ("-", "#", " ", "") and l.endswith(":")))
+    p = subprocess.run(["sh", str(LINT)], input=text + "\n", capture_output=True, text=True)
+    out = p.stdout.strip()
+    if p.returncode == 0:
+        return None if out.startswith("PLAINSPEAK UNCHECKED") else []
+    faults = [l[2:] for l in out.splitlines() if l.startswith("- ")]
+    return faults or [(out or p.stderr.strip() or f"the lint exited {p.returncode}").splitlines()[0]]
+
+
+def version(content: list[str]) -> str:
+    return hashlib.sha256("\n".join(content).encode()).hexdigest()[:12]
+
+
+def render_card(card: dict, settled: bool, content: list[str], faults: list[str]) -> list[str]:
+    """One card: an id line, any lint faults, the question, links, then the answer area."""
+    repo = f" | repo: {card['repo']}" if card.get("repo") else ""
+    out = [f"<!-- card: {card['key']} | from: {origin(card)}{repo} -->", ""]
+    if faults:
+        out += ["Broken: this card fails the plain-language check. Firstmate rewrites it."]
+        out += [l for f in faults for l in wrap(f, "- ", "  ")] + [""]
+    out += content
+    _, blocks, urls = layout(question(card))
+    states = {p["url"]: p["state"] for p in card.get("prs") or []}
+    links = [(l.get("label") or "", l.get("url")) for l in card.get("links") or []]
+    links += [("", u) for u in urls if u not in {l[1] for l in links}]
+    if links:
+        out += ["", "Links:"]
+        for label, url in links:
+            state = f" ({states[url]})" if url in states else ""
+            out.append(f"- {label + ': ' if label else ''}{url}{state}")
+    out.append("")
+    if card.get("options") or any(b[0] == "option" for b in blocks):
+        out.append("To pick an option, write its letter on its own, like  b")
+    out += ["Save and close with :wq.", ANSWER_MARK, "", ""]
+    return out
+
+
+# ---------------------------------------------------------------- the board folder
+
+def read_lines(path: Path) -> list[str] | None:
+    return path.read_text().splitlines() if path.exists() else None
+
+
+def write_lines(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines).rstrip("\n") + "\n")
+
+
+def card_path(key: str) -> Path:
+    return CARDS / f"{key}.md"
+
+
+def acked(lines: list[str] | None) -> list[str]:
+    return [m.group(1) for l in lines or [] if (m := ACK.match(l))]
 
 
 def added_lines(before: list[str], after: list[str]) -> list[str]:
@@ -178,10 +280,25 @@ def added_lines(before: list[str], after: list[str]) -> list[str]:
     return [l for tag, _, _, j1, j2 in sm.get_opcodes() if tag in ("insert", "replace") for l in after[j1:j2]]
 
 
-def interpret(card: dict, text_lines: list[str]) -> dict | None:
-    text = "\n".join(text_lines).strip()
-    if not text:
-        return None
+def captain_text(key: str) -> str:
+    """Text the captain added to a card since the run last wrote or recorded it."""
+    now = read_lines(card_path(key)) or []
+    base = read_lines(SEEN / f"{key}.md")
+    if base is None:  # a card without a baseline (an older run's): only text below the answer line counts
+        new = now[now.index(ANSWER_MARK) + 1:] if ANSWER_MARK in now else []
+    else:
+        new = added_lines(base, now)
+    return "\n".join(l for l in new if not ACK.match(l)).strip()
+
+
+def source_record(key: str, live: dict) -> dict:
+    if key in live:
+        return live[key]
+    saved = SEEN / f"{key}.json"
+    return json.loads(saved.read_text()) if saved.exists() else {"key": key}
+
+
+def interpret(card: dict, text: str) -> dict:
     options = card.get("options") or []
     record = {"kind": "answer", "key": card["key"], "home": card.get("home"), "task": card.get("task"),
               "decision_key": card.get("decision_key"), "question": headline(card, 300), "text": text}
@@ -194,8 +311,207 @@ def interpret(card: dict, text_lines: list[str]) -> dict | None:
     return record
 
 
-def write_lines(path: Path, lines: list[str]) -> None:
-    path.write_text("\n".join(lines) + "\n")
+def recorded(kind: str, field: str) -> set[tuple[str, str]]:
+    """(key, field) of every outbox record of one kind: what a run already reported."""
+    seen = set()
+    for line in (OUTBOX.read_text().splitlines() if OUTBOX.exists() else []):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("kind") == kind:
+            seen.add((r.get("key"), r.get(field)))
+    return seen
+
+
+def acknowledge(key: str, now: str) -> None:
+    path = card_path(key)
+    lines = path.read_text().rstrip("\n").splitlines()
+    lines += ["", f"Received by firstmate at {now} UTC - waiting on firstmate."]
+    write_lines(path, lines)
+    write_lines(SEEN / f"{key}.md", lines)
+
+
+def answered(key: str) -> bool:
+    return (SEEN / f"{key}.answered").exists()
+
+
+def collect(live: dict, settled: set[str], now: str) -> list[dict]:
+    """Record every saved, unrecorded answer and acknowledge it in its card."""
+    records, already = [], recorded("answer", "text")
+    for path in sorted(CARDS.glob("*.md")) if CARDS.exists() else []:
+        key = path.name[:-3]
+        text = captain_text(key)
+        if not text:
+            continue
+        if (key, text) not in already:
+            r = interpret(source_record(key, live), text)
+            if key in settled:
+                r["settled"] = True
+            records.append(r)
+        acknowledge(key, now)
+        (SEEN / f"{key}.answered").write_text(now + "\n")
+    return records
+
+
+def without_acks(lines: list[str] | None) -> list[str]:
+    kept = [l for l in lines or [] if not ACK.match(l)]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return kept
+
+
+def build(live: dict, settled: set[str]) -> tuple[dict[str, list[str]], bool]:
+    """Build or rebuild every card not yet answered from its source record, and lint it.
+
+    Returns the faults of each broken card and whether the lint ran. A card is
+    rewritten only when its built text changed, so a broken card keeps its
+    acknowledgement until its source changes.
+    """
+    broken: dict[str, list[str]] = {}
+    checked = True
+    for key, card in live.items():
+        if answered(key):
+            continue  # the captain wrote in it: leave it alone
+        content = card_content(card, key in settled)
+        faults = [] if key in settled else lint(content)
+        if faults is None:
+            checked, faults = False, []
+        if faults:
+            broken[key] = faults
+        new = render_card(card, key in settled, content, faults)
+        if without_acks(read_lines(card_path(key))) != without_acks(new):
+            write_lines(card_path(key), new)
+            write_lines(SEEN / f"{key}.md", new)
+        (SEEN / f"{key}.json").write_text(json.dumps(card, indent=1) + "\n")
+    return broken, checked
+
+
+def report_broken(live: dict, broken: dict[str, list[str]], now: str) -> list[dict]:
+    """Report each broken card version to firstmate once, and acknowledge it in the card."""
+    records, already = [], recorded("broken", "version")
+    for key, faults in broken.items():
+        card = live[key]
+        v = version(card_content(card, False))
+        if (key, v) in already:
+            continue
+        records.append({"kind": "broken", "key": key, "home": card.get("home"), "task": card.get("task"),
+                        "decision_key": card.get("decision_key"), "question": headline(card, 300),
+                        "version": v, "faults": faults})
+        acknowledge(key, now)
+    return records
+
+
+def board_order(lines: list[str] | None) -> dict[str, list[str]]:
+    """The card keys listed in each section; a card line before any section counts as with the captain."""
+    order: dict[str, list[str]] = {WITH_CAPTAIN: [], BROKEN: [], WITH_FIRSTMATE: []}
+    section = WITH_CAPTAIN
+    for l in lines or []:
+        if l.startswith("## "):
+            section = l.strip()
+        elif (m := CARD_LINE.search(l)) and section in order and m.group(1) not in order[section]:
+            order[section].append(m.group(1))
+    return order
+
+
+def placement(live: dict, settled: set[str], broken: dict, board_lines: list[str] | None) -> dict[str, list[str]]:
+    old = board_order(board_lines)
+    with_fm = {p.name.removesuffix(".answered") for p in SEEN.glob("*.answered")} if SEEN.exists() else set()
+    with_fm |= settled
+    bad = {k for k in broken if k not in with_fm}
+    captain = [k for k in old[WITH_CAPTAIN] if k in live and k not in with_fm and k not in bad]
+    captain += [k for k in live if k not in with_fm and k not in bad and k not in captain]
+    broken_keys = [k for k in old[BROKEN] if k in bad]
+    broken_keys += [k for k in live if k in bad and k not in broken_keys]
+    firstmate = [k for k in old[WITH_FIRSTMATE] if k in with_fm]
+    firstmate += sorted((k for k in with_fm if k not in firstmate), key=lambda k: (k not in live, k))
+    return {WITH_CAPTAIN: captain, BROKEN: broken_keys, WITH_FIRSTMATE: firstmate}
+
+
+def board_line(key: str, live: dict) -> str:
+    card = source_record(key, live)
+    if "question" not in card and "title" not in card:
+        return f"cards/{key}.md"
+    repo = f"  [{card['repo']}]" if card.get("repo") else ""
+    home = {"main-hold": "", "main-worker": "  (main worker)"}.get(card.get("source"), f"  ({card.get('home')})")
+    return f"cards/{key}.md  {headline(card)}{repo}{home}"
+
+
+def render_board(model: dict, live: dict, settled: set[str], places: dict[str, list[str]],
+                 broken: dict[str, list[str]], checked: bool) -> list[str]:
+    built = (model.get("generated") or "")[11:16]
+    captain, bad, firstmate = places[WITH_CAPTAIN], places[BROKEN], places[WITH_FIRSTMATE]
+    out = [
+        f"# Captain's calls: {len(captain)} with you, {len(bad)} broken, {len(firstmate)} with firstmate"
+        + (f" (built {built}Z)" if built else ""),
+        "",
+        "- Press Enter on a card line to open it in a new tab. Close it with :q.",
+        "- Write your answer at the bottom of the card. Save it with :wq.",
+        "- Move a line to change the order (dd, then p).",
+        "- Save and quit everything with :wqa.",
+        "- Other editors: use <C-w>gf on a card line.",
+        "- PROTOTYPE: answers go to a local outbox file only.",
+    ]
+    if not checked:
+        out.append("- The plain-language check did not run. No card on this board has a check.")
+    out.append("")
+    hours = model.get("work_hours") or {}
+    held = [s for s in model.get("skipped") or [] if "work hours" in s.get("why", "")]
+    if hours.get("open") is False:
+        out += [f"Outside work hours: {len(held)} work item{'s' if len(held) != 1 else ''} held.", ""]
+    out += [WITH_CAPTAIN, ""] + [board_line(k, live) for k in captain]
+    out += ["", BROKEN, ""]
+    if bad:
+        out += ["These cards fail the plain-language check. Firstmate rewrites them.", ""]
+    for k in bad:
+        when = acked(read_lines(card_path(k)))
+        out.append(board_line(k, live) + (f"  - sent {when[-1][11:]} UTC" if when else ""))
+        out += ["    " + squash(f) for f in broken.get(k, [])]  # one line each; the card has them in full
+    out += ["", WITH_FIRSTMATE, ""]
+    for k in firstmate:
+        when = acked(read_lines(card_path(k)))
+        note = f"  - sent {when[-1][11:]} UTC" if when else ("  - settled, firstmate closes it" if k in settled else "")
+        out.append(board_line(k, live) + note)
+    skipped = model.get("skipped") or []
+    missing = [h["id"] for h in model.get("homes") or [] if h.get("status_log") != "read"]
+    if skipped or missing:
+        out += ["", "## Not on the board now", ""]
+        out += [l for s in skipped for l in wrap(f"{s['key']}: {s['why']}", "- ", "  ")]
+        if missing:
+            out += wrap("No status log read for: " + ", ".join(missing), "- ", "  ")
+    return out
+
+
+def emit(records: list[dict], now_iso: str) -> None:
+    if not records:
+        return
+    OUTBOX.parent.mkdir(parents=True, exist_ok=True)
+    with OUTBOX.open("a") as f:
+        for r in records:
+            f.write(json.dumps({"at": now_iso, "prototype": True, **r}) + "\n")
+    print(f"Captured into {OUTBOX}:")
+    for r in records:
+        if r["kind"] == "order":
+            print("  new order:")
+            for i, k in enumerate(r["keys"], 1):
+                print(f"    {i}. {k}")
+            for k in r.get("missing", []):
+                print(f"    (line removed: {k})")
+            continue
+        if r["kind"] == "broken":
+            print(f"  broken card {r['key']}:")
+            for fault in r["faults"]:
+                print(f"    | {fault}")
+            continue
+        pick = f" picked {r['option_label']!r}" if "option" in r else ""
+        print(f"  answer for {r['key']}:{pick}")
+        for line in r["text"].splitlines():
+            print(f"    | {line}")
+
+
+def stamp() -> tuple[str, str]:
+    t = time.gmtime()
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", t), time.strftime("%Y-%m-%d %H:%M", t)
 
 
 def main(argv: list[str]) -> int:
@@ -204,26 +520,27 @@ def main(argv: list[str]) -> int:
         return 0 if argv and argv[0] in ("-h", "--help") else 2
     model = load_model()
     calls, to_close = list(model.get("calls") or []), list(model.get("to_close") or [])
-    cards = calls + to_close
-    if not cards:
-        print("No captain calls and nothing to close; nothing to answer.")
-        return 0
-    if argv and argv[0] not in {c["key"] for c in cards}:
+    live = {c["key"]: c for c in calls + to_close}
+    settled = {c["key"] for c in to_close}
+    if argv and argv[0] not in live and not card_path(argv[0]).exists():
         print(f"No card with key {argv[0]!r}. Cards now:", file=sys.stderr)
-        for c in cards:
-            print(f"  {c['key']}", file=sys.stderr)
+        for k in live:
+            print(f"  {k}", file=sys.stderr)
         return 2
 
-    # A fresh board folder every run (prototype/board/ is this script's own scratch folder).
-    settled = {c["key"] for c in to_close}
-    board_before = render_board(model)
-    card_before = {c["key"]: render_card(c, c["key"] in settled) for c in cards}
-    if BOARD.exists():
-        shutil.rmtree(BOARD)
-    (BOARD / "cards").mkdir(parents=True)
-    write_lines(BOARD / "board.md", board_before)
-    for key, lines in card_before.items():
-        write_lines(BOARD / "cards" / f"{key}.md", lines)
+    # Answers saved since the last run (in an earlier session or by hand) are recorded first,
+    # then every card not answered is built from its source and checked, and broken ones reported.
+    now_iso, now = stamp()
+    records = collect(live, settled, now)
+    broken, checked = build(live, settled)
+    records += report_broken(live, broken, now)
+    emit(records, now_iso)
+    places = placement(live, settled, broken, read_lines(BOARD / "board.md"))
+    board_written = render_board(model, live, settled, places, broken, checked)
+    write_lines(BOARD / "board.md", board_written)
+    if not any(places.values()):
+        print("No captain calls and nothing with firstmate; nothing to answer.")
+        return 0
 
     # Run from the board folder so cards/<key>.md resolves for gf and the editor's own paths.
     target = f"cards/{argv[0]}.md" if argv else "board.md"
@@ -236,28 +553,25 @@ def main(argv: list[str]) -> int:
         editor += ["-c", open_card, "-c", "nmap <buffer> <CR> gf"]
     rc = subprocess.run(editor + [target], cwd=BOARD).returncode
     if rc != 0:
-        print(f"The editor exited with status {rc}; nothing written. The board is left in {BOARD} until the next run.")
+        print(f"The editor exited with status {rc}; nothing recorded now. Saved answers are recorded on the next run.")
         return 1
 
-    records: list[dict] = []
-    board_after = (BOARD / "board.md").read_text().splitlines()
-    original = [c["key"] for c in calls]
-    order = [m.group(1) for l in board_after if (m := CARD_LINE.search(l)) and m.group(1) in original]
-    order = list(dict.fromkeys(order))
-    if order != original:
-        rec = {"kind": "order", "keys": order}
-        if missing := [k for k in original if k not in order]:
+    now_iso, now = stamp()
+    board_after = read_lines(BOARD / "board.md") or []
+    captain = places[WITH_CAPTAIN]
+    new_captain = [k for k in board_order(board_after)[WITH_CAPTAIN] if k in captain]
+    records = []
+    if new_captain != captain:
+        rec = {"kind": "order", "keys": new_captain}
+        if missing := [k for k in captain if k not in new_captain]:
             rec["missing"] = missing
         records.append(rec)
-    stray = [l for l in added_lines(board_before, board_after)
-             if l.strip() and not CARD_LINE.search(l) and l not in board_before]
-    for c in cards:
-        path = BOARD / "cards" / f"{c['key']}.md"
-        if path.exists() and (r := interpret(c, added_lines(card_before[c["key"]], path.read_text().splitlines()))):
-            if c["key"] in settled:
-                r["settled"] = True
-            records.append(r)
-
+    stray = [l for l in added_lines(board_written, board_after)
+             if l.strip() and not CARD_LINE.search(l) and l not in board_written]
+    records += collect(live, settled, now)
+    # The captain's order is kept; answered cards move to With firstmate.
+    places = placement(live, settled, broken, board_after)
+    write_lines(BOARD / "board.md", render_board(model, live, settled, places, broken, checked))
     if stray:
         print("Ignored text written in board.md (answers go in the card files):")
         for l in stray:
@@ -265,24 +579,7 @@ def main(argv: list[str]) -> int:
     if not records:
         print("No new order and no answers; nothing captured.")
         return 0
-    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    OUTBOX.parent.mkdir(parents=True, exist_ok=True)
-    with OUTBOX.open("a") as f:
-        for r in records:
-            f.write(json.dumps({"at": at, "prototype": True, **r}) + "\n")
-    print(f"Captured into {OUTBOX}:")
-    for r in records:
-        if r["kind"] == "order":
-            print("  new order:")
-            for i, k in enumerate(r["keys"], 1):
-                print(f"    {i}. {k}")
-            for k in r.get("missing", []):
-                print(f"    (line removed: {k})")
-            continue
-        pick = f" picked {r['option_label']!r}" if "option" in r else ""
-        print(f"  answer for {r['key']}:{pick}")
-        for line in r["text"].splitlines():
-            print(f"    | {line}")
+    emit(records, now_iso)
     return 0
 
 
