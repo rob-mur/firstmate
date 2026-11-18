@@ -357,6 +357,71 @@ test_weak_identity_still_presents_and_advances() {
   pass "fallback identity still presents and advances status state"
 }
 
+# An in-place rewrite such as `sed -i` keeps the presented prefix but gives the
+# log a new inode and birth time. The incident: a rewrite of a weeks-old status
+# log replayed all ~1500 handled lines on the next drain. The presented history
+# must stay presented, and the line written with the rewrite must surface.
+test_in_place_rewrite_does_not_replay_presented_history() {
+  local dir state out status rewritten old_ident new_ident
+  dir=$(make_case in-place-rewrite)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/rewrite.status"
+  prime_cursor "$state" "$status"
+  printf 'note: handled weeks ago [at=100]\n' >> "$status"
+  printf 'note: also handled weeks ago [at=200]\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain of the handled history failed"
+  grep -F 'handled weeks ago [at=100]' "$out" >/dev/null \
+    || fail "setup error: the handled history was not presented: $(cat "$out")"
+
+  old_ident=$(bash -c '. "$1/bin/fm-classify-lib.sh"; _fm_open_decisions_file_ident "$2"' _ "$ROOT" "$status")
+  rewritten="$dir/rewrite.status.new"
+  cp "$status" "$rewritten" || fail "could not copy the status log for the rewrite"
+  printf 'needs-decision [key=fresh]: written with the in-place rewrite [at=300]\n' >> "$rewritten"
+  mv -f "$rewritten" "$status" || fail "could not rename the rewritten status log into place"
+  new_ident=$(bash -c '. "$1/bin/fm-classify-lib.sh"; _fm_open_decisions_file_ident "$2"' _ "$ROOT" "$status")
+  [ "$old_ident" != "$new_ident" ] \
+    || fail "setup error: the rewrite kept the status file identity ($new_ident)"
+  append_wake "$state" signal rewrite.status "signal: rewrite.status" \
+    || fail "queueing the post-rewrite status signal failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain after the in-place rewrite failed"
+  grep -F 'written with the in-place rewrite' "$out" >/dev/null \
+    || fail "the line written with the rewrite was hidden: $(cat "$out")"
+  if grep -F 'handled weeks ago' "$out" >/dev/null; then
+    fail "an in-place rewrite replayed already-presented history: $(cat "$out")"
+  fi
+  if grep -F 'bootstrap cursor line' "$out" >/dev/null; then
+    fail "an in-place rewrite replayed the first presented line: $(cat "$out")"
+  fi
+  pass "an in-place rewrite of a presented status log surfaces only its new lines"
+}
+
+# A replacement whose content does not continue the presented history is a new
+# log, so every line in it is unread.
+test_replaced_status_content_is_read_from_the_start() {
+  local dir state out status replacement
+  dir=$(make_case replaced-content)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/replaced.status"
+  prime_cursor "$state" "$status"
+  printf 'note: original history [at=100]\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null || fail "drain of the original history failed"
+
+  replacement="$dir/replaced.status.new"
+  printf 'note: replacement first line [at=400]\nnote: replacement second line [at=500]\nnote: replacement padding past the old offset [at=600]\n' \
+    > "$replacement"
+  mv -f "$replacement" "$status" || fail "could not rename the replacement status log into place"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain after the content replacement failed"
+  grep -F 'replaced note: replacement first line' "$out" >/dev/null \
+    || fail "a replaced status log hid its first line: $(cat "$out")"
+  grep -F 'replaced note: replacement second line' "$out" >/dev/null \
+    || fail "a replaced status log hid a later line: $(cat "$out")"
+  pass "a status log replaced with unrelated content is read from byte zero"
+}
+
 test_snapshot_failure_is_visible() {
   local dir state out reader
   dir=$(make_case snapshot-failure); state="$dir/state"; out="$dir/drain.out"; reader="$dir/identity-reader"
@@ -459,6 +524,8 @@ test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_weak_identity_still_presents_and_advances
+test_in_place_rewrite_does_not_replay_presented_history
+test_replaced_status_content_is_read_from_the_start
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
