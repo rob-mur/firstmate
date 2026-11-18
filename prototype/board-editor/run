@@ -8,11 +8,11 @@ Reads every captain call from bin/fm-captain-calls.sh (read-only) for the home
 in TUI_BOARD_HOME (default /home/rob/repos/firstmate), or from a saved copy of
 its JSON in TUI_BOARD_CALLS_JSON. Writes prototype/board/: board.md lists every
 call, one line each, then the settled items to close; cards/<key>.md holds one
-card. Open a card in a NEW TAB so that closing it returns to board.md:
-<C-w>gf on a card line, or :tabedit cards/<key>.md. When the editor is nvim or
-vim, the run maps plain gf and Enter in board.md (that buffer only) to open the
-card named on the cursor line in a new tab, from anywhere on the line; :q (or :wq) on a card closes its tab and returns to
-board.md. Move call lines in board.md to reorder; write an answer at the
+card. To open a card, press Enter (or gf) anywhere on its line in board.md:
+when the editor is nvim or vim, the run maps both keys in that buffer only to
+open the card in a NEW TAB, so :q (or :wq) on the card closes its tab and
+returns to board.md. In another editor use <C-w>gf on the line, or
+:tabedit cards/<key>.md. Move call lines in board.md to reorder; write an answer at the
 bottom of a card file. When the editor exits, a new order and every answer are
 appended to prototype/outbox.jsonl ONLY; nothing reaches the board, its
 priority file, the backlog or a worker. Standard library only.
@@ -77,12 +77,14 @@ def headline(card: dict, limit: int = 110) -> str:
 def origin(card: dict) -> str:
     if card.get("source") == "main-hold":
         return "main backlog"
+    if card.get("source") == "main-worker":
+        return f"main worker {card.get('task')}"
     return f"secondmate {card.get('home')}" + (" (remote)" if card.get("remote") else "")
 
 
 def board_line(card: dict) -> str:
     repo = f"  [{card['repo']}]" if card.get("repo") else ""
-    home = "" if card.get("source") == "main-hold" else f"  ({card.get('home')})"
+    home = {"main-hold": "", "main-worker": "  (main worker)"}.get(card.get("source"), f"  ({card.get('home')})")
     return f"cards/{card['key']}.md  {headline(card)}{repo}{home}"
 
 
@@ -94,15 +96,19 @@ def render_board(model: dict) -> list[str]:
         f"# Captain's calls: {n} call{'s' if n != 1 else ''}" + (f" (built {built}Z)" if built else ""),
         "",
         "One call per line, in board order. Move a line to reorder it (dd, then p).",
-        "Open a card in a new tab, so closing it brings you back here: <C-w>gf on a card line,",
-        "or :tabedit cards/<key>.md. In nvim or vim, plain gf and Enter here do the same.",
-        "In a card, :wq (or :q) closes its tab and returns here. gt / gT move between tabs.",
+        "Open a card: press Enter (or gf) anywhere on its line. It opens in a new tab;",
+        "in the card, :wq (or :q) closes the tab and brings you back here. gt / gT switch tabs.",
+        "(Enter and gf are set up for nvim and vim. In another editor: <C-w>gf, or :tabedit cards/<key>.md.)",
         "Write answers at the bottom of the card files. When done, save all and quit: :wqa",
         "To send nothing at all, quit with :qa!",
         "",
         "PROTOTYPE: the order and answers are written only to prototype/outbox.jsonl.",
         "",
     ]
+    hours = model.get("work_hours") or {}
+    held = [s for s in model.get("skipped") or [] if "work hours" in s.get("why", "")]
+    if hours.get("open") is False:
+        out += [f"Outside work hours: {len(held)} work item{'s' if len(held) != 1 else ''} held until work hours (under Not calls now).", ""]
     out += [board_line(c) for c in calls]
     if to_close:
         out += ["", f"## To close: {len(to_close)} settled, not decisions (not calls; the order here is not recorded)", ""]
