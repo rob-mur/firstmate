@@ -385,6 +385,60 @@ test_a_hold_with_recorded_options_and_links_puts_them_on_its_card() {
   pass "a hold's recorded options and links are its card's choices and links, and every item carries its context"
 }
 
+# A hold whose recorded options carry no label shows words, never raw values:
+# the reason's own inline "(a, recommended) ... (b) ... (c) ... <url>" options
+# label them in place, recommendation included, and a bare review-gate value
+# reads as plain words.
+test_a_hold_with_bare_recorded_options_shows_words_not_raw_values() {
+  local snap p
+  snap="$TMP_ROOT/snap-bare.json"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.decisions_open = [
+        {id: "cd-915-stable-lag", key: "cd-915-stable-lag", verb: "captain-hold", owner: "cd",
+         title_full: "#915: report when releasable is ahead of stable",
+         reason_full: "Where should the stable-lag report run, and what should it be called? (a, recommended) An advisory step at the end of every green main run, named cd-stable-lag, with record .ci/advisory/stable-lag.json: adopters get it at their next pin bump with no new file, forge call or secret. (b) A new daily scheduled workflow that goes red while commits wait: more visible, but adopters must add a new file. (c) A built-in that keeps one forge issue open while commits wait: most visible, but needs a forge write token. https://forgejo.example/rob/continuous-delivery/issues/915",
+         choices: {options: [{value: "aa", label: "aa"}, {value: "ba", label: "ba"}, {value: "ca", label: "ca"}],
+                   links: [{target: "https://forgejo.example/rob/continuous-delivery/issues/915", label: ""}],
+                   free_text: false, no_link: false}},
+        {id: "cd-896-gpu-task", key: "cd-896-gpu-task", verb: "captain-hold", owner: "cd",
+         title_full: "#896: pipeline path runs a task on a GPU runner",
+         reason_full: "Will you clear the bot'"'"'s request-changes review 671 on PR 924? It is green at 9662296 (7 of 7 checks). Recommended: dismiss review 671 after reading the diff; I then merge it.",
+         choices: {options: [{value: "cleared-merge", label: "cleared-merge"}, {value: "changes-needed", label: "changes-needed"}],
+                   links: [{target: "https://forgejo.example/rob/continuous-delivery/pulls/924", label: ""}],
+                   free_text: false, no_link: false}},
+        {id: "cd-920-coverage-names", key: "cd-920-coverage-names", verb: "captain-hold", owner: "cd",
+         title_full: "#920: coverage scripts named scripts.<language>.<tool>",
+         reason_full: "Will you clear the acknowledgement review 667 on PR 923? It is green at 828ab11 (7 of 7 checks). Recommended: dismiss review 667 after reading the diff; I then merge it.",
+         choices: {options: [{value: "cleared-merge"}, {value: "changes-needed", label: ""}, {value: "keep-open", label: "keep-open"}],
+                   links: [{target: "https://forgejo.example/rob/continuous-delivery/pulls/923", label: ""}],
+                   free_text: false, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals '[{"label":"An advisory step at the end of every green main run, named cd-stable-lag, with record .ci/advisory/stable-lag.json: adopters get it at their next pin bump with no new file, forge call or secret","value":"aa"},{"label":"A new daily scheduled workflow that goes red while commits wait: more visible, but adopters must add a new file","value":"ba"},{"label":"A built-in that keeps one forge issue open while commits wait: most visible, but needs a forge write token","value":"ca"}]' \
+    "$(jq -cS '[.captains_call[] | select(.key == "cd-915-stable-lag") | .options[]]' <<<"$p")" \
+    "bare recorded options did not take the reason's inline (a, recommended) option text"
+  assert_equals "aa" "$(jq -r '.captains_call[] | select(.key == "cd-915-stable-lag") | .recommend_value' <<<"$p")" \
+    "the option the reason marks recommended is not the card's recommendation"
+  assert_equals "Where should the stable-lag report run, and what should it be called?" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-915-stable-lag") | .question' <<<"$p")" \
+    "the card question is not the sentence before the options"
+  assert_equals "https://forgejo.example/rob/continuous-delivery/issues/915" \
+    "$(jq -r '[.captains_call[] | select(.key == "cd-915-stable-lag") | .links[].url] | join(",")' <<<"$p")" \
+    "the reason's URL is not the card's one link"
+  assert_equals "Cleared to merge|Changes requested" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-896-gpu-task") | [.options[].label] | join("|")' <<<"$p")" \
+    "bare review-gate values were shown as raw labels"
+  assert_equals "cleared-merge,changes-needed" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-896-gpu-task") | [.options[].value] | join(",")' <<<"$p")" \
+    "the recorded values did not stay the answer values"
+  assert_equals "Cleared to merge|Changes requested|Keep open" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-920-coverage-names") | [.options[].label] | join("|")' <<<"$p")" \
+    "a missing, empty or value-only label did not read as plain words"
+  printf '%s\n' "$p" > "$TMP_ROOT/bare.json"
+  validates "$TMP_ROOT/bare.json" || fail "a payload with bare recorded options did not validate"
+  pass "a hold's bare recorded options show the reason's own option words or plain words, never raw values"
+}
+
 # A hold with no recorded options, or with no link, is refused by key naming
 # what to add; a declared free-text question with --no-link builds.
 test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add() {
@@ -1555,6 +1609,7 @@ fm_test_run \
   test_an_unheld_captain_contribution_becomes_a_link_card \
   test_the_generators_own_cards_pass_the_build_decision_check \
   test_a_hold_with_recorded_options_and_links_puts_them_on_its_card \
+  test_a_hold_with_bare_recorded_options_shows_words_not_raw_values \
   test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
   test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
