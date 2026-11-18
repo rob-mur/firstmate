@@ -8,6 +8,11 @@
 # "With captain" is kept. Every run reads a saved model (TUI_BOARD_CALLS_JSON),
 # a stub lint (TUI_BOARD_LINT) and a scratch EDITOR script, so nothing reads or
 # writes a real home.
+#
+# A call that links a Lavish page (page:<id>) gets a markdown copy of that page
+# in the board folder, read from a fixture home (TUI_BOARD_HOME). Each line the
+# captain adds is recorded once as a comment on the block above it and
+# acknowledged under it, and a rebuild from a changed source keeps that text.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -64,6 +69,17 @@ PY
     ;;
   snapshot) cp board.md "$ED_SNAPSHOT" ;;
   answer-fail) printf '%s\n' "$ED_TEXT" >>"cards/$ED_KEY.md"; exit 3 ;;
+  page)  # in pages/$ED_PAGE.md, write $ED_TEXT under the line $ED_AFTER of block $ED_BLOCK
+    python3 - <<'PY'
+import os
+path = f"pages/{os.environ['ED_PAGE']}.md"
+lines = open(path).read().splitlines()
+start = lines.index(f"<!-- block: {os.environ['ED_BLOCK']} -->")
+at = next(i for i in range(start, len(lines)) if lines[i] == os.environ["ED_AFTER"])
+lines[at + 1:at + 1] = os.environ["ED_TEXT"].split("\n")
+open(path, "w").write("\n".join(lines) + "\n")
+PY
+    ;;
 esac
 EOF
   chmod +x "$1/ed.sh"
@@ -91,10 +107,49 @@ fresh() {  # <name>  -> a scratch dir with an editor, a lint, a model of calls a
   printf '%s\n' "$dir"
 }
 
+# A Lavish review page in the fixture home: a title, then items that each have
+# a header, a text, a post/edit/skip pick and a note box.
+page_item() {  # <id> <n> <text>
+  cat <<EOF
+<article class="c" id="$1">
+  <header><span class="n">$2</span> <span class="where">app.py:1$2</span></header>
+  <p>$3</p>
+  <div class="pick">
+    <label><input type="radio" name="choice-$1" value="post" checked> Post as written</label>
+    <label><input type="radio" name="choice-$1" value="edit"> Post with my edit</label>
+    <label><input type="radio" name="choice-$1" value="skip"> Skip</label>
+  </div>
+  <textarea name="note-$1" placeholder="Your note"></textarea>
+</article>
+EOF
+}
+
+page_source() {  # <dir> <item html>...  -> page rev in the fixture home, linked from call a
+  local dir=$1 src="$1/home/.lavish/pages/rev"
+  shift
+  mkdir -p "$src" "$dir/home/state/pages/rev"
+  { printf '<html><body>\n<h1>Review texts</h1>\n<p>Pick what to post.</p>\n'; printf '%s\n' "$@"; printf '</body></html>\n'; } \
+    >"$src/page.html"
+  printf '{"id":"rev","task":"hold-a","opened":"2026-11-18T12:00:00Z"}\n' >"$dir/home/state/pages/rev/page.json"
+  model "$dir/model.json" "$(printf '%s' "$call_a" | jq -c '.links = [{"url":"page:rev","label":""}]')" "$call_b"
+}
+
+fresh_page() {  # <name>  -> a scratch dir whose call a links page rev with items r1 and r2
+  local dir
+  dir=$(fresh "$1")
+  page_source "$dir" "$(page_item r1 1 'Rename the flag.')" "$(page_item r2 2 'Add a test.')"
+  printf '%s\n' "$dir"
+}
+
+comments() {  # <outbox>  -> count of comment lines
+  [ -f "$1" ] || { echo 0; return; }
+  jq -s '[.[] | select(.kind == "comment")] | length' "$1"
+}
+
 run_board() {  # <dir> [args...]  (ED_* in the environment)
   local dir=$1
   shift
-  TUI_BOARD_DIR="$dir/board" TUI_BOARD_OUTBOX="$dir/outbox.jsonl" \
+  TUI_BOARD_HOME="$dir/home" TUI_BOARD_DIR="$dir/board" TUI_BOARD_OUTBOX="$dir/outbox.jsonl" \
     TUI_BOARD_CALLS_JSON="${MODEL:-$dir/model.json}" TUI_BOARD_LINT="${LINT:-$dir/lint.sh}" \
     EDITOR="$dir/ed.sh" "$RUN" "$@"
 }
@@ -334,8 +389,151 @@ test_one_card_and_unknown_key() {
   local code=0
   out=$(run_board "$dir" nope 2>&1) || code=$?
   expect_code 2 "$code" "an unknown key exits 2"
-  assert_contains "$out" "No card with key 'nope'" "an unknown key is named"
+  assert_contains "$out" "No card or page with key 'nope'" "an unknown key is named"
   pass "run <key> opens one card; an unknown key exits 2"
+}
+
+ACK_RE='Received by firstmate at [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC - waiting on firstmate\.'
+
+line_after() {  # <file> <whole line>  -> the line under the first match
+  awk -v l="$2" 'hit {print; exit} $0 == l {hit=1}' "$1"
+}
+
+test_page_converts_to_markdown_linked_from_card() {
+  local dir page
+  dir=$(fresh_page page-convert)
+  run_board "$dir" >/dev/null || fail "the run failed"
+  page="$dir/board/pages/rev.md"
+  assert_line "- Page: pages/rev.md" "$dir/board/cards/hold-a.md" "the card links the markdown page"
+  assert_present "$page" "the run writes the page into the board folder"
+  grep -q '^<!-- page: rev | task: hold-a | opened: 2026-11-18T12:00:00Z | from: .lavish/pages/rev/page.html (version [0-9a-f]*) -->$' "$page" ||
+    fail "the first line names the page, its task and its source version"
+  assert_line "<!-- block: r1 -->" "$page" "each item is a block with its stable id"
+  assert_line "<!-- block: r2 -->" "$page" "every item gets a block"
+  assert_equals "## 1 · app.py:11" "$(line_after "$page" "<!-- block: r1 -->")" "the item header is the block heading"
+  assert_line "Rename the flag." "$page" "the item text is kept"
+  assert_line "  a) Post as written (default)" "$page" "the pick lists its options with letters"
+  assert_line "  c) Skip" "$page" "every option gets a letter"
+  assert_equals 1 "$(grep -c '^- PROTOTYPE: this page is a file' "$page")" "the page explains itself once"
+  assert_absent "$dir/outbox.jsonl" "a fresh page that passes the lint reports nothing"
+  pass "a linked Lavish page becomes a markdown page with one block per item, linked from its card"
+}
+
+test_page_comment_recorded_once_on_its_block() {
+  local dir page before
+  dir=$(fresh_page page-comment)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  page="$dir/board/pages/rev.md"
+  ED_ACTION=page ED_PAGE=rev ED_BLOCK=r1 ED_AFTER="Rename the flag." ED_TEXT="Call it the cache flag." \
+    run_board "$dir" >/dev/null || fail "comment run failed"
+  assert_equals 1 "$(comments "$dir/outbox.jsonl")" "the comment is recorded"
+  assert_equals '{"page":"rev","task":"hold-a","block":"r1","text":"Call it the cache flag.","after":"Rename the flag."}' \
+    "$(jq -c 'select(.kind == "comment") | {page, task, block, text, after}' "$dir/outbox.jsonl")" \
+    "the record names the page, the block and the line it answers"
+  line_after "$page" "Call it the cache flag." | grep -Eqx "$ACK_RE" || fail "the acknowledgement sits under the comment"
+  before=$(cat "$page")
+  run_board "$dir" >/dev/null || fail "third run failed"
+  run_board "$dir" >/dev/null || fail "fourth run failed"
+  assert_equals 1 "$(comments "$dir/outbox.jsonl")" "later runs do not record it again"
+  assert_equals "$before" "$(cat "$page")" "later runs leave the page alone"
+  pass "a captain comment is recorded once against its block and acknowledged under it"
+}
+
+test_page_letter_picks_option() {
+  local dir
+  dir=$(fresh_page page-pick)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  ED_ACTION=page ED_PAGE=rev ED_BLOCK=r2 ED_AFTER="Add a test." ED_TEXT='c' run_board "$dir" >/dev/null ||
+    fail "pick run failed"
+  assert_equals '{"block":"r2","text":"c","pick":{"name":"choice-r2","value":"skip","label":"Skip"},"note_field":"note-r2"}' \
+    "$(jq -c 'select(.kind == "comment") | {block, text, pick, note_field}' "$dir/outbox.jsonl")" \
+    "the letter picks that item's option"
+  pass "a letter on its own line in an item picks that item's option"
+}
+
+test_page_rebuild_keeps_captain_text() {
+  local dir page
+  dir=$(fresh_page page-rebuild)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  page="$dir/board/pages/rev.md"
+  ED_ACTION=page ED_PAGE=rev ED_BLOCK=r1 ED_AFTER="Rename the flag." ED_TEXT="Call it the cache flag." \
+    run_board "$dir" >/dev/null || fail "comment run failed"
+  ED_ACTION=page ED_PAGE=rev ED_BLOCK=r2 ED_AFTER="Add a test." ED_TEXT="b" run_board "$dir" >/dev/null ||
+    fail "pick run failed"
+  # The source changes: r1 gets new text, r2 is gone, r3 is new.
+  page_source "$dir" "$(page_item r1 1 'Rename the flag now.')" "$(page_item r3 3 'Drop the shim.')"
+  run_board "$dir" >/dev/null || fail "rebuild run failed"
+  assert_line "Rename the flag now." "$page" "the rebuild shows the new source text"
+  assert_line "<!-- block: r3 -->" "$page" "the rebuild adds the new item"
+  assert_line "Call it the cache flag." "$page" "the captain's comment survives the rebuild"
+  awk '/^<!-- block: r1 -->$/ {s=1; next} /^<!-- block: / {s=0} s && /^Call it the cache flag\.$/ {f=1} END {exit !f}' "$page" ||
+    fail "the comment stays in its block"
+  line_after "$page" "Call it the cache flag." | grep -Eqx "$ACK_RE" || fail "its acknowledgement stays under it"
+  assert_line "## Comments on parts no longer on the page" "$page" "a comment on a gone item is kept apart"
+  awk '/^## Comments on parts no longer on the page$/ {s=1} s && $0 == "<!-- block: r2 -->" {b=1} b && $0 == "b" {f=1} END {exit !f}' "$page" ||
+    fail "the gone item's comment keeps its block id"
+  assert_equals 2 "$(comments "$dir/outbox.jsonl")" "the rebuild records nothing new"
+  run_board "$dir" >/dev/null || fail "run after the rebuild failed"
+  assert_equals 2 "$(comments "$dir/outbox.jsonl")" "the run after a rebuild records nothing new"
+  pass "a rebuild from a changed source keeps the captain's text and its acknowledgements"
+}
+
+test_page_slash_marker_without_baseline() {
+  local dir page
+  dir=$(fresh_page page-marker)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  page="$dir/board/pages/rev.md"
+  rm -f "$dir/board/.seen/pages/rev.md"
+  printf '%s\n' "// Ship r2 last." >>"$page"
+  run_board "$dir" >/dev/null || fail "marker run failed"
+  assert_equals '{"block":"r2","text":"Ship r2 last."}' \
+    "$(jq -c 'select(.kind == "comment") | {block, text}' "$dir/outbox.jsonl")" \
+    "a // line is the captain's even with no earlier copy of the page"
+  pass "a line that starts with // is read as the captain's when there is no baseline"
+}
+
+test_page_missing_source_is_named() {
+  local dir
+  dir=$(fresh page-missing)
+  model "$dir/model.json" "$(printf '%s' "$call_a" | jq -c '.links = [{"url":"page:gone","label":""}]')"
+  run_board "$dir" >/dev/null || fail "the run failed"
+  assert_line "- Page: page:gone (not found)" "$dir/board/cards/hold-a.md" "a page link with no source says so"
+  assert_absent "$dir/board/pages/gone.md" "no page is made without a source"
+  pass "a page link with no source is named in the card and makes no page"
+}
+
+test_broken_page_reported_once_and_ack_survives_rebuild() {
+  local dir page
+  dir=$(fresh page-broken)
+  page_source "$dir" "$(page_item r1 1 'Rename the flag. WALL is long.')" "$(page_item r2 2 'Add a test.')"
+  run_board "$dir" >/dev/null || fail "first run failed"
+  page="$dir/board/pages/rev.md"
+  assert_line "Check: 1 part of this page fails the plain-language check. Firstmate rewrites it." "$page" \
+    "the page says how many parts fail"
+  assert_equals '> Check: LENGTH (40 words, limit 25): "a WALL of text"' "$(line_after "$page" "<!-- block: r1 -->")" \
+    "the failing part lists its fault"
+  assert_equals 1 "$(broken_reports "$dir/outbox.jsonl" page:rev)" "the broken page is reported"
+  assert_equals '{"r1":["LENGTH (40 words, limit 25): \"a WALL of text\""]}' \
+    "$(jq -c 'select(.kind == "broken") | .blocks' "$dir/outbox.jsonl")" "the report holds the faults by block"
+  # A rebuild of the same source version (here forced) writes the check line afresh.
+  jq '.source = "forced"' "$dir/board/.seen/pages/rev.json" >"$dir/rev.json" && mv "$dir/rev.json" "$dir/board/.seen/pages/rev.json"
+  run_board "$dir" >/dev/null || fail "rebuild run failed"
+  line_after "$page" "Check: 1 part of this page fails the plain-language check. Firstmate rewrites it." |
+    grep -Eqx "$ACK_RE" || fail "the acknowledgement is back under the check line"
+  assert_equals 1 "$(broken_reports "$dir/outbox.jsonl" page:rev)" "the same version is not reported again"
+  pass "a broken page is reported once per version and keeps its acknowledgement through a rebuild"
+}
+
+test_default_board_location() {
+  local dir
+  dir=$(fresh default-home)
+  env -u TUI_BOARD_DIR -u TUI_BOARD_OUTBOX HOME="$dir/h" TUI_BOARD_HOME="$dir/home" \
+    TUI_BOARD_CALLS_JSON="$dir/model.json" TUI_BOARD_LINT="$dir/lint.sh" EDITOR="$dir/ed.sh" \
+    ED_ACTION=answer ED_KEY=hold-a ED_TEXT="b" "$RUN" >/dev/null || fail "the run failed"
+  assert_present "$dir/h/.local/share/fm-board-prototype/board/board.md" "the board goes under ~/.local/share"
+  assert_equals 1 "$(answers "$dir/h/.local/share/fm-board-prototype/outbox.jsonl" hold-a)" \
+    "the outbox goes next to it"
+  pass "with no overrides the board and outbox live under ~/.local/share/fm-board-prototype"
 }
 
 fm_test_run \
@@ -351,4 +549,12 @@ fm_test_run \
   test_no_duplicate_broken_report \
   test_missing_lint_is_unchecked_not_passed \
   test_real_lint_flags_a_long_sentence \
-  test_one_card_and_unknown_key
+  test_one_card_and_unknown_key \
+  test_page_converts_to_markdown_linked_from_card \
+  test_page_comment_recorded_once_on_its_block \
+  test_page_letter_picks_option \
+  test_page_rebuild_keeps_captain_text \
+  test_page_slash_marker_without_baseline \
+  test_page_missing_source_is_named \
+  test_broken_page_reported_once_and_ack_survives_rebuild \
+  test_default_board_location
