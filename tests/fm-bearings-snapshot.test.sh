@@ -1211,6 +1211,47 @@ test_open_decision_surfaces_end_to_end() {
   pass "an authoritative captain hold surfaces end-to-end"
 }
 
+# A secondmate hold records its choices on its own backlog row (the pdm-99 shape:
+# options a and b and an issue link). The row must reach the board card with
+# both options and the link, the same as a main hold.
+test_a_secondmate_hold_carries_its_options_and_link_to_the_board() {
+  local home mate fakebin json card issue=https://forge.example/rob/cd/issues/99
+  home=$(make_home mate-hold-choices); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  cat > "$mate/data/backlog.md" <<EOF
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] mate-decision-race - How should cd --version show the commit (repo: firstmate) (kind: captain) (since 2026-07-11) (hold: pick the --version format) (hold-kind: captain)
+  Captain hold set: 2026-07-11T16:22:36Z
+  Captain hold option: omit=(a, recommended) Leave it out: cd (4f84552 2026-07-10).
+  Captain hold option: commit=(b) Put the full commit there: cd 4f84552c (4f84552 2026-07-10).
+  Captain hold link: $issue Issue #99
+
+  Issue $issue. Notes on the task.
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg u "$issue" '
+    [.decisions_open[] | select(.id == "mate/mate-decision-race")] | length == 1
+      and (.[0].choices.options | map(.value) == ["omit","commit"])
+      and (.[0].choices.links | map(.target) == [$u])
+  ' >/dev/null || fail "a secondmate hold lost its recorded options or link in the snapshot: $json"
+  card=$(printf '%s' "$json" | "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot - \
+    | jq -c '[.captains_call[] | select(.key == "mate-decision-race")]')
+  printf '%s' "$card" | jq -e --arg u "$issue" '
+    length == 1
+      and (.[0].options | map(.value) == ["omit","commit"])
+      and (.[0].options[0].label | startswith("(a, recommended) Leave it out"))
+      and (.[0].options[1].label | startswith("(b) Put the full commit there"))
+      and ([.[0].links[]? | .url // .target // .href] | map(select(. == $u)) | length == 1)
+  ' >/dev/null || fail "a secondmate hold card did not carry both options and the link: $card"
+  pass "a secondmate hold carries its recorded options and link to its board card"
+}
+
 test_report_pointers_surface() {
   local home fakebin json
   home=$(make_home reports); write_fixture "$home"
@@ -4502,6 +4543,7 @@ fm_test_run \
   test_main_captain_readiness_matches_secondmate_projection \
   test_completed_scout_report_not_pending \
   test_open_decision_surfaces_end_to_end \
+  test_a_secondmate_hold_carries_its_options_and_link_to_the_board \
   test_report_pointers_surface \
   test_queued_item_prose_never_hides_it \
   test_include_prs_is_the_only_fetch_path \
