@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--handoff-key <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -223,6 +223,19 @@
 # working:, or done: event still cannot clear a captain decision. The flag is
 # refused with --key, with an explicit backend target (no task ledger in this
 # home), and with an empty message.
+#
+# Decision hand-off: pass --handoff-key <key> (repeatable, before the message)
+# when this steer hands the open decision <key> - a status key or a captain-hold
+# id - to the worker, so the board stops showing it as waiting on the captain.
+# Each key is written as one machine-readable handoff-key=<key> header line in
+# the inbox record (bin/fm-task-inbox-lib.sh), and that header is the only
+# thing bin/fm-bearings-snapshot.sh reads as a steer hand-off: a steer whose
+# text merely names a key never hands it off. The flag closes nothing and adds
+# no status line; the worker's next needs-decision: or blocked: line brings the
+# decision back. Because the marker lives in this home's local inbox record, the
+# flag is refused with --key, with an explicit backend target, with a remote
+# secondmate, with --fire-and-forget, with an empty message, and with a message
+# that would go to the typed plane instead of the inbox.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -516,6 +529,7 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+HANDOFF_KEYS=
 FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() { # <key>
   local k=$1
@@ -533,6 +547,22 @@ fm_send_add_resolve_key() { # <key>
   esac
   RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
 }
+fm_send_add_handoff_key() { # <key>
+  local k=$1
+  case "$k" in
+  '' | *[!A-Za-z0-9._-]*)
+    echo "error: --handoff-key '$k' is not a valid decision key (allowed: A-Z a-z 0-9 . _ -)" >&2
+    return 1
+    ;;
+  esac
+  case " $HANDOFF_KEYS " in
+  *" $k "*)
+    echo "error: duplicate --handoff-key '$k'" >&2
+    return 1
+    ;;
+  esac
+  HANDOFF_KEYS="${HANDOFF_KEYS}${HANDOFF_KEYS:+ }$k"
+}
 while :; do
   case "${1:-}" in
   --resolve-key)
@@ -545,6 +575,18 @@ while :; do
     ;;
   --resolve-key=*)
     fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+    shift
+    ;;
+  --handoff-key)
+    [ $# -ge 2 ] || {
+      echo "error: --handoff-key requires a key" >&2
+      exit 1
+    }
+    fm_send_add_handoff_key "$2" || exit 1
+    shift 2
+    ;;
+  --handoff-key=*)
+    fm_send_add_handoff_key "${1#--handoff-key=}" || exit 1
     shift
     ;;
   --fire-and-forget)
@@ -707,6 +749,40 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
       echo "error: --fire-and-forget cannot accompany --resolve-key" >&2
       exit 1
     }
+fi
+
+if [ -n "$HANDOFF_KEYS" ]; then
+  if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
+    echo "error: --handoff-key needs a task selector resolved through this home's metadata; an explicit backend target has no inbox record here" >&2
+    exit 1
+  fi
+  if [ "$TARGET_BACKEND" = remote ]; then
+    echo "error: --handoff-key cannot reach a remote secondmate; its inbox record lives on the remote host, where this home's board cannot read the marker" >&2
+    exit 1
+  fi
+  if [ -n "$FIRE_AND_FORGET_ID" ]; then
+    echo "error: --handoff-key cannot accompany --fire-and-forget" >&2
+    exit 1
+  fi
+  if [ "${1:-}" = "--key" ]; then
+    echo "error: --handoff-key cannot accompany --key; a hand-off is a text steer" >&2
+    exit 1
+  fi
+  if [ -z "$*" ]; then
+    echo "error: --handoff-key requires a nonempty message" >&2
+    exit 1
+  fi
+  # Refuse before anything is marked or recorded when the message would take
+  # the typed plane (the INBOX_PLANE choice below), which writes no record.
+  handoff_typed=0
+  case "$*" in
+  /*) handoff_typed=1 ;;
+  \$*) [ "$TARGET_HARNESS" != codex ] || handoff_typed=1 ;;
+  esac
+  if [ "$handoff_typed" = 1 ]; then
+    echo "error: --handoff-key needs an inbox record, but this message goes to the typed plane as a parser command; send the hand-off as a separate plain-text steer" >&2
+    exit 1
+  fi
 fi
 
 if [ -n "$RESOLVE_KEYS" ]; then
@@ -1176,7 +1252,7 @@ else
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
     else
       INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
-        "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
+        "${FIRE_AND_FORGET_ID:+fire-and-forget}" "$HANDOFF_KEYS") || inbox_write_rc=$?
     fi
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"

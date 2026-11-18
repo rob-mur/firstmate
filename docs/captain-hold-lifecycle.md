@@ -414,7 +414,9 @@ An actively worked held task may also appear in Underway, which reports running 
 ### Handed to a worker
 
 A decision whose answer or work has gone to a worker is no longer waiting on the captain, even while its hold stays open.
-The snapshot marks such a row `handed_at`, `handed_via`, `handed_task`, and `raised_at` from durable records only: a steer to a task the decision tracks that names the decision and does not tell the worker to wait for the captain, a `resolved` line for it, or a pending board reconcile request.
+An open needs-decision or captain hold is the captain's until it resolves, so a hand-off needs positive evidence, never prose that happens to name the key.
+The snapshot marks such a row `handed_at`, `handed_via`, `handed_task`, and `raised_at` from durable records only: a steer to a task the decision tracks that carries the decision's explicit hand-off marker and does not tell the worker to wait for the captain, the hold's parent-log mirror `resolved` line written when it is answered or released, a pending board reconcile request, or the captain's answer on the board.
+Firstmate writes that marker with `bin/fm-send.sh --handoff-key <key>`; a steer whose text only names a key, and a worker's `resolved` line for a plain key that only equals the hold id, never hand a decision off.
 The board payload then shows the row in the waiting group, saying which worker or firstmate has it, instead of as a Captain's Call card.
 A later `needs-decision` or `blocked` line from a task the decision tracks raises it again, so the card comes back when the worker needs the captain.
 The stored board priority only orders cards and never brings back a closed or handed decision.

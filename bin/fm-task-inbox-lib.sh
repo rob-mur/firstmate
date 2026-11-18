@@ -40,6 +40,11 @@
 #   body-terminator=1          present on records written with a synthetic final newline
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
 #                              (it still gets one retry ring; see below)
+#   handoff-key=<key>          zero or more; each is the sender's explicit
+#                              marker that this steer hands that open decision
+#                              key to the worker (fm-send.sh --handoff-key).
+#                              The board reads only this header for a steer
+#                              hand-off, never the body (fm-bearings-snapshot.sh)
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
@@ -203,8 +208,8 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
-_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
-  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
+_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [handoff-keys]
+  local dir=$1 text=$2 delivery_mode=${3:-} handoff_keys=${4:-} seq tmp rec status=0 key
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
@@ -216,6 +221,7 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
       *) printf 'body-terminator=1\n' ;;
     esac
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
+    for key in $handoff_keys; do printf 'handoff-key=%s\n' "$key"; done
     printf -- '--\n'
     case "$text" in
       *$'\n') printf '%s' "$text" ;;
@@ -228,13 +234,15 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
 
 # Durably enqueue one steer: temp-write, then atomic rename into the next
 # sequence slot. Prints the record path. Fails without a partial record.
-fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock rec status=0
+# [handoff-keys] is a space-separated list of already-validated decision keys,
+# each written as one handoff-key= header line.
+fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode] [handoff-keys]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} handoff_keys=${5:-} dir lock rec status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
-  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
+  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode" "$handoff_keys") || status=1
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
   printf '%s' "$rec"
