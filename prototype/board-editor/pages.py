@@ -531,15 +531,27 @@ LIST_ITEM = re.compile(r"^\s*(?:[-*]|\d+\.|[a-z]\))\s")
 
 
 def lint_lines(lines: list[str]) -> list[str]:
-    """A block's text as the lint should read it: each list item its own paragraph, fixed labels left out."""
+    """A block's text as the lint should read it: one line per paragraph or list item, unwrapped.
+
+    Wrapped lines join into one, a list marker ("-", "1.", "a)") is dropped so it never counts as a
+    word, whitespace is squashed and fixed labels are left out.
+    """
     out: list[str] = []
+    open_para = in_item = False
     for l in lines:
-        if l in FIXED:
+        if l in FIXED or not l.strip():
+            open_para = in_item = False
             continue
+        text = " ".join(l.split())
         if LIST_ITEM.match(l):
-            out.append("")
-        out.append(l)
-    return out
+            out.append(LIST_ITEM.sub("", l, count=1).strip())
+            open_para = in_item = True
+        elif open_para and (l[:1] == " " or not in_item):  # the wrapped rest of an item or paragraph
+            out[-1] += " " + text
+        else:
+            out.append(text)
+            open_para, in_item = True, False
+    return [o for o in out if o]
 
 
 def render_page(page_id: str, meta: dict, blocks: list[Block], faults: dict[str, list[str]] | None,

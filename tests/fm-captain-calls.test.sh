@@ -131,7 +131,13 @@ resolved [key=captain-hold-cd-930-done-1] [at=$LATER]: the captain answered in c
 needs-decision [key=cd-911-answered] [at=$BEFORE]: Pick one?
 needs-decision [key=cd-912-merge] [at=$BEFORE]: Merge PR 912?
 needs-decision [key=cd-940-merge] [at=$BEFORE]: PR $CD_MERGE_PR is green. Merge it?
+needs-decision [key=captain-hold-cd-950-later-1] [at=$BEFORE]: captain hold cd-950-later: Revisit the stable branch later?
 EOF
+
+  # cd's own backlog defers its cd-950-later hold to a future date.
+  mkdir -p "$home/cd-home/data"
+  printf '## Queued\n\n- [ ] cd-950-later - Revisit the stable branch (hold: revisit later) (hold-kind: captain) (hold-until: 2099-01-01)\n\n## Done\n' \
+    > "$home/cd-home/data/backlog.md"
 
   # runner-image's parent status log: a duplicate plain key resolved by the mate.
   cat > "$home/state/runner-image.status" <<EOF
@@ -300,6 +306,16 @@ test_deferred_hold_is_skipped_until_its_date() {
   assert_contains "$(printf '%s\n' "$out" | jq -r '.skipped[] | select(.key == "deferred-call") | .why')" \
     "deferred until 2099-01-01" "the skip names the date"
   pass "a hold deferred to a future date is skipped with its date"
+}
+
+test_deferred_secondmate_hold_is_skipped_until_its_date() {
+  local out
+  out=$(run_calls "$FIXTURE" off) || fail "fm-captain-calls failed"
+  expect_where "$out" cd.captain-hold-cd-950-later-1 skipped "a secondmate hold deferred to a future date"
+  assert_equals "cd|cd-950-later|deferred until 2099-01-01" \
+    "$(printf '%s\n' "$out" | jq -r '.skipped[] | select(.key == "cd.captain-hold-cd-950-later-1") | "\(.home)|\(.task)|\(.why)"')" \
+    "the skip names the mate, task and date"
+  pass "a secondmate hold deferred in the mate's backlog is skipped with its date"
 }
 
 test_plain_hold_is_a_call_with_its_options() {
@@ -507,6 +523,7 @@ fm_test_run \
   test_answered_hold_is_dropped \
   test_released_hold_is_dropped \
   test_deferred_hold_is_skipped_until_its_date \
+  test_deferred_secondmate_hold_is_skipped_until_its_date \
   test_plain_hold_is_a_call_with_its_options \
   test_cd_calls_named_by_housekeeping_steers_stay_calls \
   test_cd_870_version_file_is_a_call_with_its_open_pr \
