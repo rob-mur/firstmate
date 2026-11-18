@@ -15,7 +15,11 @@
 #     blocked-by stays a call and carries its blocker ids.
 #   - an open needs-decision key in the parent status log state/<mate>.status of
 #     a secondmate in data/secondmates.md, local or remote (a remote home's
-#     status reaches the same parent log). A key is open until a later
+#     status reaches the same parent log). A key raised for a captain hold
+#     ("captain hold <task>: ...") whose task, in a local mate's own
+#     data/backlog.md (read-only), is an open row with (hold-kind: captain) and
+#     a (hold-until: YYYY-MM-DD) after today (UTC) is deferred like a main hold:
+#     it is listed in skipped[], not calls[]. A key is open until a later
 #     `resolved` (or other closing) line carries the SAME key; bin/fm-classify-lib.sh
 #     status_open_decisions owns that fold. A key the captain already answered
 #     (bin/fm-captain-hold.sh answered-batch, read-only) is not a call and is
@@ -66,8 +70,9 @@
 #             registry order and status-log order,
 #   to_close[] settled calls that are not decisions (same fields, plus
 #             evidence {settled_by, prs[{url,state}], text} and close_with),
-#   skipped[] {key, home, task, why} deferred holds, captain-answered keys and
-#             work items held until work hours,
+#   skipped[] {key, home, task, why} deferred holds (main or secondmate, also
+#             with title and question), captain-answered keys and work items
+#             held until work hours,
 #   homes[]   {id, remote, status_log ("read" or "missing")} for every registered mate,
 #   workers[] the ids of the live workers whose status logs were read,
 #   work_hours {clock, hours, open} the time used, the hours, and whether
@@ -269,6 +274,35 @@ mate_rows() {
   cat "$WORK"/mates/*
 }
 
+# A local secondmate's own captain holds deferred to a date, read-only from its
+# data/backlog.md: one "<mate>\t<task>\t<YYYY-MM-DD>" line per open row (not in
+# Done, not checked) with (hold-kind: captain) and (hold-until: <date>). A
+# remote mate's backlog is not on this machine, so its keys keep no date.
+mate_until_rows() {
+  local line b
+  [ -f "$REGISTRY" ] && [ -r "$REGISTRY" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || continue
+    [ "$SECONDMATE_REGISTRY_REMOTE" = 1 ] && continue
+    b="$SECONDMATE_REGISTRY_HOME/data/backlog.md"
+    [ -f "$b" ] && [ -r "$b" ] || continue
+    awk -v mate="$SECONDMATE_REGISTRY_ID" '
+      /^##[[:space:]]/ { done = ($0 ~ /^##[[:space:]]+Done[[:space:]]*$/); next }
+      done { next }
+      /^[-*][[:space:]]+\[ \][[:space:]]+[^[:space:]]+[[:space:]]+-[[:space:]]/ {
+        if ($0 !~ /[(,][[:space:]]*hold-kind:[[:space:]]*captain[[:space:]]*[,)]/) next
+        if (!match($0, /[(,][[:space:]]*hold-until:[[:space:]]*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) next
+        u = substr($0, RSTART, RLENGTH); sub(/.*hold-until:[[:space:]]*/, "", u)
+        id = $0; sub(/^[-*][[:space:]]+\[ \][[:space:]]+/, "", id); sub(/[[:space:]].*/, "", id)
+        printf "%s\t%s\t%s\n", mate, id, u
+      }' "$b" 2>/dev/null
+  done < "$REGISTRY"
+}
+
+# shellcheck disable=SC2016  # jq program text.
+UNTIL_JSON=$(mate_until_rows | jq -R -n '[inputs | split("\t") | {mate: .[0], task: .[1], until: .[2]}]')
+
 # shellcheck disable=SC2016  # jq program text.
 MATE_JSON=$(mate_rows | jq -R -n '
   [inputs | split("\t")
@@ -281,7 +315,7 @@ MATE_JSON=$(mate_rows | jq -R -n '
 # out and "merge request" read as "MR", so a word inside a URL
 # (".../-/merge_requests/880") or the noun "merge request" never makes a merge ask.
 # shellcheck disable=SC2016  # jq program text.
-CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" \
+CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --argjson until "$UNTIL_JSON" \
   --arg today "$TODAY" --arg pr_re "$PR_URL_RE" "$FM_BEARINGS_QUESTION_JQ_DEFS"'
   def urls_in: [scan("https?://[^[:space:]<>\"()]+") | sub("[.,;:?!]+$"; "")];
   def pr_urls_in: [.[] | select(test("^" + $pr_re + "$"))] | unique;
@@ -306,17 +340,22 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" \
         blocked_by: [], hold_until: null, raised_at: iso(.opened), answered} | classify]) as $worker_calls
   | ([$mates[] | select(.kind == "call" and (.worker | not))
      | (.note | capture("^captain hold (?<t>[A-Za-z0-9._-]+):[[:space:]]*(?<q>.*)$")? // null) as $h
+     | .home as $mate
      | {key: (.home + "." + .key), source: "secondmate", home, remote, task: ($h.t // null),
         decision_key: .key, title: ($h.t // .key), repo: null,
         question: ($h.q // .note), options: [], free_text: true, no_link: false,
         links: ([.note | urls_in[]] | unique | map({url: ., label: ""})),
-        blocked_by: [], hold_until: null, raised_at: iso(.opened), answered} | classify]) as $mate_calls
-  | {calls: ([$holds[] | select(.hold_until == null or .hold_until <= $today)]
-             + [$worker_calls[], $mate_calls[] | select(.answered == "") | del(.answered)])
+        blocked_by: [],
+        hold_until: (if $h == null then null
+                     else ([$until[] | select(.mate == $mate and .task == $h.t) | .until][0] // null) end),
+        raised_at: iso(.opened), answered} | classify]) as $mate_calls
+  | def deferred: .hold_until != null and .hold_until > $today;
+  {calls: ([$holds[] | select(deferred | not)]
+             + [$worker_calls[], $mate_calls[] | select(.answered == "" and (deferred | not)) | del(.answered)])
            | map(. + {pr_urls: ([.links[].url] | pr_urls_in)}),
      answered: [$worker_calls[], $mate_calls[] | select(.answered != "")],
-     skipped: [$holds[] | select(.hold_until != null and .hold_until > $today)
-               | {key, home, task, why: ("deferred until " + .hold_until)}],
+     skipped: [$holds[], ($mate_calls[] | select(.answered == "")) | select(deferred)
+               | {key, home, task, title, question, why: ("deferred until " + .hold_until)}],
      homes: [$mates[] | select(.kind != "call" and (.worker | not)) | {id: .home, remote, status_log: .kind}],
      workers: [$mates[] | select(.kind != "call" and .worker) | .home]}')
 

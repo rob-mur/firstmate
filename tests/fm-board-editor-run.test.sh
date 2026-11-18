@@ -3,9 +3,12 @@
 # calls as a board.md listing plus one card file per call, kept across runs.
 # A run never deletes a card. It records a saved answer once in the outbox,
 # appends an acknowledgement to that card, and moves its line from "With
-# captain" to "With firstmate". A card that fails the plain-language lint goes
-# to "Broken" and is reported once per card version. The captain's order in
-# "With captain" is kept. Every run reads a saved model (TUI_BOARD_CALLS_JSON),
+# captain" to "With firstmate". As on the real board, a call that asks no
+# question goes to "Broken" and is reported once per card version, and a hold
+# deferred to a future date is listed under "Charted". A plain-language lint
+# fault is only a "Check:" note: the card stays with the captain. An answer
+# already in the outbox is never recorded again, also after the board and
+# outbox move. The captain's order in "With captain" is kept. Every run reads a saved model (TUI_BOARD_CALLS_JSON),
 # a stub lint (TUI_BOARD_LINT) and a scratch EDITOR script, so nothing reads or
 # writes a real home.
 #
@@ -59,7 +62,7 @@ case "${ED_ACTION:-none}" in
 import re
 lines = open("board.md").read().splitlines()
 start = lines.index("## With captain") + 1
-end = lines.index("## With firstmate")
+end = lines.index("## Broken")
 idx = [i for i in range(start, end) if re.match(r"cards/", lines[i])]
 cards = [lines[i] for i in idx][::-1]
 for i, l in zip(idx, cards):
@@ -160,7 +163,8 @@ assert_line() {  # <whole line> <file> <msg>
 
 section_of() {  # <board.md> <key>  -> captain, firstmate or absent
   awk -v k="cards/$2.md" '
-    /^## With captain/ {s="captain"} /^## Broken/ {s="broken"} /^## With firstmate/ {s="firstmate"}
+    /^## With captain/ {s="captain"} /^## Broken/ {s="broken"} /^## Charted/ {s="charted"}
+    /^## With firstmate/ {s="firstmate"}
     /^## Not on/ {s=""}
     index($0, k) == 1 {print s; found=1; exit} END {if (!found) print "absent"}' "$1"
 }
@@ -300,46 +304,132 @@ broken_reports() {  # <outbox> <key>
   jq -s --arg k "$2" '[.[] | select(.kind == "broken" and .key == $k)] | length' "$1"
 }
 
-test_failing_card_goes_to_broken() {
+test_lint_fault_is_a_note_not_broken() {
   local dir card MODEL
   dir=$(fresh lint-fail)
   MODEL="$dir/model-wall.json"
   model "$MODEL" "$call_a" "$(printf '%s' "$call_c" | jq -c '.question = "Cut three tickets? WALL is long."')"
   MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
   card="$dir/board/cards/w-c.ask.md"
-  assert_equals broken "$(section_of "$dir/board/board.md" w-c.ask)" "a failing card is in Broken"
-  assert_equals captain "$(section_of "$dir/board/board.md" hold-a)" "a passing card is not"
-  assert_line "Broken: this card fails the plain-language check. Firstmate rewrites it." "$card" "the card says it is broken"
-  assert_line '- LENGTH (40 words, limit 25): "a WALL of text"' "$card" "the card lists its faults"
-  assert_line '    LENGTH (40 words, limit 25): "a WALL of text"' "$dir/board/board.md" "the board lists its faults"
-  grep -Eqx 'Received by firstmate at [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC - waiting on firstmate\.' "$card" ||
-    fail "the card gets the same acknowledgement as an answer"
-  assert_equals 1 "$(broken_reports "$dir/outbox.jsonl" w-c.ask)" "it is reported to firstmate"
-  assert_equals '["LENGTH (40 words, limit 25): \"a WALL of text\""]' \
-    "$(jq -c 'select(.kind == "broken") | .faults' "$dir/outbox.jsonl")" "the report holds the faults"
-  pass "a failing card goes to Broken with its faults, is reported, and is acknowledged"
+  assert_equals captain "$(section_of "$dir/board/board.md" w-c.ask)" "a real call that fails the lint stays with the captain"
+  assert_line 'Check: LENGTH (40 words, limit 25): "a WALL of text"' "$card" "the card notes the lint fault"
+  assert_no_regex "^Broken:|^Received by firstmate" "$card" "the card is not broken and not acknowledged"
+  grep -q '^cards/w-c\.ask\.md .* - check: 1 note$' "$dir/board/board.md" || fail "the board line counts the notes"
+  assert_absent "$dir/outbox.jsonl" "a lint fault reports nothing to firstmate"
+  pass "a lint fault on a real call is a Check note on the card; the card stays with the captain"
+}
+
+test_not_a_question_goes_to_broken() {
+  local dir card MODEL
+  dir=$(fresh not-question)
+  MODEL="$dir/model-statement.json"
+  model "$MODEL" "$call_a" "$(printf '%s' "$call_c" | jq -c '.question = "Compact the fire point."')"
+  MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
+  card="$dir/board/cards/w-c.ask.md"
+  assert_equals broken "$(section_of "$dir/board/board.md" w-c.ask)" "a call that asks no question is in Broken"
+  assert_equals captain "$(section_of "$dir/board/board.md" hold-a)" "a question is not"
+  assert_line "Broken: this card does not ask a question. Firstmate rewrites it." "$card" "the card says why"
+  assert_line "These cards do not ask a question. Firstmate rewrites them." "$dir/board/board.md" "the board says why"
+  grep -Eqx "$ACK_RE" "$card" || fail "the card gets the same acknowledgement as an answer"
+  assert_equals '["not a question"]' "$(jq -c 'select(.kind == "broken") | .faults' "$dir/outbox.jsonl")" \
+    "it is reported to firstmate as not a question"
+  pass "a call with no question mark goes to Broken, is reported, and is acknowledged"
 }
 
 test_no_duplicate_broken_report() {
   local dir card before MODEL
-  dir=$(fresh lint-dedupe)
-  MODEL="$dir/model-wall.json"
-  model "$MODEL" "$(printf '%s' "$call_c" | jq -c '.question = "Cut three tickets? WALL is long."')"
+  dir=$(fresh broken-dedupe)
+  MODEL="$dir/model-statement.json"
+  model "$MODEL" "$(printf '%s' "$call_c" | jq -c '.question = "Cut three tickets."')"
   MODEL="$MODEL" run_board "$dir" >/dev/null || fail "first run failed"
   card="$dir/board/cards/w-c.ask.md"
   before=$(cat "$card")
   MODEL="$MODEL" run_board "$dir" >/dev/null || fail "second run failed"
   assert_equals 1 "$(broken_reports "$dir/outbox.jsonl" w-c.ask)" "the same card version is reported once"
   assert_equals "$before" "$(cat "$card")" "the card keeps its acknowledgement"
-  model "$MODEL" "$(printf '%s' "$call_c" | jq -c '.question = "Cut four tickets? WALL is long."')"
+  model "$MODEL" "$(printf '%s' "$call_c" | jq -c '.question = "Cut four tickets."')"
   MODEL="$MODEL" run_board "$dir" >/dev/null || fail "third run failed"
-  assert_equals 2 "$(broken_reports "$dir/outbox.jsonl" w-c.ask)" "a changed card that still fails is a new report"
+  assert_equals 2 "$(broken_reports "$dir/outbox.jsonl" w-c.ask)" "a changed card that still asks nothing is a new report"
   model "$MODEL" "$call_c"
   MODEL="$MODEL" run_board "$dir" >/dev/null || fail "fourth run failed"
   assert_equals captain "$(section_of "$dir/board/board.md" w-c.ask)" "a fixed card goes to the captain"
   assert_no_regex "^Broken:|^Received by firstmate" "$card" "a fixed card is rebuilt clean"
   assert_equals 2 "$(broken_reports "$dir/outbox.jsonl" w-c.ask)" "a fixed card reports nothing"
   pass "each broken card version is reported once; a fixed card goes back to the captain"
+}
+
+test_deferred_hold_is_charted() {
+  local dir MODEL
+  dir=$(fresh charted)
+  MODEL="$dir/model-charted.json"
+  model "$MODEL" "$call_a"
+  jq '.skipped = [
+      {key:"cd.later", home:"cd", task:"cd-later", title:"cd-later", question:"Compact the fire point?",
+       why:"deferred until 2099-11-25"},
+      {key:"hold-x", home:"main", task:"hold-x", title:"hold-x", question:null, why:"answered, not yet closed"}]' \
+    "$MODEL" >"$MODEL.tmp" && mv "$MODEL.tmp" "$MODEL"
+  MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
+  awk '/^## Charted/ {s=1; next} /^## / {s=0} s' "$dir/board/board.md" | grep -qx -- \
+    '- cd.later  until 2099-11-25: Compact the fire point?  (cd)' || fail "a deferred hold is listed under Charted with its date"
+  grep -q '^# Captain.s calls: 1 with you, 0 broken, 1 charted, 0 with firstmate' "$dir/board/board.md" ||
+    fail "the header counts the charted hold"
+  awk '/^## Not on the board now/ {s=1} s' "$dir/board/board.md" | grep -q 'cd.later' &&
+    fail "a charted hold is not also under Not on the board now"
+  awk '/^## Not on the board now/ {s=1} s' "$dir/board/board.md" | grep -q 'hold-x: answered' ||
+    fail "other skipped entries stay under Not on the board now"
+  assert_absent "$dir/board/cards/cd.later.md" "a charted hold gets no card while it waits"
+  pass "a hold deferred to a future date is listed under Charted, not with the captain"
+}
+
+test_moved_board_and_outbox_record_nothing_new() {
+  local dir moved
+  dir=$(fresh moved)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  ED_ACTION=answer ED_KEY=hold-a ED_TEXT=$'Drop them.\n\n    a. keep the pages\nThen ship.' run_board "$dir" >/dev/null ||
+    fail "answer run failed"
+  ED_ACTION=answer ED_KEY=w-c.ask ED_TEXT="Yes." run_board "$dir" >/dev/null || fail "second answer run failed"
+  ED_ACTION=answer ED_KEY=hold-a ED_TEXT="Ship Friday." run_board "$dir" >/dev/null || fail "follow-up run failed"
+  assert_equals 3 "$(jq -s '[.[] | select(.kind == "answer")] | length' "$dir/outbox.jsonl")" "three answers to start"
+  moved="$TMP_ROOT/moved-to"
+  mkdir -p "$moved"
+  cp -r "$dir/board" "$moved/board"
+  cp "$dir/outbox.jsonl" "$moved/outbox.jsonl"
+  cp "$dir/model.json" "$dir/ed.sh" "$dir/lint.sh" "$moved/"
+  run_board "$moved" >/dev/null || fail "run at the new place failed"
+  run_board "$moved" >/dev/null || fail "second run at the new place failed"
+  assert_equals "$(cat "$dir/outbox.jsonl")" "$(cat "$moved/outbox.jsonl")" "a moved board and outbox record nothing new"
+  # The same move without the run's baselines (as an older board had none) also records nothing new.
+  rm -rf "$moved/board/.seen"
+  run_board "$moved" >/dev/null || fail "run without baselines failed"
+  assert_equals "$(cat "$dir/outbox.jsonl")" "$(cat "$moved/outbox.jsonl")" "a board with no baselines records nothing new"
+  pass "a board and outbox copied to a new place record no answer again"
+}
+
+test_old_answer_without_baseline_not_recorded_again() {
+  local dir card MODEL
+  dir=$(fresh old-answer)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  card="$dir/board/cards/cd.key-b.md"
+  # An older run recorded this answer without the blank line the captain left in it, and kept no baseline.
+  printf '%s\n' "Two things: do we want lavish pages?" "" "    a. drop them, use markdown" >>"$card"
+  rm -f "$dir/board/.seen/cd.key-b.md" "$dir/board/.seen/cd.key-b.json"
+  jq -cn '{at:"2026-11-18T12:53:00Z", prototype:true, kind:"answer", key:"cd.key-b", home:"cd", task:"cd-b",
+           decision_key:"key-b", question:"Where should the version go?",
+           text:"Two things: do we want lavish pages?\n    a. drop them, use markdown"}' >"$dir/outbox.jsonl"
+  MODEL="$dir/model-gone.json"
+  model "$MODEL" "$call_a"
+  MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
+  assert_equals 1 "$(answers "$dir/outbox.jsonl" cd.key-b)" "the answer already in the outbox is not recorded again"
+  assert_equals firstmate "$(section_of "$dir/board/board.md" cd.key-b)" "the answered card stays with firstmate"
+  grep -q '^cards/cd\.key-b\.md  Where should the version go?  (cd)' "$dir/board/board.md" ||
+    fail "its line names the question and home from the recorded answer"
+  # A later note under the acknowledgement is still a new answer, with its home and task.
+  printf '%s\n' "Ship Friday." >>"$card"
+  MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the follow-up run failed"
+  assert_equals '{"text":"Ship Friday.","home":"cd","task":"cd-b"}' \
+    "$(jq -c 'select(.kind == "answer") | {text, home, task}' "$dir/outbox.jsonl" | tail -n 1)" \
+    "a new note is recorded with the home and task of the earlier answer"
+  pass "an old card's answer that is already in the outbox is not recorded again"
 }
 
 test_missing_lint_is_unchecked_not_passed() {
@@ -362,9 +452,26 @@ test_real_lint_flags_a_long_sentence() {
   MODEL="$MODEL" LINT="$real" run_board "$dir" >/dev/null || fail "the run failed"
   out=$(sh "$real" </dev/null 2>&1 || true)
   case "$out" in PLAINSPEAK\ UNCHECKED*) pass "skip: the plainspeak lint did not run"; return ;; esac
-  assert_equals broken "$(section_of "$dir/board/board.md" w-c.ask)" "a long sentence fails the real lint"
-  assert_equals captain "$(section_of "$dir/board/board.md" hold-a)" "short plain sentences pass the real lint"
-  pass "the real plainspeak lint marks a long sentence broken"
+  assert_equals captain "$(section_of "$dir/board/board.md" w-c.ask)" "a long sentence leaves the card with the captain"
+  grep -q '^Check: LENGTH' "$dir/board/cards/w-c.ask.md" || fail "a long sentence fails the real lint as a note"
+  assert_no_regex '^Check:' "$dir/board/cards/hold-a.md" "short plain sentences pass the real lint"
+  pass "the real plainspeak lint notes a long sentence on its card"
+}
+
+test_real_lint_reads_wrapped_options_unwrapped() {
+  local dir real=$HOME/.claude/skills/plainspeak-publish/scripts/lint MODEL q
+  [ -f "$real" ] || { pass "skip: the plainspeak lint is not installed"; return; }
+  case "$(sh "$real" </dev/null 2>&1 || true)" in PLAINSPEAK\ UNCHECKED*) pass "skip: the plainspeak lint did not run"; return ;; esac
+  dir=$(fresh lint-wrap)
+  # One option of 25 words, the limit: wrapped on the card it spans two lines, and its letter is not a word.
+  q="Which way should the runner image go? (a) keep the image on the old host until the new one has run every job in the full test suite for one whole working week; (b) move it now."
+  MODEL="$dir/model-wrap.json"
+  model "$MODEL" "$(printf '%s' "$call_c" | jq -c --arg q "$q" '.question = $q')"
+  MODEL="$MODEL" LINT="$real" run_board "$dir" >/dev/null || fail "the run failed"
+  [ "$(grep -c '^  a) ' "$dir/board/cards/w-c.ask.md")" = 1 ] && grep -q '^     ' "$dir/board/cards/w-c.ask.md" ||
+    fail "the option wraps on the card"
+  assert_no_regex 'LENGTH' "$dir/board/cards/w-c.ask.md" "a wrapped option of 25 words passes"
+  pass "the lint reads a wrapped option as one item without its letter"
 }
 
 test_card_with_firstmate_stays_after_its_call_leaves() {
@@ -545,10 +652,15 @@ fm_test_run \
   test_captain_order_is_kept \
   test_card_with_firstmate_stays_after_its_call_leaves \
   test_passing_card_stays_with_captain \
-  test_failing_card_goes_to_broken \
+  test_lint_fault_is_a_note_not_broken \
+  test_not_a_question_goes_to_broken \
   test_no_duplicate_broken_report \
+  test_deferred_hold_is_charted \
+  test_moved_board_and_outbox_record_nothing_new \
+  test_old_answer_without_baseline_not_recorded_again \
   test_missing_lint_is_unchecked_not_passed \
   test_real_lint_flags_a_long_sentence \
+  test_real_lint_reads_wrapped_options_unwrapped \
   test_one_card_and_unknown_key \
   test_page_converts_to_markdown_linked_from_card \
   test_page_comment_recorded_once_on_its_block \
