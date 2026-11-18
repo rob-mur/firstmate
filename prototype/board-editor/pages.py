@@ -430,6 +430,33 @@ def block_at(lines: list[str], index: int) -> str:
     return "top"
 
 
+# Text the captain marks as theirs, anywhere in a card or a page: <!--captain: ...-->, on one line
+# or over several. The editor's \c (normal mode) and Ctrl-g c (insert mode) write an empty one.
+# An empty marker says nothing, so it is not the captain's text, and a marker never runs on into
+# another comment (an unfinished one would otherwise take the text up to the next "-->").
+ANY_CAPTAIN = re.compile(r"<!--\s*captain:((?:(?!<!--).)*?)-->", re.S | re.I)
+CAPTAIN = re.compile(r"<!--\s*captain:(\s*(?!-->|<!--)\S(?:(?!<!--).)*?)-->", re.S | re.I)
+
+
+def captain_words(text: str) -> list[str]:
+    """What each captain marker in a text says, without the marker itself."""
+    return [w for m in CAPTAIN.finditer(text) if (w := " ".join(m.group(1).split()))]
+
+
+def without_captain_marks(text: str) -> str:
+    """The text with its captain markers, empty ones too, removed, keeping its line breaks so line
+    numbers hold."""
+    return ANY_CAPTAIN.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
+def captain_lines(lines: list[str]) -> set[int]:
+    """The indexes of the lines a captain marker covers."""
+    text, out = "\n".join(lines), set()
+    for m in CAPTAIN.finditer(text):
+        out |= set(range(text.count("\n", 0, m.start()), text.count("\n", 0, m.end()) + 1))
+    return out
+
+
 def marked(line: str) -> bool:
     return line.lstrip().startswith(MARKER)
 
@@ -461,17 +488,22 @@ class Group:
 def captain_groups(base: list[str] | None, now: list[str], is_ack) -> list[Group]:
     """The captain's text in a page: each run of lines added or changed since the baseline.
 
-    With no baseline, only lines starting with the marker count. Blank lines at the
-    edges of a run and acknowledgement lines are not part of it.
+    With no baseline, only lines starting with the marker (//) or holding a captain marker
+    (<!--captain: ...-->) count. Blank lines at the edges of a run and acknowledgement lines are
+    not part of it. A changed line whose only change is a captain marker is that marker, not a
+    rewrite of the line.
     """
     spans: list[tuple[int, int, list[str]]] = []
     if base is None:
-        fence = in_fence(now)
+        fence, mine = in_fence(now), captain_lines(now)
+
+        def ours(i: int) -> bool:
+            return i in mine or (marked(now[i]) and not fence[i])
         i = 0
         while i < len(now):
-            if marked(now[i]) and not fence[i]:
+            if ours(i):
                 j = i
-                while j < len(now) and marked(now[j]) and not fence[j]:
+                while j < len(now) and ours(j):
                     j += 1
                 spans.append((i, j, []))
                 i = j
@@ -489,7 +521,11 @@ def captain_groups(base: list[str] | None, now: list[str], is_ack) -> list[Group
         while j2 > j1 and (not now[j2 - 1].strip() or is_ack(now[j2 - 1])):
             j2 -= 1
         if j1 < j2:
-            groups.append(Group(j1, j2, now[j1:j2], was))
+            lines = now[j1:j2]
+            clean = [l.rstrip() for l in without_captain_marks("\n".join(lines)).splitlines() if l.strip()]
+            if was and clean == [l.rstrip() for l in was]:
+                lines, was = [m.group(0) for m in CAPTAIN.finditer("\n".join(lines))], []
+            groups.append(Group(j1, j2, lines, was))
     return groups
 
 
@@ -508,6 +544,7 @@ def interpret(text: str, picks: list[dict]) -> dict | None:
     """A letter on the first line picks an option of the block's first radio group."""
     if not picks:
         return None
+    text = without_captain_marks(text).strip()
     m = re.match(r"^\s*\(?([a-z])(?:\)|[.:,]|\s*$)", text.splitlines()[0] if text else "", re.I)
     options = picks[0]["options"]
     if m and LETTERS.index(m.group(1).lower()) < len(options):
@@ -523,6 +560,7 @@ HELP = [
     "- Write on a new line anywhere. Each line you add or change is a comment on the part above it.",
     "- To pick an option, write its letter on its own line (like b).",
     "- You can also start a line with two slashes (//) to mark it as yours.",
+    "- To mark text as yours inside a line, press \\c (or Ctrl-g c while you type): it writes <!--captain:  -->.",
     "- Save with :w. Close the tab with :q.",
 ]
 # Where the captain writes a note: a heading so it stands out in the editor. A page an older run

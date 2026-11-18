@@ -26,23 +26,36 @@ rebuilds the file and carries every comment over to the same place.
 
 Cards are built only from the source records, with no text of the run's own
 beyond fixed labels: the question is laid out as a heading, bullets and a
-labelled option list, never reworded. As on the real board, a call whose text
-has no question mark (and no options) is not a question: it goes to "Broken"
-with that line at its top, and the run reports it to firstmate once per card
-version and appends the acknowledgement line. Every other call stays "With
-captain". Its source text is checked with the plainspeak lint (TUI_BOARD_LINT,
-default the plainspeak-publish skill's scripts/lint), unwrapped, one sentence
-or list item per paragraph; any faults are a "Check:" note at the card's top,
+labelled option list, never reworded. A second mate's hold whose call record
+has no options or links gets them from the "Captain hold option:" and "Captain
+hold link:" lines of its row in that home's backlog. As on the real board, a
+call whose text has no question mark (and no options) is not a question: it
+goes to "Broken" with that line at its top. A card that names a PR, MR, issue,
+report or review it does not link (a numbered reference needs a web address
+with that number; a report or review needs any link the card opens) also goes
+to "Broken". The board line says why, and the run reports it to firstmate once
+per card version and appends the acknowledgement line. Every other call stays
+"With captain". Its source text is checked with the plainspeak lint
+(TUI_BOARD_LINT, default the plainspeak-publish skill's scripts/lint),
+unwrapped, one sentence or list item per paragraph; any faults go to
+notes/<key>.md, which the card's board line names, never into the card and
 never a reason to move it. When the lint is not installed, the board says no
-card has a check. A captain hold deferred to a future date (the source lists it
+card has a check.
+
+Text the captain marks <!--captain: ...--> anywhere in a card or a page is
+theirs: the run records it verbatim once, with its words (without the marker)
+as "captain_words", and a marker put into a line of the card or page is only
+the marker, not a rewrite of the line. In vim or nvim, \\c (normal mode) and
+Ctrl-g c (insert mode) write an empty marker with the cursor inside it. A captain hold deferred to a future date (the source lists it
 as "deferred until <date>") is listed under "Charted" until that date, as the
 real board charts it.
 
 A report a card or page cites as a path (data/<task>/report.md, in the home
 the card comes from or the home the text names just before the path, such as
 "the cd second mate's data/x/report.md") is copied to
-reports/<home>/<path>, with the lint's notes under each of its headings, and
-the card's "Links:" lists it; a report's own cited reports are copied too. The
+reports/<home>/<path> as written, with one line at its top that names the
+lint's notes on it, in notes/reports/<home>/<path> by heading, and the card's
+"Links:" lists it; a report's own cited reports are copied too. The
 lint's notes on cards and pages also flag a hedged figure such as "about £0",
 "roughly 5" or "~10%", also when the lint is not installed.
 
@@ -70,6 +83,7 @@ file, the backlog or a worker. Standard library only.
 
 from __future__ import annotations
 
+import collections
 import difflib
 import hashlib
 import html
@@ -99,6 +113,9 @@ PAGES = BOARD / "pages"
 # A report a card or page cites (data/<task>/report.md in the home that owns it) is copied, with the
 # lint's notes, to reports/<home>/<path>: "main" is TUI_BOARD_HOME, a secondmate its registered home.
 REPORTS = BOARD / "reports"
+# The lint's notes: notes/<key>.md for a card and notes/reports/<home>/<path> for a report, kept out
+# of the text they are about.
+NOTES = BOARD / "notes"
 # Per card: <key>.md is the last text the run wrote or recorded, <key>.json its source record,
 # and <key>.answered marks that the captain answered it.
 SEEN = BOARD / ".seen"
@@ -131,6 +148,64 @@ def load_model() -> dict:
     if proc.returncode != 0:
         raise SystemExit(f"fm-captain-calls.sh failed (exit {proc.returncode}):\n{proc.stderr.strip()}")
     return json.loads(proc.stdout)
+
+
+# ---------------------------------------------------------------- a secondmate's own hold lines
+
+# bin/fm-captain-calls.sh gives a secondmate's call no options and only the links in its status
+# note, though the mate's backlog row holds "Captain hold option:" and "Captain hold link:" lines as
+# a main hold does. The run reads them from a local mate's own backlog, read-only, with the same
+# patterns the main backlog is read with.
+ROW = re.compile(r"^[-*]\s+\[([ xX])\]\s+(\S+)\s+-\s+(.*)$")
+HOLD_OPTION = re.compile(r"^Captain hold option:\s*(?P<v>[^=\s]+)(?:=(?P<l>.+))?$")
+HOLD_LINK = re.compile(r"^Captain hold link:\s*(?P<t>\S+)(?:\s+(?P<l>.*))?$")
+CAPTAIN_HOLD = re.compile(r"[(,]\s*hold-kind:\s*captain\s*[,)]")
+ROW_URL = re.compile(r"https?://[^\s<>\"()]+")
+
+
+def backlog_holds(path: Path) -> dict[str, dict]:
+    """Each open captain hold row of a backlog file, by task id: {"options": [...], "links": [...]}."""
+    rows: dict[str, dict] = {}
+    section, row = None, None
+    for l in read_lines(path) or []:
+        if l.startswith("##"):
+            section, row = l.lstrip("#").strip(), None
+        elif section is None:
+            continue
+        elif m := ROW.match(l):
+            row = None
+            if m.group(1) == " " and section != "Done" and CAPTAIN_HOLD.search(m.group(3)):
+                links = [{"url": re.sub(r"[.,;:?!]+$", "", u), "label": ""} for u in ROW_URL.findall(m.group(3))]
+                row = rows.setdefault(m.group(2), {"options": [], "links": links})
+        elif row is not None and re.match(r"^\s+\S", l):
+            s = l.strip()
+            if m := HOLD_OPTION.match(s):
+                row["options"].append({"value": m.group("v"), "label": (m.group("l") or m.group("v")).strip()})
+            elif m := HOLD_LINK.match(s):
+                row["links"].append({"url": m.group("t"), "label": (m.group("l") or "").strip()})
+    return rows
+
+
+def with_mate_holds(cards: list[dict]) -> None:
+    """Give each local secondmate call the options and links of its hold row in the mate's backlog.
+
+    Options are added only when the call has none and its text lists none inline; a link is added
+    when the call does not have it yet.
+    """
+    known, rows = homes(), {}
+    for card in cards:
+        mate = card.get("home")
+        if card.get("source") != "secondmate" or card.get("remote") or not card.get("task") or mate not in known:
+            continue
+        if mate not in rows:
+            rows[mate] = backlog_holds(known[mate] / "data" / "backlog.md")
+        hold = rows[mate].get(card["task"])
+        if not hold:
+            continue
+        if not card.get("options") and not any(b[0] == "option" for b in layout(question(card))[1]):
+            card["options"] = hold["options"]
+        have = {l.get("url") for l in card.get("links") or []}
+        card["links"] = list(card.get("links") or []) + [l for l in hold["links"] if l["url"] not in have]
 
 
 # ---------------------------------------------------------------- text layout
@@ -214,6 +289,17 @@ def item(text: str, recommended: bool = False) -> str:
     return text if text.endswith(("?", "!")) else text + "."
 
 
+OPTION_PREFIX = re.compile(r"^\s*\(([a-z])(,\s*recommended)?\)\s*", re.I)
+
+
+def option_item(o: dict) -> str:
+    """An option's label as a list item. A label that starts with its own letter, "(a)" or
+    "(a, recommended)", as a secondmate's hold lines write it, drops the letter the list already shows."""
+    label = o.get("label") or o.get("value") or ""
+    m = OPTION_PREFIX.match(label)
+    return item(label[m.end():], bool(m.group(2))) if m else item(label)
+
+
 def render_blocks(blocks: list[tuple]) -> list[str]:
     out: list[str] = []
     prev = None
@@ -260,7 +346,7 @@ def card_content(card: dict, settled: bool) -> list[str]:
     if options:
         out += ["", "Options:"]
         for letter, o in zip(LETTERS, options):
-            out += wrap(item(f"{o.get('label') or o.get('value')}"), f"  {letter}) ", "     ")
+            out += wrap(option_item(o), f"  {letter}) ", "     ")
     return out
 
 
@@ -283,7 +369,7 @@ def lint_text(card: dict, settled: bool) -> list[str]:
             parts.append(item(b[2]))
         else:  # a header ends with ":", which would join it to the next item
             parts.append(item(b[1].rstrip(":")) if b[0] == "header" else b[1])
-    parts += [item(f"{o.get('label') or o.get('value')}") for o in card.get("options") or []]
+    parts += [option_item(o) for o in card.get("options") or []]
     return [squash(p) for p in parts if squash(p)]
 
 
@@ -333,25 +419,76 @@ def version(content: list[str]) -> str:
 
 
 NOT_A_QUESTION = "Broken: this card does not ask a question. Firstmate rewrites it."
+NOT_A_QUESTION_REASON = "not a question"
+NO_LINK = "no link for "
+
+# A card must carry what it names. A PR, MR or issue named by number ("PR 885", "MR !12", "issue 7",
+# "#810") needs a web address with that number among the card's links; a report or review named as
+# a word needs a link the card can open (a web address, a page or a report copy). A word inside a
+# path ("data/x/report.md") is not a name: a cited path is a report that must be found.
+REFERENCE = re.compile(
+    r"\b(?P<kind>PRs?|MRs?|pull requests?|merge requests?|issues?)\s*[#!]?(?P<num>\d+)\b"
+    r"|(?<![\w&/#])#(?P<bare>\d+)\b"
+    r"|(?<![\w/.~-])(?P<doc>reports?|reviews?)(?![\w/-]|\.\w)", re.I)
+LINKED_NUMBER = re.compile(r"/(?:pulls?|issues|merge_requests)/(\d+)(?!\d)")
 
 
-def render_card(card: dict, settled: bool, content: list[str], faults: list[str], broken: bool = False,
+def card_urls(card: dict) -> list[str]:
+    """Every web address the record gives the card: its links, its PRs and the ones in its question."""
+    urls = [l.get("url") or "" for l in card.get("links") or []] + [p.get("url") or "" for p in card.get("prs") or []]
+    return list(dict.fromkeys(u for u in urls + layout(question(card))[2] if u))
+
+
+def unlinked(card: dict, reports: dict) -> list[str]:
+    """What the card names but does not link, as written in it ("PR 885", "#810", "a report")."""
+    urls = card_urls(card)
+    numbers = {n for u in urls for n in LINKED_NUMBER.findall(u)}
+    pages_found = [m for u in urls if (m := PAGE_LINK.match(u)) and page_source(m.group(1))[0].is_file()]
+    cites = (reports.get("cards") or {}).get(card["key"], [])
+    found = [r for r in cites if (reports.get("reports") or {}).get(r) is not None]
+    openable = bool(found or pages_found or any(u.startswith(("http://", "https://")) for u in urls))
+    out: list[str] = []
+    for m in REFERENCE.finditer(" ".join(lint_text(card, False))):
+        if m.group("doc"):
+            word = m.group("doc").lower()
+            name = word if word.endswith("s") else f"a {word}"
+            missing = not openable
+        else:
+            num = m.group("num") or m.group("bare")
+            name = squash(m.group(0))
+            missing = num not in numbers
+        if missing and name.lower() not in (o.lower() for o in out):
+            out.append(name)
+    out += [rel for home, rel in cites if (home, rel) not in found and rel not in out]
+    return out
+
+
+def broken_lines(reasons: list[str]) -> list[str]:
+    """The lines at a broken card's top that say why it is broken."""
+    out = [NOT_A_QUESTION] if NOT_A_QUESTION_REASON in reasons else []
+    names = [r[len(NO_LINK):] for r in reasons if r.startswith(NO_LINK)]
+    if names:
+        listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        out += wrap(f"Broken: this card names {listed} but does not link {'it' if len(names) == 1 else 'them'}."
+                    " Firstmate rewrites it.")
+    return out
+
+
+def render_card(card: dict, settled: bool, content: list[str], reasons: list[str] | None = None,
                 reports: list[str] | None = None) -> list[str]:
-    """One card: an id line, a broken line or the lint's notes, the question, links, then the answer area.
+    """One card: an id line, why it is broken if it is, the question, links, then the answer area.
 
-    Lint faults are a note only: the card is still a call for the captain.
+    The lint's notes are never in the card: they are in notes/<key>.md, named on the board line.
     """
     repo = f" | repo: {card['repo']}" if card.get("repo") else ""
     out = [f"<!-- card: {card['key']} | from: {origin(card)}{repo} -->", ""]
-    if broken:
-        out += [NOT_A_QUESTION, ""]
-    if faults:
-        out += [l for f in faults for l in wrap(f"Check: {f}", "", "  ")] + [""]
+    if reasons:
+        out += broken_lines(reasons) + [""]
     out += content
     _, blocks, urls = layout(question(card))
     states = {p["url"]: p["state"] for p in card.get("prs") or []}
     links = [(l.get("label") or "", l.get("url")) for l in card.get("links") or []]
-    links += [("", u) for u in urls if u not in {l[1] for l in links}]
+    links += [("", u) for u in dict.fromkeys(urls + list(states)) if u not in {l[1] for l in links}]
     if links or reports:
         out += ["", "Links:"]
         for label, url in links:
@@ -398,16 +535,44 @@ def is_answer_mark(line: str) -> bool:
     return line.strip() in (ANSWER_MARK, OLD_ANSWER_MARK)
 
 
+def marks_by_line(lines: list[str]) -> list[tuple[int, str]]:
+    """Each captain marker in a file, verbatim, with the index of the line it starts on."""
+    text = "\n".join(lines)
+    return [(text.count("\n", 0, m.start()), m.group(0)) for m in pages.CAPTAIN.finditer(text)]
+
+
 def captain_text(key: str) -> str:
-    """Text the captain added to a card since the run last wrote or recorded it."""
+    """Text the captain added to a card since the run last wrote or recorded it.
+
+    A captain marker (<!--captain: ...-->) counts anywhere in the card, verbatim, and the line it
+    sits in does not count for it: a marker put into a line of the card is the marker only.
+    """
     now = read_lines(card_path(key)) or []
     base = read_lines(SEEN / f"{key}.md")
+    clean = pages.without_captain_marks("\n".join(now)).split("\n")
+    marks = marks_by_line(now)
     if base is None:  # a card without a baseline (an older run's): only text below the answer line counts
-        at = next((i for i, l in enumerate(now) if is_answer_mark(l)), None)
-        new = now[at + 1:] if at is not None else []
+        at = next((i for i, l in enumerate(clean) if is_answer_mark(l)), None)
+        new = list(range(at + 1, len(clean))) if at is not None else []
     else:
-        new = added_lines(base, now)
-    return "\n".join(l for l in new if not ACK.match(l)).strip()
+        old = [l.rstrip() for l in pages.without_captain_marks("\n".join(base)).split("\n")]
+        sm = difflib.SequenceMatcher(a=old, b=[l.rstrip() for l in clean], autojunk=False)
+        new = [j for tag, _, _, j1, j2 in sm.get_opcodes() if tag in ("insert", "replace") for j in range(j1, j2)]
+        seen = collections.Counter(m for _, m in marks_by_line(base))
+        fresh = []
+        for at, m in marks:
+            if seen[m]:
+                seen[m] -= 1
+            else:
+                fresh.append((at, m))
+        marks = fresh
+    parts: dict[int, list[str]] = {}
+    for j in new:
+        if clean[j].strip() and not ACK.match(clean[j]):
+            parts.setdefault(j, []).append(clean[j].rstrip())
+    for at, m in marks:
+        parts.setdefault(at, []).append(m)
+    return "\n".join(" ".join(parts[j]).strip() for j in sorted(parts)).strip()
 
 
 def outbox_records(kind: str) -> list[dict]:
@@ -441,11 +606,14 @@ def interpret(card: dict, text: str) -> dict:
     record = {"kind": "answer", "key": card["key"], "home": card.get("home"), "task": card.get("task"),
               "decision_key": card.get("decision_key"), "question": headline(card, 300), "text": text}
     # "b", "b)", "b." or "b, but ..." picks b; a sentence that starts "A worker ..." does not.
-    m = re.match(r"^\s*\(?([a-z])(?:\)|[.:,]|\s*$)", text, re.I)
+    # Captain markers are left out of the pick and carried, without the marker, as the captain's words.
+    m = re.match(r"^\s*\(?([a-z])(?:\)|[.:,]|\s*$)", pages.without_captain_marks(text).strip(), re.I)
     if m and LETTERS.index(m.group(1).lower()) < len(options):
         o = options[LETTERS.index(m.group(1).lower())]
         record["option"] = o.get("value")
         record["option_label"] = o.get("label")
+    if words := pages.captain_words(text):
+        record["captain_words"] = words
     return record
 
 
@@ -509,30 +677,52 @@ def without_acks(lines: list[str] | None) -> list[str]:
     return kept
 
 
-def build(live: dict, settled: set[str], reports: dict | None = None) -> tuple[dict[str, list[str]], bool]:
+def notes_path(key: str) -> Path:
+    return NOTES / f"{key}.md"
+
+
+def write_notes(key: str, faults: list[str]) -> None:
+    """The lint's notes on a card, in their own file so they never read as the card's text."""
+    path = notes_path(key)
+    if not faults:
+        path.unlink(missing_ok=True)
+        return
+    out = [f"<!-- notes: {key} | the plain-language check on cards/{key}.md -->", "",
+           f"# Check notes on cards/{key}.md", "",
+           "- These notes are for firstmate, who rewrites the card. They are not part of the card.",
+           "- Close this tab with :q.", ""]
+    write_lines(path, out + [l for f in faults for l in wrap(f, "- ", "  ")])
+
+
+def build(live: dict, settled: set[str], reports: dict | None = None) \
+        -> tuple[dict[str, list[str]], dict[str, list[str]], bool]:
     """Build or rebuild every card not yet answered from its source record, and lint it.
 
-    Returns the cards that do not ask a question (broken), the lint's notes on
-    the others, and whether the lint ran. A card is rewritten only when its
-    built text changed, so a broken card keeps its acknowledgement until its
-    source changes.
+    Returns why each broken card is broken (it asks no question, or it names a PR, MR, issue,
+    report or review it does not link), the lint's notes on the others, and whether the lint ran.
+    A card is rewritten only when its built text changed, so a broken card keeps its
+    acknowledgement until its source changes.
     """
-    broken: set[str] = set()
+    broken: dict[str, list[str]] = {}
     notes: dict[str, list[str]] = {}
     checked = True
     for key, card in live.items():
         if answered(key):
             continue  # the captain wrote in it: leave it alone
         content = card_content(card, key in settled)
-        bad = key not in settled and not is_question(card)
-        faults = [] if key in settled or bad else lint(lint_text(card, False))
+        reasons: list[str] = []
+        if key not in settled:
+            reasons = [NOT_A_QUESTION_REASON] if not is_question(card) else []
+            reasons += [NO_LINK + r for r in unlinked(card, reports or {})]
+        faults = [] if key in settled or reasons else lint(lint_text(card, False))
         if faults is None:
             checked, faults = False, []
-        if bad:
-            broken.add(key)
+        if reasons:
+            broken[key] = reasons
         if faults:
             notes[key] = faults
-        new = render_card(card, key in settled, content, faults, bad, report_lines(card, reports or {}))
+        write_notes(key, faults)
+        new = render_card(card, key in settled, content, reasons, report_lines(card, reports or {}))
         if without_acks(read_lines(card_path(key))) != without_acks(new):
             write_lines(card_path(key), new)
             write_lines(SEEN / f"{key}.md", new)
@@ -540,8 +730,8 @@ def build(live: dict, settled: set[str], reports: dict | None = None) -> tuple[d
     return broken, notes, checked
 
 
-def report_broken(live: dict, broken: set[str], now: str) -> list[dict]:
-    """Report each version of a card that asks no question to firstmate once, and acknowledge it in the card."""
+def report_broken(live: dict, broken: dict[str, list[str]], now: str) -> list[dict]:
+    """Report each version of a broken card to firstmate once, with why, and acknowledge it in the card."""
     records, already = [], recorded("broken", "version")
     for key in [k for k in live if k in broken]:
         card = live[key]
@@ -550,7 +740,7 @@ def report_broken(live: dict, broken: set[str], now: str) -> list[dict]:
             continue
         records.append({"kind": "broken", "key": key, "home": card.get("home"), "task": card.get("task"),
                         "decision_key": card.get("decision_key"), "question": headline(card, 300),
-                        "version": v, "faults": ["not a question"]})
+                        "version": v, "faults": broken[key]})
         acknowledge(key, now)
     return records
 
@@ -602,6 +792,8 @@ def collect_pages(now: str) -> list[dict]:
                      "after": pages.agent_line_above(lines, g.start, skip)}
                 if g.was:
                     r["was"] = "\n".join(g.was)
+                if words := pages.captain_words(text):
+                    r["captain_words"] = words
                 info = (saved.get("blocks") or {}).get(block) or {}
                 if pick := pages.interpret(text, info.get("picks") or []):
                     r["pick"] = pick
@@ -780,15 +972,13 @@ def find_reports(cards: list[dict], page_ids: list[str]) -> dict:
 
 
 def report_lines(card: dict, reports: dict) -> list[str]:
-    """A card's links to the reports it cites, with their check notes or why one does not open."""
+    """A card's links to the reports it cites, or why one does not open."""
     out = []
     for home, rel in (reports.get("cards") or {}).get(card["key"], []):
         if (reports.get("reports") or {}).get((home, rel)) is None:
             out.append(f"- Report ({home}): {rel} - not found in the {home} home")
             continue
-        n = len([f for fs in (report_record(home, rel).get("faults") or {}).values() for f in fs])
-        note = f" - check: {n} note{'s' if n != 1 else ''}" if n else ""
-        out.append(f"- Report ({home}): {report_rel(home, rel)}{note}")
+        out.append(f"- Report ({home}): {report_rel(home, rel)}")
     return out
 
 
@@ -831,11 +1021,18 @@ def report_record(home: str, rel: str) -> dict:
     return json.loads(saved.read_text()) if saved.exists() else {}
 
 
-def build_reports(reports: dict) -> None:
-    """Copy each cited report to reports/<home>/<path>, with the lint's notes under each section heading.
+def report_notes_rel(home: str, rel: str) -> str:
+    """The file of the lint's notes on a report, relative to the board folder."""
+    return f"notes/{report_rel(home, rel)}"
 
-    The page is rebuilt when the report or this code changes. It is a copy to read: text written in
-    it is not recorded, and the next rebuild replaces it.
+
+def build_reports(reports: dict) -> None:
+    """Copy each cited report to reports/<home>/<path> as it is written, and the lint's notes on it,
+    by section, to notes/reports/<home>/<path>.
+
+    The copy has one line at its top that names the notes file, so the notes never break up the
+    report's text. Both are rebuilt when the report or this code changes. The copy is to read:
+    text written in it is not recorded, and the next rebuild replaces it.
     """
     code = Path(__file__).read_text() + (HERE / "pages.py").read_text()
     for (home, rel), src in (reports.get("reports") or {}).items():
@@ -843,7 +1040,7 @@ def build_reports(reports: dict) -> None:
             continue
         text = src.read_text(errors="replace")
         source = version([text, code, LINT.read_text() if LINT.is_file() else ""])
-        path = BOARD / report_rel(home, rel)
+        path, notes = BOARD / report_rel(home, rel), BOARD / report_notes_rel(home, rel)
         if report_record(home, rel).get("source") == source and path.exists():
             continue
         sections = report_sections(text.splitlines())
@@ -860,22 +1057,28 @@ def build_reports(reports: dict) -> None:
                "",
                "- PROTOTYPE: this is a copy of the report to read. Text written here is not recorded.",
                "- Press Enter on a link to open it: a web address opens in the browser, a report opens here.",
-               "- Close this tab with :q.",
-               ""]
+               "- Close this tab with :q."]
         if faults is None:
-            out += ["The plain-language check did not run on this report.", ""]
+            out.append("- The plain-language check did not run on this report.")
         elif n:
-            out += [f"Check: {n} note{'s' if n != 1 else ''} on this report, under the parts they are about.", ""]
+            out.append(f"- The plain-language check has {n} note{'s' if n != 1 else ''} on this report,"
+                       f" in {report_notes_rel(home, rel)}")
         else:
-            out += ["Check: this report passes the plain-language check.", ""]
-        for i, (heading, body) in enumerate(sections):
-            notes = [l for f in (faults or {}).get(str(i), []) for l in wrap(f"Check: {f}", "> ", "> ")]
-            if heading:
-                out += [heading] + notes
-            elif notes:
-                out += notes + [""]
-            out += body
-        write_lines(path, out)
+            out.append("- This report passes the plain-language check.")
+        write_lines(path, out + ["", *text.splitlines()])
+        if n:
+            listing = [f"<!-- notes: {rel} | home: {home} | the plain-language check on {report_rel(home, rel)} -->",
+                       "", f"# Check notes on {report_rel(home, rel)}", "",
+                       "- These notes are for firstmate. They are not part of the report.",
+                       "- Each heading is the part of the report the notes under it are about.",
+                       "- Close this tab with :q."]
+            for i, (heading, _) in enumerate(sections):
+                if f := (faults or {}).get(str(i)):
+                    title = HEADING.match(heading).group(2) if heading else "Before the first heading"
+                    listing += ["", f"## {title}", ""] + [l for x in f for l in wrap(x, "- ", "  ")]
+            write_lines(notes, listing)
+        else:
+            notes.unlink(missing_ok=True)
         saved = REPORT_SEEN / home / (rel + ".json")
         saved.parent.mkdir(parents=True, exist_ok=True)
         saved.write_text(json.dumps({"from": str(src), "source": source, "checked": faults is not None,
@@ -933,7 +1136,7 @@ def charted_line(s: dict) -> str:
 
 
 def render_board(model: dict, live: dict, settled: set[str], places: dict[str, list[str]],
-                 notes: dict[str, list[str]], checked: bool) -> list[str]:
+                 notes: dict[str, list[str]], checked: bool, broken: dict[str, list[str]]) -> list[str]:
     built = (model.get("generated") or "")[11:16]
     captain, bad, firstmate = places[WITH_CAPTAIN], places[BROKEN], places[WITH_FIRSTMATE]
     later = charted(model)
@@ -946,6 +1149,7 @@ def render_board(model: dict, live: dict, settled: set[str], places: dict[str, l
         "- In a card, press Enter on a page line to open that page in a new tab.",
         "- Press Enter on a report path (data/<task>/report.md) to open that report in a new tab.",
         "- Press Enter or gx on a web address to open it in the browser.",
+        "- To mark text as yours anywhere, press \\c (or Ctrl-g c while you type): it writes <!--captain:  -->.",
         "- Write your answer at the bottom of the card. Save it with :wq.",
         "- Move a line to change the order (dd, then p).",
         "- Save and quit everything with :wqa.",
@@ -962,13 +1166,15 @@ def render_board(model: dict, live: dict, settled: set[str], places: dict[str, l
     out += [WITH_CAPTAIN, ""]
     for k in captain:
         n = len(notes.get(k, []))
-        out.append(board_line(k, live) + (f"  - check: {n} note{'s' if n != 1 else ''}" if n else ""))
+        out.append(board_line(k, live) + (f"  - check: {n} note{'s' if n != 1 else ''} in notes/{k}.md" if n else ""))
     out += ["", BROKEN, ""]
     if bad:
-        out += ["These cards do not ask a question. Firstmate rewrites them.", ""]
+        out += ["Firstmate rewrites these cards. Each line says what is wrong with it.", ""]
     for k in bad:
         when = acked(read_lines(card_path(k)))
-        out.append(board_line(k, live) + (f"  - sent {when[-1][11:]} UTC" if when else ""))
+        why = ", ".join(broken.get(k) or [])
+        sent = f"sent {when[-1][11:]} UTC" if when else ""
+        out.append(board_line(k, live) + (f"  - {why}{', ' if why and sent else ''}{sent}" if why or sent else ""))
     out += ["", CHARTED, ""]
     if places[CHARTED]:
         out += ["These calls wait for a date. They come back on that date.", ""]
@@ -1038,7 +1244,8 @@ def main(argv: list[str]) -> int:
         return 0 if argv and argv[0] in ("-h", "--help") else 2
     model = load_model()
     calls, to_close = list(model.get("calls") or []), list(model.get("to_close") or [])
-    live = {c["key"]: c for c in calls + to_close}
+    with_mate_holds(calls + to_close)
+    live ={c["key"]: c for c in calls + to_close}
     settled = {c["key"] for c in to_close}
     page_ids = linked_pages(calls + to_close)
     target = "board.md"
@@ -1070,7 +1277,7 @@ def main(argv: list[str]) -> int:
     emit(records, now_iso)
     later = charted(model)
     places = placement(live, settled, broken, read_lines(BOARD / "board.md"), later)
-    board_written = render_board(model, live, settled, places, notes, checked)
+    board_written = render_board(model, live, settled, places, notes, checked, broken)
     write_lines(BOARD / "board.md", board_written)
     if not argv and not any(places.values()):
         print("No captain calls and nothing with firstmate; nothing to answer.")
@@ -1105,7 +1312,7 @@ def main(argv: list[str]) -> int:
     records += collect(live, settled, now) + collect_pages(now)
     # The captain's order is kept; answered cards move to With firstmate.
     places = placement(live, settled, broken, board_after, later)
-    write_lines(BOARD / "board.md", render_board(model, live, settled, places, notes, checked))
+    write_lines(BOARD / "board.md", render_board(model, live, settled, places, notes, checked, broken))
     if stray:
         print("Ignored text written in board.md (answers go in the card files):")
         for l in stray:

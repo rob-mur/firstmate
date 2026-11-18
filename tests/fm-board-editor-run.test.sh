@@ -4,9 +4,11 @@
 # A run never deletes a card. It records a saved answer once in the outbox,
 # appends an acknowledgement to that card, and moves its line from "With
 # captain" to "With firstmate". As on the real board, a call that asks no
-# question goes to "Broken" and is reported once per card version, and a hold
-# deferred to a future date is listed under "Charted". A plain-language lint
-# fault is only a "Check:" note: the card stays with the captain. An answer
+# question, or names a PR, MR, issue, report or review it does not link, goes to
+# "Broken" and is reported once per card version, and a hold deferred to a
+# future date is listed under "Charted". A plain-language lint fault is only a
+# note in notes/<key>.md, never in the card: the card stays with the captain.
+# Text marked <!--captain: ...--> is recorded verbatim as the captain's. An answer
 # already in the outbox is never recorded again, also after the board and
 # outbox move. The captain's order in "With captain" is kept. Every run reads a saved model (TUI_BOARD_CALLS_JSON),
 # a stub lint (TUI_BOARD_LINT) and a scratch EDITOR script, so nothing reads or
@@ -72,6 +74,18 @@ PY
     ;;
   snapshot) cp board.md "$ED_SNAPSHOT" ;;
   answer-fail) printf '%s\n' "$ED_TEXT" >>"cards/$ED_KEY.md"; exit 3 ;;
+  mark)  # in $ED_FILE, put $ED_MARK at the end of the first line that is $ED_AFTER, then append $ED_TEXT if set
+    python3 - <<'PY'
+import os
+path = os.environ["ED_FILE"]
+lines = open(path).read().splitlines()
+at = lines.index(os.environ["ED_AFTER"])
+lines[at] += os.environ["ED_MARK"]
+if os.environ.get("ED_TEXT"):
+    lines.append(os.environ["ED_TEXT"])
+open(path, "w").write("\n".join(lines) + "\n")
+PY
+    ;;
   page)  # in pages/$ED_PAGE.md, write $ED_TEXT under the line $ED_AFTER of block $ED_BLOCK
     python3 - <<'PY'
 import os
@@ -312,11 +326,14 @@ test_lint_fault_is_a_note_not_broken() {
   MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
   card="$dir/board/cards/w-c.ask.md"
   assert_equals captain "$(section_of "$dir/board/board.md" w-c.ask)" "a real call that fails the lint stays with the captain"
-  assert_line 'Check: LENGTH (40 words, limit 25): "a WALL of text"' "$card" "the card notes the lint fault"
-  assert_no_regex "^Broken:|^Received by firstmate" "$card" "the card is not broken and not acknowledged"
-  grep -q '^cards/w-c\.ask\.md .* - check: 1 note$' "$dir/board/board.md" || fail "the board line counts the notes"
+  assert_line '- LENGTH (40 words, limit 25): "a WALL of text"' "$dir/board/notes/w-c.ask.md" \
+    "the notes file holds the lint fault"
+  assert_no_regex "LENGTH|^Check|^Broken:|^Received by firstmate" "$card" "the card has no note, is not broken and not acknowledged"
+  grep -q '^cards/w-c\.ask\.md .* - check: 1 note in notes/w-c\.ask\.md$' "$dir/board/board.md" ||
+    fail "the board line counts the notes and names their file"
+  assert_absent "$dir/board/notes/hold-a.md" "a card that passes has no notes file"
   assert_absent "$dir/outbox.jsonl" "a lint fault reports nothing to firstmate"
-  pass "a lint fault on a real call is a Check note on the card; the card stays with the captain"
+  pass "a lint fault on a real call is a note in its own file; the card stays with the captain"
 }
 
 test_not_a_question_goes_to_broken() {
@@ -329,7 +346,10 @@ test_not_a_question_goes_to_broken() {
   assert_equals broken "$(section_of "$dir/board/board.md" w-c.ask)" "a call that asks no question is in Broken"
   assert_equals captain "$(section_of "$dir/board/board.md" hold-a)" "a question is not"
   assert_line "Broken: this card does not ask a question. Firstmate rewrites it." "$card" "the card says why"
-  assert_line "These cards do not ask a question. Firstmate rewrites them." "$dir/board/board.md" "the board says why"
+  assert_line "Firstmate rewrites these cards. Each line says what is wrong with it." "$dir/board/board.md" \
+    "the board says what Broken is"
+  grep -Eq '^cards/w-c\.ask\.md .* - not a question, sent [0-9:]+ UTC$' "$dir/board/board.md" ||
+    fail "the board line says why the card is broken"
   grep -Eqx "$ACK_RE" "$card" || fail "the card gets the same acknowledgement as an answer"
   assert_equals '["not a question"]' "$(jq -c 'select(.kind == "broken") | .faults' "$dir/outbox.jsonl")" \
     "it is reported to firstmate as not a question"
@@ -453,8 +473,8 @@ test_real_lint_flags_a_long_sentence() {
   out=$(sh "$real" </dev/null 2>&1 || true)
   case "$out" in PLAINSPEAK\ UNCHECKED*) pass "skip: the plainspeak lint did not run"; return ;; esac
   assert_equals captain "$(section_of "$dir/board/board.md" w-c.ask)" "a long sentence leaves the card with the captain"
-  grep -q '^Check: LENGTH' "$dir/board/cards/w-c.ask.md" || fail "a long sentence fails the real lint as a note"
-  assert_no_regex '^Check:' "$dir/board/cards/hold-a.md" "short plain sentences pass the real lint"
+  grep -q '^- LENGTH' "$dir/board/notes/w-c.ask.md" || fail "a long sentence fails the real lint as a note"
+  assert_absent "$dir/board/notes/hold-a.md" "short plain sentences pass the real lint"
   pass "the real plainspeak lint notes a long sentence on its card"
 }
 
@@ -470,7 +490,8 @@ test_real_lint_reads_wrapped_options_unwrapped() {
   MODEL="$MODEL" LINT="$real" run_board "$dir" >/dev/null || fail "the run failed"
   [ "$(grep -c '^  a) ' "$dir/board/cards/w-c.ask.md")" = 1 ] && grep -q '^     ' "$dir/board/cards/w-c.ask.md" ||
     fail "the option wraps on the card"
-  assert_no_regex 'LENGTH' "$dir/board/cards/w-c.ask.md" "a wrapped option of 25 words passes"
+  [ ! -e "$dir/board/notes/w-c.ask.md" ] || assert_no_regex 'LENGTH' "$dir/board/notes/w-c.ask.md" \
+    "a wrapped option of 25 words passes"
   pass "the lint reads a wrapped option as one item without its letter"
 }
 
@@ -844,8 +865,7 @@ test_cited_report_reachable_from_card() {
   run_board "$dir" >/dev/null || fail "the run failed"
   card="$dir/board/cards/cd.key-d.md"
   assert_line "Links:" "$card" "the card has a links section"
-  assert_line "- Report (cd): reports/cd/data/cd-r/report.md - check: 2 notes" "$card" \
-    "the card links the cd home's report copy with its note count"
+  assert_line "- Report (cd): reports/cd/data/cd-r/report.md" "$card" "the card links the cd home's report copy"
   assert_line "- Report (main): reports/main/data/w-c/report.md" "$dir/board/cards/w-c.ask.md" \
     "a main worker's report resolves against the main home"
   assert_line "- Report (main): data/gone/report.md - not found in the main home" "$dir/board/cards/hold-a.md" \
@@ -855,7 +875,9 @@ test_cited_report_reachable_from_card() {
     shown=$(vim_keys "$dir" cards/cd.key-d.md "^- Report" '\<CR>')
     assert_equals "$dir/board/reports/cd/data/cd-r/report.md" "$shown" "Enter on the card's report link opens the report"
   fi
-  [ ! -s "$dir/outbox.jsonl" ] || fail "copying reports writes nothing to the outbox"
+  assert_equals broken "$(section_of "$dir/board/board.md" hold-a)" "a card citing a report that does not open is broken"
+  assert_equals '["hold-a"]' "$(jq -sc '[.[] | .key]' "$dir/outbox.jsonl")" \
+    "copying reports writes nothing to the outbox; only the unlinked report's card is reported"
   pass "a cited report is reachable from its card"
 }
 
@@ -865,15 +887,17 @@ test_report_text_gets_lint_notes() {
   report_source "$dir"
   run_board "$dir" >/dev/null || fail "the run failed"
   page="$dir/board/reports/cd/data/cd-r/report.md"
-  assert_line "Check: 2 notes on this report, under the parts they are about." "$page" "the page sums up its notes"
-  assert_equals '> Check: LENGTH (40 words, limit 25): "a WALL of text"' \
-    "$(awk '/^## 1\. Summary$/ {getline; print; exit}' "$page")" "the lint's note sits under the section it is about"
-  assert_equals '> Check: VAGUE FIGURE: "about £0" - say what it' \
-    "$(awk '/^## 1\. Summary$/ {getline; getline; print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10; exit}' "$page")" \
-    "the hedged figure is noted in the same section"
-  assert_equals "" "$(awk '/^## 2\. Commands$/ {getline; print; exit}' "$page")" "a WALL only in a code block is not linted"
-  assert_line "This is a WALL of text." "$page" "the report's text is kept as written"
-  pass "a report page gets the lint's notes under its sections"
+  notes="$dir/board/notes/reports/cd/data/cd-r/report.md"
+  assert_line "- The plain-language check has 2 notes on this report, in notes/reports/cd/data/cd-r/report.md" "$page" \
+    "the report copy names its notes file"
+  assert_no_regex '^> Check|LENGTH|VAGUE' "$page" "no note breaks up the report's text"
+  assert_equals "$(cat "$dir/cd-home/data/cd-r/report.md")" "$(sed '1,/^- Close this tab/d' "$page" | sed 1,2d)" \
+    "the copy holds the report exactly as written"
+  assert_equals '- LENGTH (40 words, limit 25): "a WALL of text"' \
+    "$(awk '/^## 1\. Summary$/ {getline; getline; print; exit}' "$notes")" "the lint's note sits under the section it is about"
+  grep -F -- '- VAGUE FIGURE: "about £0" - say what it' "$notes" >/dev/null || fail "the hedged figure is noted"
+  assert_no_regex '^## 2\. Commands$' "$notes" "a WALL only in a code block is not linted"
+  pass "a report copy is the report as written, and the lint's notes are in their own file by section"
 }
 
 test_vague_figure_is_flagged_and_exact_is_not() {
@@ -886,16 +910,186 @@ test_vague_figure_is_flagged_and_exact_is_not() {
     "$(printf '%s' "$call_d" | jq -c '.question = "Pin the runner image? It saves roughly 5 minutes, ~10% of the run, around $3 a day."')"
   run_board "$dir" >/dev/null || fail "the run failed"
   card="$dir/board/cards/hold-a.md"
-  grep -F 'Check: VAGUE FIGURE: "about £0" - say what it means' "$card" >/dev/null || fail "about £0 is flagged on its card"
-  assert_no_regex "VAGUE" "$dir/board/cards/w-c.ask.md" "an exact figure like £120 is not flagged"
+  grep -F -- '- VAGUE FIGURE: "about £0" - say what it means' "$dir/board/notes/hold-a.md" >/dev/null ||
+    fail "about £0 is flagged in its card's notes"
+  assert_no_regex "VAGUE" "$card" "the card itself carries no note"
+  assert_absent "$dir/board/notes/w-c.ask.md" "an exact figure like £120 is not flagged"
   # shellcheck disable=SC2016  # a literal dollar figure
   for figure in "roughly 5" "~10%" 'around $3'; do
-    grep -F "VAGUE FIGURE: \"$figure\"" "$dir/board/cards/cd.key-d.md" >/dev/null || fail "$figure is flagged"
+    grep -F "VAGUE FIGURE: \"$figure\"" "$dir/board/notes/cd.key-d.md" >/dev/null || fail "$figure is flagged"
   done
   rm -rf "$dir/board"
   LINT="$dir/no-such-lint" run_board "$dir" >/dev/null || fail "the run without the lint failed"
-  grep -F 'VAGUE FIGURE: "about £0"' "$card" >/dev/null || fail "the vague-figure check runs without the lint"
+  grep -F 'VAGUE FIGURE: "about £0"' "$dir/board/notes/hold-a.md" >/dev/null || fail "the vague-figure check runs without the lint"
   pass "the lint flags a hedged figure like about £0 and not an exact one like £120"
+}
+
+# A card that names a PR, MR, issue, report or review must carry its link, or it goes to Broken.
+test_unlinked_reference_goes_to_broken() {
+  local dir MODEL b pr=https://forge.example/rob/cd/pulls/885
+  dir=$(fresh unlinked)
+  MODEL="$dir/model-refs.json"
+  model "$MODEL" \
+    "$(printf '%s' "$call_a" | jq -c '.question = "Merge PR 885 now? It is green."')" \
+    "$(printf '%s' "$call_c" | jq -c '.question = "Close cd-810? The report and #810 say it is done."')" \
+    "$(printf '%s' "$call_d" | jq -c --arg u "$pr" '.question = "Merge PR 919? It replaces the old one." | .links = [{url: $u, label: ""}]')" \
+    "$(printf '%s' "$call_b" | jq -c '.question = "Merge PR 885? The review on it is clean."')"
+  MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
+  b="$dir/board/board.md"
+  assert_equals broken "$(section_of "$b" hold-a)" "PR 885 with no link is broken"
+  assert_line "Broken: this card names PR 885 but does not link it. Firstmate rewrites it." "$dir/board/cards/hold-a.md" \
+    "the card says what it does not link"
+  grep -Eq '^cards/hold-a\.md .* - no link for PR 885, sent [0-9:]+ UTC$' "$b" || fail "the board line says what is missing"
+  assert_equals broken "$(section_of "$b" w-c.ask)" "a bare #810 and a report with no link are broken"
+  assert_equals '["no link for a report","no link for #810"]' \
+    "$(jq -c 'select(.kind == "broken" and .key == "w-c.ask") | .faults' "$dir/outbox.jsonl")" \
+    "firstmate is told each reference the card does not link"
+  assert_equals broken "$(section_of "$b" cd.key-d)" "a link to PR 885 does not cover PR 919"
+  assert_equals captain "$(section_of "$b" cd.key-b)" "PR 885 with its link, and its review, pass"
+  pass "a card that names a PR, issue or report it does not link goes to Broken and says which"
+}
+
+# Where the record has the address, the card shows it, so the reference passes the lint.
+test_card_renders_record_url() {
+  local dir MODEL card pr=https://forge.example/rob/cd/pulls/919
+  dir=$(fresh record-url)
+  MODEL="$dir/model-url.json"
+  model "$MODEL" "$(printf '%s' "$call_c" | jq -c --arg u "$pr" \
+    '.question = "Merge PR 919? It is green." | .prs = [{url: $u, state: "open"}]')"
+  MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
+  card="$dir/board/cards/w-c.ask.md"
+  assert_line "- $pr (open)" "$card" "the card lists the PR's address from the record"
+  assert_equals captain "$(section_of "$dir/board/board.md" w-c.ask)" "the linked PR passes the lint"
+  pass "a PR address in the record is rendered on the card"
+}
+
+# The lint's findings are for firstmate: none of them is ever text in a card, broken or not.
+test_lint_notes_never_in_card() {
+  local dir MODEL
+  dir=$(fresh no-debug)
+  MODEL="$dir/model-noisy.json"
+  model "$MODEL" \
+    "$(printf '%s' "$call_c" | jq -c '.question = "Cut three tickets? WALL is long and costs about £0."')" \
+    "$(printf '%s' "$call_d" | jq -c '.question = "Close PR 810. WALL is long."')"
+  MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
+  assert_present "$dir/board/notes/w-c.ask.md" "the faults are in the notes file"
+  assert_equals 2 "$(grep -c '^- \(LENGTH\|VAGUE FIGURE\)' "$dir/board/notes/w-c.ask.md")" "both faults are noted there"
+  if grep -lE 'Check|LENGTH|limit 25|VAGUE FIGURE' "$dir"/board/cards/*.md; then
+    fail "a card holds lint text"
+  fi
+  assert_absent "$dir/board/notes/cd.key-d.md" "a broken card is not linted"
+  pass "lint findings live in notes/<key>.md and never in a card"
+}
+
+# A second mate's hold whose call record has no options (the pdm-99 shape): its backlog row has them.
+test_mate_hold_options_and_link() {
+  local dir card MODEL issue=https://forge.example/rob/cd/issues/99
+  dir=$(fresh mate-hold)
+  report_source "$dir"
+  cat >"$dir/cd-home/data/backlog.md" <<EOF
+# Backlog
+
+## In flight
+- [ ] cd-99-version - #99 --version prints the commit (repo: cd) (kind: ship) (hold-kind: captain)
+  Captain hold set: 2026-11-18T16:22:36Z
+  Captain hold option: omit=(a, recommended) Leave it out: cd (4f84552 2026-11-15).
+  Captain hold option: commit=(b) Put the full commit there: cd 4f84552c (4f84552 2026-11-15).
+  Captain hold link: $issue Issue #99
+
+  Issue $issue. Notes on the task.
+
+## Done
+- [x] cd-98 - old (hold-kind: captain)
+  Captain hold option: x=(a) Not this one.
+EOF
+  MODEL="$dir/model-mate.json"
+  model "$MODEL" '{"key":"cd.captain-hold-cd-99-version-1","source":"secondmate","home":"cd","remote":false,
+    "task":"cd-99-version","decision_key":"captain-hold-cd-99-version-1","title":"cd-99-version",
+    "question":"How should cd --version show the commit it was built from? Other tools read this line.",
+    "options":[],"free_text":true,"links":[],"blocked_by":[],"decision":true,"prs":[]}'
+  MODEL="$MODEL" run_board "$dir" >/dev/null || fail "the run failed"
+  card="$dir/board/cards/cd.captain-hold-cd-99-version-1.md"
+  assert_line "  a) Leave it out: cd (4f84552 2026-11-15) (recommended)." "$card" "option a comes from the backlog row"
+  assert_line "  b) Put the full commit there: cd 4f84552c (4f84552 2026-11-15)." "$card" "option b comes from the backlog row"
+  assert_line "- Issue #99: $issue" "$card" "the hold's link comes from the backlog row"
+  assert_equals captain "$(section_of "$dir/board/board.md" cd.captain-hold-cd-99-version-1)" "the card is with the captain"
+  ED_ACTION=answer ED_KEY=cd.captain-hold-cd-99-version-1 ED_TEXT="b" MODEL="$MODEL" run_board "$dir" >/dev/null ||
+    fail "the answer run failed"
+  assert_equals commit "$(jq -r 'select(.kind == "answer") | .option' "$dir/outbox.jsonl")" "the letter picks the row's option"
+  pass "a second mate's hold gets its options and link from its backlog row"
+}
+
+# Text marked <!--captain: ...--> is the captain's anywhere in a card, recorded verbatim once.
+test_captain_marker_recorded_verbatim() {
+  local dir mark="<!--captain: only if the tests pass-->"
+  dir=$(fresh marker)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  ED_ACTION=mark ED_FILE=cards/hold-a.md ED_AFTER="  a) Ship it now." ED_MARK=" $mark" ED_TEXT="b" \
+    run_board "$dir" >/dev/null || fail "the marker run failed"
+  assert_equals 1 "$(answers "$dir/outbox.jsonl" hold-a)" "the answer is recorded once"
+  assert_equals "{\"text\":\"$mark\\nb\",\"option\":\"later\",\"captain_words\":[\"only if the tests pass\"]}" \
+    "$(jq -c 'select(.kind == "answer") | {text, option, captain_words}' "$dir/outbox.jsonl")" \
+    "the marker is carried verbatim, its words as the captain's, the letter still picks, and the card's own line is not"
+  run_board "$dir" >/dev/null || fail "third run failed"
+  assert_equals 1 "$(answers "$dir/outbox.jsonl" hold-a)" "a later run does not record it again"
+  ED_ACTION=mark ED_FILE=cards/cd.key-b.md ED_AFTER="  b) a root VERSION file." ED_MARK=" <!--captain:  -->" \
+    run_board "$dir" >/dev/null || fail "the empty marker run failed"
+  assert_equals 0 "$(answers "$dir/outbox.jsonl" cd.key-b)" "an empty marker records nothing"
+  pass "a captain marker in a card is recorded verbatim once as the captain's words"
+}
+
+test_page_captain_marker() {
+  local dir mark="<!--captain: keep the old name too-->"
+  dir=$(fresh_page page-captain-marker)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  ED_ACTION=mark ED_FILE=pages/rev.md ED_AFTER="Rename the flag." ED_MARK=" $mark" run_board "$dir" >/dev/null ||
+    fail "the marker run failed"
+  assert_equals "{\"block\":\"r1\",\"text\":\"$mark\",\"was\":null,\"captain_words\":[\"keep the old name too\"]}" \
+    "$(jq -c 'select(.kind == "comment") | {block, text, was, captain_words}' "$dir/outbox.jsonl")" \
+    "a marker put into a page line is the marker only, not a rewrite of the line"
+  run_board "$dir" >/dev/null || fail "third run failed"
+  assert_equals 1 "$(comments "$dir/outbox.jsonl")" "a later run does not record it again"
+  pass "a captain marker in a page is recorded verbatim once"
+}
+
+# Runs keys in vim on a board file and saves it.
+vim_edit() {  # <dir> <file in board> <search pattern> <keys, as in :exe "normal ...">
+  ( cd "$1/board" && timeout 30 vim -N -u NONE -i NONE -es -S "$VIM_SCRIPT" \
+    -c "call search('$3')" -c "exe \"normal $4\"" -c 'wqa!' "$2" )
+}
+
+test_vim_captain_marker_keys() {
+  local dir card
+  command -v vim >/dev/null 2>&1 || { pass "skip: no vim"; return; }
+  dir=$(fresh marker-keys)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  card="$dir/board/cards/hold-a.md"
+  vim_edit "$dir" cards/hold-a.md "Ship it now" '\\conly if green' || fail "vim failed"
+  assert_line "  a) <!--captain: only if green -->Ship it now." "$card" \
+    "backslash-c in normal mode writes the marker with the cursor inside it"
+  vim_edit "$dir" cards/hold-a.md "^## Your answer" 'o\<C-g>cfine by me' || fail "vim failed"
+  assert_line "<!--captain: fine by me -->" "$card" "Ctrl-g c in insert mode writes the marker with the cursor inside it"
+  run_board "$dir" >/dev/null || fail "the record run failed"
+  assert_equals '["only if green","fine by me"]' \
+    "$(jq -c 'select(.kind == "answer") | .captain_words' "$dir/outbox.jsonl")" "both markers are recorded as the captain's"
+  pass "the editor's keys write a captain marker that the run records"
+}
+
+test_captain_marker_highlighted() {
+  local dir
+  command -v vim >/dev/null 2>&1 || { pass "skip: no vim"; return; }
+  dir=$(fresh marker-hl)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  cat >"$dir/check.vim" <<EOF
+let s:m = filter(getmatches(), 'v:val.group ==# "FmCaptain"')
+let s:p = empty(s:m) ? '^\$^' : s:m[0].pattern
+call writefile([len(s:m), hlexists('FmCaptain'), match('a <!--captain: hi--> b', s:p),
+  \\ match("a <!--captain: two\\nlines--> b", s:p), match('a <!-- card: x --> b', s:p)], '$dir/hl')
+EOF
+  ( cd "$dir/board" && timeout 30 vim -N -u NONE -i NONE -es -S "$VIM_SCRIPT" -S "$dir/check.vim" -c 'qa!' cards/hold-a.md )
+  assert_equals "1 1 2 2 -1" "$(tr '\n' ' ' <"$dir/hl" | sed 's/ $//')" \
+    "one FmCaptain match per window finds one-line and two-line markers and no other comment"
+  pass "captain markers are highlighted in their own colour"
 }
 
 fm_test_run \
@@ -933,4 +1127,12 @@ fm_test_run \
   test_report_path_opens_as_page \
   test_cited_report_reachable_from_card \
   test_report_text_gets_lint_notes \
-  test_vague_figure_is_flagged_and_exact_is_not
+  test_vague_figure_is_flagged_and_exact_is_not \
+  test_unlinked_reference_goes_to_broken \
+  test_card_renders_record_url \
+  test_lint_notes_never_in_card \
+  test_mate_hold_options_and_link \
+  test_captain_marker_recorded_verbatim \
+  test_page_captain_marker \
+  test_vim_captain_marker_keys \
+  test_captain_marker_highlighted

@@ -2,8 +2,10 @@
 " Enter, gf and gx on a line open what it names: a board file (cards/, pages/ or reports/) in a new
 " tab, a web address through the opener ($TUI_BOARD_OPENER, else xdg-open), and a report path
 " (data/<task>/report.md) as the report's copy under reports/<home>/ in a new tab.
+" Text marked <!--captain: ...--> is the captain's own and is highlighted. \c in normal mode and
+" Ctrl-g c in insert mode write an empty marker, <!--captain:  -->, with the cursor inside it.
 let s:board = getcwd()
-let s:file = '\%(cards\|pages\|reports\)/[^ )\]`]\+\.\%(md\|txt\)'
+let s:file = '\%(cards\|pages\|reports\|notes\)/[^ )\]`]\+\.\%(md\|txt\)'
 let s:url = 'https\?://[^ 	<>"`]\+'
 let s:data = '\%(/[[:alnum:]_.-]\+\)*/\?data/[[:alnum:]_.-]\+\%(/[[:alnum:]_.-]\+\)*\.\%(md\|txt\)'
 
@@ -89,13 +91,25 @@ function! s:Open(key) abort
   endif
 endfunction
 
+function! s:Highlight() abort
+  highlight default FmCaptain ctermfg=black ctermbg=yellow cterm=bold guifg=black guibg=#ffd75f gui=bold
+endfunction
+
 function! s:Map() abort
   nnoremap <buffer> <silent> gf <Cmd>call <SID>Open('gf')<CR>
   nnoremap <buffer> <silent> gx <Cmd>call <SID>Open('gx')<CR>
   nnoremap <buffer> <silent> <CR> <Cmd>call <SID>Open('cr')<CR>
+  " The captain's marker: the cursor lands between the two spaces, ready to type.
+  inoremap <buffer> <C-g>c <lt>!--captain:  --><Left><Left><Left><Left>
+  nnoremap <buffer> <Leader>c i<lt>!--captain:  --><Left><Left><Left><Left>
+  if !exists('w:fm_captain')
+    let w:fm_captain = matchadd('FmCaptain', '\c<!--\s*captain:\%(\%(<!--\)\@!\_.\)\{-}-->')
+  endif
 endfunction
 augroup fm_board_prototype
   autocmd!
   autocmd BufEnter *.md call s:Map()
+  autocmd ColorScheme * call s:Highlight()
 augroup END
+call s:Highlight()
 call s:Map()
