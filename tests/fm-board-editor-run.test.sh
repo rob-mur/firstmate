@@ -752,6 +752,152 @@ PY
   pass "a page's note line is a heading, and a note under the old line is kept through the rebuild"
 }
 
+# A cd secondmate home (registered in the fixture main home) with a report that call d cites:
+# one section with a WALL sentence and a hedged figure, one whose WALL is only in a code block,
+# and a web address. Call c cites a main-home report, and call a one that does not exist.
+report_source() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/home/data" "$dir/cd-home/data/cd-r" "$dir/home/data/w-c"
+  printf '%s\n' "- cd - Drive the cd project. (home: $dir/cd-home; scope: cd; projects: cd; added 2026-11-18)" \
+    >"$dir/home/data/secondmates.md"
+  cat >"$dir/cd-home/data/cd-r/report.md" <<'EOF'
+# Runner image report
+
+## 1. Summary
+
+This is a WALL of text.
+Cost is about £0 a month.
+
+## 2. Commands
+
+```sh
+echo WALL
+```
+
+Details: https://forge.example/rob/cd/issues/9
+EOF
+  printf '# Main report\n\nThe tickets are small.\n' >"$dir/home/data/w-c/report.md"
+  model "$dir/model.json" \
+    "$(printf '%s' "$call_a" | jq -c '.question += " Notes: data/gone/report.md."')" "$call_b" \
+    "$(printf '%s' "$call_c" | jq -c '.question += " Evidence: data/w-c/report.md."')" \
+    "$(printf '%s' "$call_d" | jq -c '.question += " Evidence: the cd second mate'"'"'s data/cd-r/report.md sections 1-2."')"
+}
+
+# Drives the board's editor mappings headless in vim (or nvim) from the board folder with a stub
+# opener that records its arguments, so no browser or web address is ever opened.
+VIM_SCRIPT="$ROOT/prototype/board-editor/board.vim"
+vim_keys() {  # <dir> <file in board> <search pattern> <keys, as in :exe "normal ..."> -> the file shown after
+  local dir=$1 shown="$1/shown"
+  printf '#!/bin/sh\nprintf "%%s|" "$#" "$@" >>"%s/opened"\n' "$dir" >"$dir/opener.sh"
+  chmod +x "$dir/opener.sh"
+  rm -f "$shown"
+  if command -v vim >/dev/null 2>&1; then
+    ( cd "$dir/board" && TUI_BOARD_OPENER="$dir/opener.sh" timeout 30 vim -N -u NONE -i NONE -es -S "$VIM_SCRIPT" \
+      -c "call search('$3')" -c "exe \"normal $4\"" -c "call writefile([expand('%:p')], '$shown')" -c 'qa!' "$2" )
+  else
+    ( cd "$dir/board" && TUI_BOARD_OPENER="$dir/opener.sh" timeout 30 nvim --headless -n -u NONE -i NONE -S "$VIM_SCRIPT" \
+      -c "call search('$3')" -c "exe \"normal $4\"" -c "call writefile([expand('%:p')], '$shown')" -c 'qa!' "$2" ) \
+      >/dev/null 2>&1
+  fi
+  cat "$shown"
+}
+
+have_vim() {
+  command -v vim >/dev/null 2>&1 || command -v nvim >/dev/null 2>&1
+}
+
+test_url_open_calls_opener_with_exact_url() {
+  local dir url=https://forge.example/rob/cd/pulls/885
+  have_vim || { pass "skip: no vim or nvim"; return; }
+  dir=$(fresh url-open)
+  run_board "$dir" >/dev/null || fail "the run failed"
+  vim_keys "$dir" cards/cd.key-b.md "^- https" '\<CR>' >/dev/null
+  assert_equals "1|$url|" "$(cat "$dir/opened")" "Enter on a link line hands the opener only the exact address"
+  rm -f "$dir/opened"
+  # shellcheck disable=SC2016  # $ is the vim motion, not a shell expansion
+  vim_keys "$dir" cards/cd.key-b.md "^- https" '$gx' >/dev/null
+  assert_equals "1|$url|" "$(cat "$dir/opened")" "gx with the cursor past the address still opens only the address"
+  pass "Enter and gx on a web address call the opener with the exact address"
+}
+
+test_report_path_opens_as_page() {
+  local dir shown
+  have_vim || { pass "skip: no vim or nvim"; return; }
+  dir=$(fresh report-open)
+  report_source "$dir"
+  run_board "$dir" >/dev/null || fail "the run failed"
+  shown=$(vim_keys "$dir" cards/cd.key-d.md "data/cd-r" 'f/\<CR>')
+  assert_equals "$dir/board/reports/cd/data/cd-r/report.md" "$shown" \
+    "Enter on the path in the question opens the cd home's report copy"
+  assert_equals "<!-- report: data/cd-r/report.md | home: cd | from: $dir/cd-home/data/cd-r/report.md" \
+    "$(sed -n '1s/ (version .*//p' "$shown")" "the copy names its home and source"
+  shown=$(vim_keys "$dir" cards/w-c.ask.md "data/w-c" 'gf')
+  assert_equals "$dir/board/reports/main/data/w-c/report.md" "$shown" "gf on a main worker's path opens the main home's report"
+  [ ! -e "$dir/opened" ] || fail "opening a report never calls the web opener"
+  pass "a report path opens as a page of the board"
+}
+
+test_cited_report_reachable_from_card() {
+  local dir card shown
+  dir=$(fresh report-link)
+  report_source "$dir"
+  run_board "$dir" >/dev/null || fail "the run failed"
+  card="$dir/board/cards/cd.key-d.md"
+  assert_line "Links:" "$card" "the card has a links section"
+  assert_line "- Report (cd): reports/cd/data/cd-r/report.md - check: 2 notes" "$card" \
+    "the card links the cd home's report copy with its note count"
+  assert_line "- Report (main): reports/main/data/w-c/report.md" "$dir/board/cards/w-c.ask.md" \
+    "a main worker's report resolves against the main home"
+  assert_line "- Report (main): data/gone/report.md - not found in the main home" "$dir/board/cards/hold-a.md" \
+    "a report that does not exist is named, not linked"
+  assert_present "$dir/board/reports/cd/data/cd-r/report.md" "the cited report is copied to the board"
+  if have_vim; then
+    shown=$(vim_keys "$dir" cards/cd.key-d.md "^- Report" '\<CR>')
+    assert_equals "$dir/board/reports/cd/data/cd-r/report.md" "$shown" "Enter on the card's report link opens the report"
+  fi
+  [ ! -s "$dir/outbox.jsonl" ] || fail "copying reports writes nothing to the outbox"
+  pass "a cited report is reachable from its card"
+}
+
+test_report_text_gets_lint_notes() {
+  local dir page
+  dir=$(fresh report-lint)
+  report_source "$dir"
+  run_board "$dir" >/dev/null || fail "the run failed"
+  page="$dir/board/reports/cd/data/cd-r/report.md"
+  assert_line "Check: 2 notes on this report, under the parts they are about." "$page" "the page sums up its notes"
+  assert_equals '> Check: LENGTH (40 words, limit 25): "a WALL of text"' \
+    "$(awk '/^## 1\. Summary$/ {getline; print; exit}' "$page")" "the lint's note sits under the section it is about"
+  assert_equals '> Check: VAGUE FIGURE: "about £0" - say what it' \
+    "$(awk '/^## 1\. Summary$/ {getline; getline; print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10; exit}' "$page")" \
+    "the hedged figure is noted in the same section"
+  assert_equals "" "$(awk '/^## 2\. Commands$/ {getline; print; exit}' "$page")" "a WALL only in a code block is not linted"
+  assert_line "This is a WALL of text." "$page" "the report's text is kept as written"
+  pass "a report page gets the lint's notes under its sections"
+}
+
+test_vague_figure_is_flagged_and_exact_is_not() {
+  local dir MODEL card
+  dir=$(fresh vague)
+  MODEL="$dir/model-vague.json"
+  model "$MODEL" \
+    "$(printf '%s' "$call_a" | jq -c '.question = "Ship the cache now? It costs about £0 a month."')" \
+    "$(printf '%s' "$call_c" | jq -c '.question = "Cut three tickets? Each costs £120 and takes 2 days."')" \
+    "$(printf '%s' "$call_d" | jq -c '.question = "Pin the runner image? It saves roughly 5 minutes, ~10% of the run, around $3 a day."')"
+  run_board "$dir" >/dev/null || fail "the run failed"
+  card="$dir/board/cards/hold-a.md"
+  grep -F 'Check: VAGUE FIGURE: "about £0" - say what it means' "$card" >/dev/null || fail "about £0 is flagged on its card"
+  assert_no_regex "VAGUE" "$dir/board/cards/w-c.ask.md" "an exact figure like £120 is not flagged"
+  # shellcheck disable=SC2016  # a literal dollar figure
+  for figure in "roughly 5" "~10%" 'around $3'; do
+    grep -F "VAGUE FIGURE: \"$figure\"" "$dir/board/cards/cd.key-d.md" >/dev/null || fail "$figure is flagged"
+  done
+  rm -rf "$dir/board"
+  LINT="$dir/no-such-lint" run_board "$dir" >/dev/null || fail "the run without the lint failed"
+  grep -F 'VAGUE FIGURE: "about £0"' "$card" >/dev/null || fail "the vague-figure check runs without the lint"
+  pass "the lint flags a hedged figure like about £0 and not an exact one like £120"
+}
+
 fm_test_run \
   test_card_reads_well_in_vim \
   test_cards_persist_across_runs \
@@ -782,4 +928,9 @@ fm_test_run \
   test_page_note_line_is_a_heading \
   test_page_missing_source_is_named \
   test_broken_page_reported_once_and_ack_survives_rebuild \
-  test_default_board_location
+  test_default_board_location \
+  test_url_open_calls_opener_with_exact_url \
+  test_report_path_opens_as_page \
+  test_cited_report_reachable_from_card \
+  test_report_text_gets_lint_notes \
+  test_vague_figure_is_flagged_and_exact_is_not

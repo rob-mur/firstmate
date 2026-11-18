@@ -38,6 +38,14 @@ card has a check. A captain hold deferred to a future date (the source lists it
 as "deferred until <date>") is listed under "Charted" until that date, as the
 real board charts it.
 
+A report a card or page cites as a path (data/<task>/report.md, in the home
+the card comes from or the home the text names just before the path, such as
+"the cd second mate's data/x/report.md") is copied to
+reports/<home>/<path>, with the lint's notes under each of its headings, and
+the card's "Links:" lists it; a report's own cited reports are copied too. The
+lint's notes on cards and pages also flag a hedged figure such as "about £0",
+"roughly 5" or "~10%", also when the lint is not installed.
+
 A run makes cards for new calls, rebuilds the cards not answered when their
 source changes, and leaves a card the captain wrote in alone, except for one
 acknowledgement line it appends when it records the answer. Then that card's
@@ -51,7 +59,9 @@ To open a card, press Enter (or gf) anywhere on its line in board.md, and to
 open a page, on its line in the card: when the editor is nvim or vim, the run
 loads prototype/board-editor/board.vim, which maps both keys in the board's
 markdown buffers to open the named file in a NEW TAB, so :q (or :wq) closes the
-tab and returns to the one before. In another editor use <C-w>gf on the line.
+tab and returns to the one before. Enter (or gf) on a report path opens the
+report's copy, and Enter (or gx) on a web address hands it to TUI_BOARD_OPENER
+(default xdg-open). In another editor use <C-w>gf on the line.
 Answers, comments, broken-card and broken-page reports and a new order are
 appended to ~/.local/share/fm-board-prototype/outbox.jsonl (or
 TUI_BOARD_OUTBOX) ONLY, once each; nothing reaches the board, its priority
@@ -62,6 +72,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import html
 import json
 import os
 import re
@@ -85,12 +96,16 @@ OUTBOX = Path(os.environ.get("TUI_BOARD_OUTBOX", str(DATA / "outbox.jsonl")))
 BOARD = Path(os.environ.get("TUI_BOARD_DIR", str(DATA / "board")))
 CARDS = BOARD / "cards"
 PAGES = BOARD / "pages"
+# A report a card or page cites (data/<task>/report.md in the home that owns it) is copied, with the
+# lint's notes, to reports/<home>/<path>: "main" is TUI_BOARD_HOME, a secondmate its registered home.
+REPORTS = BOARD / "reports"
 # Per card: <key>.md is the last text the run wrote or recorded, <key>.json its source record,
 # and <key>.answered marks that the captain answered it.
 SEEN = BOARD / ".seen"
 # Per page: <id>.md is the last text the run wrote or recorded, <id>.built.md the page as built
 # (no captain text, no acknowledgements), <id>.json its source metadata, version and options.
 PAGE_SEEN = SEEN / "pages"
+REPORT_SEEN = SEEN / "reports"
 PAGE_LINK = re.compile(r"^page:([A-Za-z0-9][A-Za-z0-9._-]*)$")
 LINT = Path(os.environ.get("TUI_BOARD_LINT", str(Path.home() / ".claude/skills/plainspeak-publish/scripts/lint")))
 WIDTH = 78
@@ -277,20 +292,40 @@ def is_question(card: dict) -> bool:
     return "?" in URL.sub("", question(card)) or bool(card.get("options"))
 
 
+# A figure hedged with "about", "around", "roughly", "~" and the like says neither what it is nor
+# where it came from: "about £0" could be free or a rounding of a real cost.
+VAGUE = re.compile(r"(?<![\w~≈])(?:about|around|roughly|approximately|approx\.|circa|nearly|almost|~|≈)\s*"
+                   r"[£$€]?\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:%|percent\b|GBP\b|USD\b|EUR\b|k\b|m\b|bn\b))?", re.I)
+
+
+def vague_figures(lines: list[str]) -> list[str]:
+    """A fault for each hedged figure in some text, in the plainspeak lint's style."""
+    faults = []
+    for m in VAGUE.finditer(" ".join(squash(l) for l in lines)):
+        figure = m.group(0).strip()
+        zero = float(re.sub(r"[^\d.]", "", re.search(r"\d[\d,]*(?:\.\d+)?", figure).group(0).replace(",", ""))) == 0
+        fix = ('say what it means instead, for example "free" or "no extra cost"' if zero
+               else "give the exact figure and where it comes from, or a range")
+        faults.append(f'VAGUE FIGURE: "{figure}" - {fix}.')
+    return list(dict.fromkeys(faults))
+
+
 def lint(lines: list[str]) -> list[str] | None:
     """The plainspeak lint's faults for some text ([] when it passes), or None when the lint is not installed.
 
     Each line is its own paragraph: the caller gives one sentence or list item per line, unwrapped.
+    The run's own vague-figure check is added to the lint's faults, and runs also without the lint.
     """
+    vague = vague_figures(lines)
     if not LINT.is_file():
-        return None
+        return vague or None
     text = "\n\n".join(squash(l) for l in lines if squash(l))
     p = subprocess.run(["sh", str(LINT)], input=text + "\n", capture_output=True, text=True)
     out = p.stdout.strip()
     if p.returncode == 0:
-        return None if out.startswith("PLAINSPEAK UNCHECKED") else []
+        return (vague or None) if out.startswith("PLAINSPEAK UNCHECKED") else vague
     faults = [l[2:] for l in out.splitlines() if l.startswith("- ")]
-    return faults or [(out or p.stderr.strip() or f"the lint exited {p.returncode}").splitlines()[0]]
+    return (faults or [(out or p.stderr.strip() or f"the lint exited {p.returncode}").splitlines()[0]]) + vague
 
 
 def version(content: list[str]) -> str:
@@ -300,7 +335,8 @@ def version(content: list[str]) -> str:
 NOT_A_QUESTION = "Broken: this card does not ask a question. Firstmate rewrites it."
 
 
-def render_card(card: dict, settled: bool, content: list[str], faults: list[str], broken: bool = False) -> list[str]:
+def render_card(card: dict, settled: bool, content: list[str], faults: list[str], broken: bool = False,
+                reports: list[str] | None = None) -> list[str]:
     """One card: an id line, a broken line or the lint's notes, the question, links, then the answer area.
 
     Lint faults are a note only: the card is still a call for the captain.
@@ -316,7 +352,7 @@ def render_card(card: dict, settled: bool, content: list[str], faults: list[str]
     states = {p["url"]: p["state"] for p in card.get("prs") or []}
     links = [(l.get("label") or "", l.get("url")) for l in card.get("links") or []]
     links += [("", u) for u in urls if u not in {l[1] for l in links}]
-    if links:
+    if links or reports:
         out += ["", "Links:"]
         for label, url in links:
             if m := PAGE_LINK.match(url or ""):
@@ -325,6 +361,7 @@ def render_card(card: dict, settled: bool, content: list[str], faults: list[str]
                 continue
             state = f" ({states[url]})" if url in states else ""
             out.append(f"- {label + ': ' if label else ''}{url}{state}")
+        out += reports or []
     out.append("")
     if card.get("options") or any(b[0] == "option" for b in blocks):
         out.append("To pick an option, write its letter on its own, like  b")
@@ -472,7 +509,7 @@ def without_acks(lines: list[str] | None) -> list[str]:
     return kept
 
 
-def build(live: dict, settled: set[str]) -> tuple[dict[str, list[str]], bool]:
+def build(live: dict, settled: set[str], reports: dict | None = None) -> tuple[dict[str, list[str]], bool]:
     """Build or rebuild every card not yet answered from its source record, and lint it.
 
     Returns the cards that do not ask a question (broken), the lint's notes on
@@ -495,7 +532,7 @@ def build(live: dict, settled: set[str]) -> tuple[dict[str, list[str]], bool]:
             broken.add(key)
         if faults:
             notes[key] = faults
-        new = render_card(card, key in settled, content, faults, bad)
+        new = render_card(card, key in settled, content, faults, bad, report_lines(card, reports or {}))
         if without_acks(read_lines(card_path(key))) != without_acks(new):
             write_lines(card_path(key), new)
             write_lines(SEEN / f"{key}.md", new)
@@ -649,6 +686,202 @@ def report_broken_pages(broken: dict[str, dict[str, list[str]]], now: str) -> li
     return records
 
 
+# ---------------------------------------------------------------- reports
+
+# A home-relative report path (data/<task>/report.md) or an absolute path into a home, in card or page
+# text. The home is the one the text names just before the path ("the cd second mate's data/x.md"),
+# else the home that owns the text.
+LOCAL_PATH = re.compile(r"(?<![\w/.~-])((?:/[\w.-]+)*?/?data/[\w.-]+(?:/[\w.-]+)*\.(?:md|txt))(?![\w/])")
+SECONDMATE = re.compile(r"^- (\S+) - .*\(home: ([^;]+);")
+MAX_REPORTS = 50
+
+
+def homes() -> dict[str, Path]:
+    """Every home whose reports open as pages: "main" and each secondmate registered in it."""
+    found = {"main": Path(HOME)}
+    for l in read_lines(Path(HOME) / "data" / "secondmates.md") or []:
+        if m := SECONDMATE.match(l):
+            found.setdefault(m.group(1), Path(m.group(2).strip()))
+    return found
+
+
+def card_home(card: dict) -> str | None:
+    """The home a card's text speaks for, or None for a remote home this machine cannot read."""
+    if card.get("source") in ("main-hold", "main-worker") or card.get("home") in (None, "", "main"):
+        return "main"
+    return None if card.get("remote") else card.get("home")
+
+
+def strings(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in strings(v)]
+    return []
+
+
+def cited(text: str, owner: str | None, known: dict[str, Path]) -> list[tuple[str, str]]:
+    """Each report a text cites, as (home id, path in that home), in order and once each."""
+    out: list[tuple[str, str]] = []
+    names = "|".join(re.escape(h) for h in sorted(known, key=len, reverse=True) if h != "main")
+    named = re.compile(rf"\b({names})\b(?:'s|\s+second\s*mate|\s+secondmate|\s+home)" if names else r"(?!)", re.I)
+    main_named = re.compile(r"\bmain (?:firstmate|home)\b", re.I)
+    for m in LOCAL_PATH.finditer(text):
+        raw, home = m.group(1), owner
+        if raw.startswith("/"):
+            home = next((h for h, root in known.items() if raw.startswith(str(root).rstrip("/") + "/")), None)
+            if home is None:
+                continue
+            raw = raw[len(str(known[home]).rstrip("/")) + 1:]
+        else:
+            before = text[max(0, m.start() - 80):m.start()]
+            hits = [(x.start(), x.group(1)) for x in named.finditer(before)]
+            hits += [(x.start(), "main") for x in main_named.finditer(before)]
+            if hits:
+                home = max(hits)[1]
+                home = next((h for h in known if h.lower() == home.lower()), home)
+        if home is None or home not in known or ".." in raw.split("/"):
+            continue
+        if (home, raw) not in out:
+            out.append((home, raw))
+    return out
+
+
+def report_rel(home: str, rel: str) -> str:
+    """The report's page, relative to the board folder."""
+    return f"reports/{home}/{rel}"
+
+
+def find_reports(cards: list[dict], page_ids: list[str]) -> dict:
+    """Every report the cards and linked pages cite, and the reports those cite, up to MAX_REPORTS.
+
+    Returns {"cards": {key: [(home, rel)]}, "reports": {(home, rel): source path or None}}.
+    """
+    known = homes()
+    by_card = {c["key"]: cited("\n".join(strings({k: v for k, v in c.items() if k != "evidence"})),
+                               card_home(c), known) for c in cards}
+    queue = [r for refs in by_card.values() for r in refs]
+    for pid in page_ids:
+        html_path, _ = page_source(pid)
+        if html_path.is_file():
+            queue += cited(html.unescape(html_path.read_text()), "main", known)
+    found: dict[tuple[str, str], Path | None] = {}
+    while queue and len(found) < MAX_REPORTS:
+        ref = queue.pop(0)
+        if ref in found:
+            continue
+        path = known[ref[0]] / ref[1]
+        found[ref] = path if path.is_file() else None
+        if found[ref]:
+            queue += cited(path.read_text(errors="replace"), ref[0], known)
+    return {"cards": by_card, "reports": found}
+
+
+def report_lines(card: dict, reports: dict) -> list[str]:
+    """A card's links to the reports it cites, with their check notes or why one does not open."""
+    out = []
+    for home, rel in (reports.get("cards") or {}).get(card["key"], []):
+        if (reports.get("reports") or {}).get((home, rel)) is None:
+            out.append(f"- Report ({home}): {rel} - not found in the {home} home")
+            continue
+        n = len([f for fs in (report_record(home, rel).get("faults") or {}).values() for f in fs])
+        note = f" - check: {n} note{'s' if n != 1 else ''}" if n else ""
+        out.append(f"- Report ({home}): {report_rel(home, rel)}{note}")
+    return out
+
+
+HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+FENCE = re.compile(r"^\s*(```|~~~)")
+
+
+def report_sections(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """The report split at its markdown headings (not inside code fences): (heading or "", lines)."""
+    sections: list[tuple[str, list[str]]] = [("", [])]
+    fenced = False
+    for l in lines:
+        if FENCE.match(l):
+            fenced = not fenced
+        elif not fenced and HEADING.match(l):
+            sections.append((l, []))
+            continue
+        sections[-1][1].append(l)
+    return [s for s in sections if s[0] or any(l.strip() for l in s[1])]
+
+
+def report_lint_lines(heading: str, lines: list[str]) -> list[str]:
+    """A section's prose as the lint reads it: no code blocks, table rows or markdown marks."""
+    prose, fenced = [], False
+    if m := HEADING.match(heading):
+        prose += [m.group(2), ""]
+    for l in lines:
+        if FENCE.match(l):
+            fenced = not fenced
+            continue
+        if fenced or l.lstrip().startswith("|"):
+            prose.append("")
+            continue
+        prose.append(re.sub(r"^(\s*)>\s?", r"\1", l).replace("**", "").replace("`", ""))
+    return pages.lint_lines(prose)
+
+
+def report_record(home: str, rel: str) -> dict:
+    saved = REPORT_SEEN / home / (rel + ".json")
+    return json.loads(saved.read_text()) if saved.exists() else {}
+
+
+def build_reports(reports: dict) -> None:
+    """Copy each cited report to reports/<home>/<path>, with the lint's notes under each section heading.
+
+    The page is rebuilt when the report or this code changes. It is a copy to read: text written in
+    it is not recorded, and the next rebuild replaces it.
+    """
+    code = Path(__file__).read_text() + (HERE / "pages.py").read_text()
+    for (home, rel), src in (reports.get("reports") or {}).items():
+        if src is None:
+            continue
+        text = src.read_text(errors="replace")
+        source = version([text, code, LINT.read_text() if LINT.is_file() else ""])
+        path = BOARD / report_rel(home, rel)
+        if report_record(home, rel).get("source") == source and path.exists():
+            continue
+        sections = report_sections(text.splitlines())
+        faults: dict[str, list[str]] | None = {}
+        for i, (heading, body) in enumerate(sections):
+            f = lint(report_lint_lines(heading, body))
+            if f is None:
+                faults = None
+                break
+            if f:
+                faults[str(i)] = f
+        n = sum(len(f) for f in (faults or {}).values())
+        out = [f"<!-- report: {rel} | home: {home} | from: {src} (version {source}) -->",
+               "",
+               "- PROTOTYPE: this is a copy of the report to read. Text written here is not recorded.",
+               "- Press Enter on a link to open it: a web address opens in the browser, a report opens here.",
+               "- Close this tab with :q.",
+               ""]
+        if faults is None:
+            out += ["The plain-language check did not run on this report.", ""]
+        elif n:
+            out += [f"Check: {n} note{'s' if n != 1 else ''} on this report, under the parts they are about.", ""]
+        else:
+            out += ["Check: this report passes the plain-language check.", ""]
+        for i, (heading, body) in enumerate(sections):
+            notes = [l for f in (faults or {}).get(str(i), []) for l in wrap(f"Check: {f}", "> ", "> ")]
+            if heading:
+                out += [heading] + notes
+            elif notes:
+                out += notes + [""]
+            out += body
+        write_lines(path, out)
+        saved = REPORT_SEEN / home / (rel + ".json")
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        saved.write_text(json.dumps({"from": str(src), "source": source, "checked": faults is not None,
+                                     "faults": faults or {}}, indent=1) + "\n")
+
+
 def board_order(lines: list[str] | None) -> dict[str, list[str]]:
     """The card keys listed in each section; a card line before any section counts as with the captain."""
     order: dict[str, list[str]] = {WITH_CAPTAIN: [], BROKEN: [], CHARTED: [], WITH_FIRSTMATE: []}
@@ -711,6 +944,8 @@ def render_board(model: dict, live: dict, settled: set[str], places: dict[str, l
         "",
         "- Press Enter on a card line to open it in a new tab. Close it with :q.",
         "- In a card, press Enter on a page line to open that page in a new tab.",
+        "- Press Enter on a report path (data/<task>/report.md) to open that report in a new tab.",
+        "- Press Enter or gx on a web address to open it in the browser.",
         "- Write your answer at the bottom of the card. Save it with :wq.",
         "- Move a line to change the order (dd, then p).",
         "- Save and quit everything with :wqa.",
@@ -827,7 +1062,9 @@ def main(argv: list[str]) -> int:
     # Comments are recorded before any page is rebuilt, so every comment has its acknowledgement
     # when the rebuild carries it over.
     records = collect(live, settled, now) + collect_pages(now)
-    broken, notes, checked = build(live, settled)
+    reports = find_reports(calls + to_close, page_ids)
+    build_reports(reports)
+    broken, notes, checked = build(live, settled, reports)
     page_broken = build_pages(page_ids)
     records += report_broken(live, broken, now) + report_broken_pages(page_broken, now)
     emit(records, now_iso)
@@ -845,7 +1082,8 @@ def main(argv: list[str]) -> int:
     # Run from the board folder so cards/<key>.md and pages/<id>.md resolve for gf and the editor's own paths.
     editor = shlex.split(os.environ.get("EDITOR") or "nvim")
     if Path(editor[0]).name in ("nvim", "vim"):
-        # gf and Enter on a line naming cards/<key>.md or pages/<id>.md open it in a new tab.
+        # gf and Enter on a line naming cards/<key>.md, pages/<id>.md or a report open it in a new tab;
+        # Enter and gx on a web address hand it to the opener (TUI_BOARD_OPENER, else xdg-open).
         editor += ["-S", str(HERE / "board.vim")]
     rc = subprocess.run(editor + [target], cwd=BOARD).returncode
     if rc != 0:
