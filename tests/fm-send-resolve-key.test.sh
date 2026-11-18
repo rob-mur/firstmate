@@ -34,6 +34,11 @@
 #      shows closes that entry, including a blocked: line whose note trails a
 #      "[key=...]" token the key grammar reads as prose. A key nothing owns
 #      still refuses, and that refusal hands the operator's message back intact.
+#  10. --handoff-key writes one machine-readable handoff-key= header per key
+#      into the local inbox record (a plain steer carries none), closes
+#      nothing, and refuses a bad or duplicate key, --key, an empty message,
+#      an explicit target, the typed plane, fire-and-forget, and a remote
+#      secondmate before anything is sent.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -649,6 +654,83 @@ test_flag_misuse_refuses() {
   pass "fm-send --resolve-key: --key, empty message, explicit targets, and malformed keys refuse loudly"
 }
 
+# --handoff-key is the explicit hand-off marker the board reads: it writes one
+# handoff-key=<key> header per key into the inbox record, keeps the body
+# byte-identical, and closes nothing. A steer that only names a key in its text
+# carries no marker.
+test_handoff_key_marks_the_inbox_record() {
+  local dir fb log home rc got
+  dir="$TMP_ROOT/handoff"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home handoff)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=pick]: pick layout A or B\n' > "$home/state/t1.status"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+
+  run_send "$fb" "$home" "$log" t1 "Keep the hold on pick; the captain decides."; rc=$?
+  expect_code 0 "$rc" "a plain steer naming a key should succeed"
+  if grep -q '^handoff-key=' "$home/state/t1.inbox/001.msg"; then
+    fail "a steer that only names a key carried a hand-off marker: $(cat "$home/state/t1.inbox/001.msg")"
+  fi
+
+  run_send "$fb" "$home" "$log" t1 --handoff-key pick --handoff-key=board-call "go with B"; rc=$?
+  expect_code 0 "$rc" "a marked hand-off steer should succeed"
+  assert_equals $'handoff-key=pick\nhandoff-key=board-call' \
+    "$(sed -n '/^--$/q;/^handoff-key=/p' "$home/state/t1.inbox/002.msg")" \
+    "the record should carry one handoff-key header per key, before the body"
+  got=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state/t1.inbox/002.msg")
+  assert_equals "go with B" "$got" "the marker must not change the delivered message"
+  assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the hand-off"
+  if grep -F 'resolved' "$home/state/t1.status" >/dev/null; then
+    fail "a hand-off marker closed the decision: $(cat "$home/state/t1.status")"
+  fi
+
+  run_send "$fb" "$home" "$log" fm-domain --handoff-key mate-call "take mate-call from here"; rc=$?
+  expect_code 0 "$rc" "a marked hand-off to a local secondmate should succeed"
+  grep -qx 'handoff-key=mate-call' "$home/state/domain.inbox/001.msg" \
+    || fail "the secondmate record lost its hand-off marker: $(cat "$home/state/domain.inbox/001.msg")"
+  got=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state/domain.inbox/001.msg")
+  case "$got" in
+    "$FM_FROMFIRST_MARK"corr=*) : ;;
+    *) fail "the marked secondmate hand-off lost its from-firstmate framing: $got" ;;
+  esac
+  pass "fm-send --handoff-key: only the flag marks a steer as a hand-off, and it closes nothing"
+}
+
+handoff_refusal() {  # <home> <fakebin> <log> <err> <expected> <fm-send args...>
+  local home=$1 fb=$2 log=$3 err=$4 expected=$5 rc
+  shift 5
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$log" FM_FAKE_SSH_RC=0 \
+    "$SEND" "$@" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-send $* should refuse"
+  assert_contains "$(cat "$err")" "$expected" "the refusal of fm-send $* should be explicit"
+}
+
+test_handoff_key_misuse_refuses() {
+  local dir fb log home err
+  dir="$TMP_ROOT/handoff-misuse"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"; : > "$log"
+  home=$(setup_remote_home handoff-misuse)
+  fm_write_meta "$home/state/t7.meta" "window=sess:fm-t7" "kind=ship"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+
+  handoff_refusal "$home" "$fb" "$log" "$err" "not a valid decision key" t7 --handoff-key 'bad key!' "go"
+  handoff_refusal "$home" "$fb" "$log" "$err" "duplicate --handoff-key" t7 --handoff-key k --handoff-key k "go"
+  handoff_refusal "$home" "$fb" "$log" "$err" "cannot accompany --key" t7 --handoff-key k --key Enter
+  handoff_refusal "$home" "$fb" "$log" "$err" "requires a nonempty message" t7 --handoff-key k
+  handoff_refusal "$home" "$fb" "$log" "$err" "explicit backend target" sess:elsewhere --handoff-key k "go"
+  handoff_refusal "$home" "$fb" "$log" "$err" "typed plane" t7 --handoff-key k "/compact"
+  handoff_refusal "$home" "$fb" "$log" "$err" "cannot accompany --fire-and-forget" \
+    fm-domain --fire-and-forget 0123456789abcdef --handoff-key k "go"
+  handoff_refusal "$home" "$fb" "$log" "$err" "remote secondmate" rsm --handoff-key k "go"
+
+  [ ! -s "$log" ] || fail "a refused hand-off still typed or sent something: $(cat "$log")"
+  [ ! -e "$home/state/t7.inbox" ] && [ ! -e "$home/state/domain.inbox" ] && [ ! -e "$home/state/rsm.inbox" ] \
+    || fail "a refused hand-off still wrote an inbox record"
+  pass "fm-send --handoff-key: malformed or duplicate keys, --key, empty, typed, fire-and-forget, explicit, and remote targets refuse"
+}
+
 # The reported silent no-op: fm-send --resolve-key on a reserved pending-reply-*
 # key used to write "answered: ..." and exit 0 while the classify fold left the
 # decision open. The operator path must actually close it, using the owning
@@ -1190,6 +1272,8 @@ test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key
 test_remote_transport_failure_does_not_close
 test_flag_misuse_refuses
+test_handoff_key_marks_the_inbox_record
+test_handoff_key_misuse_refuses
 test_reserved_pending_reply_key_closes_through_resolve_key
 test_unrelated_writer_cannot_close_or_hijack_reserved_key
 test_unclosable_reserved_key_refuses_before_send
