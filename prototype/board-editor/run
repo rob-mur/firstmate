@@ -8,8 +8,11 @@ Reads every captain call from bin/fm-captain-calls.sh (read-only) for the home
 in TUI_BOARD_HOME (default /home/rob/repos/firstmate), or from a saved copy of
 its JSON in TUI_BOARD_CALLS_JSON. Writes prototype/board/: board.md lists every
 call, one line each, then the settled items to close; cards/<key>.md holds one
-card. In NeoVim, gf on a board line opens that card and Ctrl-^ (or Ctrl-o)
-comes back. Move call lines in board.md to reorder; write an answer at the
+card. Open a card in a NEW TAB so that closing it returns to board.md:
+<C-w>gf on a card line, or :tabedit cards/<key>.md. When the editor is nvim or
+vim, the run maps plain gf and Enter in board.md (that buffer only) to open the
+card named on the cursor line in a new tab, from anywhere on the line; :q (or :wq) on a card closes its tab and returns to
+board.md. Move call lines in board.md to reorder; write an answer at the
 bottom of a card file. When the editor exits, a new order and every answer are
 appended to prototype/outbox.jsonl ONLY; nothing reaches the board, its
 priority file, the backlog or a worker. Standard library only.
@@ -91,7 +94,9 @@ def render_board(model: dict) -> list[str]:
         f"# Captain's calls: {n} call{'s' if n != 1 else ''}" + (f" (built {built}Z)" if built else ""),
         "",
         "One call per line, in board order. Move a line to reorder it (dd, then p).",
-        "On a card line, gf opens the card. Ctrl-^ comes back here (Ctrl-o too, maybe after a few presses).",
+        "Open a card in a new tab, so closing it brings you back here: <C-w>gf on a card line,",
+        "or :tabedit cards/<key>.md. In nvim or vim, plain gf and Enter here do the same.",
+        "In a card, :wq (or :q) closes its tab and returns here. gt / gT move between tabs.",
         "Write answers at the bottom of the card files. When done, save all and quit: :wqa",
         "To send nothing at all, quit with :qa!",
         "",
@@ -120,7 +125,8 @@ def render_card(card: dict, settled: bool) -> list[str]:
     out = [
         f"Card {card['key']}   From: {origin(card)}" + (f"   Repo: {card['repo']}" if card.get("repo") else ""),
         "Write your answer at the bottom. A letter on its own, like  b , picks that option.",
-        "Back to the board: Ctrl-^ (or Ctrl-o). Opened on its own: save and quit with :wq",
+        "Opened from the board in a tab: :wq (or :q) closes this tab and returns to the board.",
+        "Opened on its own: save and quit with :wq",
         "",
     ]
     if settled:
@@ -216,6 +222,12 @@ def main(argv: list[str]) -> int:
     # Run from the board folder so cards/<key>.md resolves for gf and the editor's own paths.
     target = f"cards/{argv[0]}.md" if argv else "board.md"
     editor = shlex.split(os.environ.get("EDITOR") or "nvim")
+    if not argv and Path(editor[0]).name in ("nvim", "vim"):
+        # A buffer-local mapping on board.md only (a modeline cannot map keys):
+        # gf and Enter open the card named on the line in a new tab; a line with no card does nothing.
+        open_card = ("nnoremap <buffer> <silent> gf <Cmd>let b:fm_card = matchstr(getline('.'), 'cards/[^ )]\\+\\.md')"
+                     "<Bar>if b:fm_card != ''<Bar>exe 'tabedit' fnameescape(b:fm_card)<Bar>endif<CR>")
+        editor += ["-c", open_card, "-c", "nmap <buffer> <CR> gf"]
     rc = subprocess.run(editor + [target], cwd=BOARD).returncode
     if rc != 0:
         print(f"The editor exited with status {rc}; nothing written. The board is left in {BOARD} until the next run.")
