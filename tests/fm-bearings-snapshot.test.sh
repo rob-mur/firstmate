@@ -1585,10 +1585,12 @@ test_include_mrs_lists_only_uncovered_mrs() {
 test_include_mrs_covers_by_task_meta_and_reference() {
   local home fakebin json
   home=$(make_home mrs-meta); write_fixture "$home"
+  # The task asks the captain, so its card links the MR its meta records.
   fm_write_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" "worktree=$home/projects/ship-wt" "project=firstmate" \
     "harness=claude" "kind=ship" "mode=no-mistakes" \
     "pr=https://gitlab.example.com/grp/app/aegis/-/merge_requests/880"
+  printf 'needs-decision [key=merge]: merge it now?\n' >> "$home/state/ship-task.status"
   sed -i '/^## Queued/a\
 - [ ] mr-8-review - Review grp/app/aegis!8 (repo: aegis) (kind: ship)' "$home/data/backlog.md"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
@@ -1642,6 +1644,63 @@ test_include_mrs_ignores_records_the_view_does_not_show() {
   printf '%s' "$json" | jq -e '(.open_mrs | map(.key)) == ["mr-42-880", "mr-42-870", "mr-7-8"]' >/dev/null \
     || fail "a Done record or a cut-off status tail must not hide an open MR: $json"
   pass "an MR named only where the view does not show it still gets its own row"
+}
+
+# An underway row shows only the task name and its cut `doing` text, never the
+# MR the task records. A task whose row does not name its MR leaves that MR on
+# the open-MR rows; once the row names it, the row covers it.
+test_include_mrs_lists_a_recorded_mr_its_underway_row_does_not_name() {
+  local home fakebin json
+  home=$(make_home mrs-unnamed); write_fixture "$home"
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" "worktree=$home/projects/ship-wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://gitlab.example.com/grp/app/aegis/-/merge_requests/880"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --include-mrs --all-in-flight --json 2>/dev/null) || fail "--include-mrs run failed"
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[] | select(.id == "ship-task")] | length) == 1
+    and ([.recorded_prs[] | select(.id == "ship-task") | .url]
+         == ["https://gitlab.example.com/grp/app/aegis/-/merge_requests/880"])
+  ' >/dev/null || fail "the fixture must record !880 on an underway task: $json"
+  printf '%s' "$json" | jq -e '(.open_mrs | map(.key)) == ["mr-42-880", "mr-42-870", "mr-7-8"]' >/dev/null \
+    || fail "a recorded MR its underway row does not name must keep its own row: $json"
+  printf 'working: MR https://gitlab.example.com/grp/app/aegis/-/merge_requests/880 in review\n' \
+    > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
+  json=$(run "$home" "$fakebin" --include-mrs --all-in-flight --json 2>/dev/null) || fail "--include-mrs run failed"
+  printf '%s' "$json" | jq -e '
+    [.in_flight[] | select(.id == "ship-task") | .doing | test("merge_requests/880 in review")] == [true]
+    and (.open_mrs | map(.key)) == ["mr-42-870", "mr-7-8"]' >/dev/null \
+    || fail "an underway row that names its own MR must cover it: $json"
+  pass "a recorded MR stays on the open-MR rows until its underway row names it"
+}
+
+# A wait on another task's MR names that MR but says nothing of its state, so
+# it does not hide the MR: the MR keeps its own open-MR row.
+test_include_mrs_lists_an_mr_another_row_only_waits_on() {
+  local home fakebin json
+  home=$(make_home mrs-wait); write_fixture "$home"
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" "worktree=$home/projects/ship-wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://gitlab.example.com/grp/app/aegis/-/merge_requests/870"
+  fm_write_meta "$home/state/aegis-wait.meta" \
+    "window=firstmate:fm-aegis-wait" "worktree=$home/projects/ship-wt" "project=aegis" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'working: waiting on MR grp/app/aegis!870 (https://gitlab.example.com/grp/app/aegis/-/merge_requests/870)\n' \
+    > "$home/state/aegis-wait.status"
+  record_claude_state "$home/state" aegis-wait idle
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --include-mrs --all-in-flight --json 2>/dev/null) || fail "--include-mrs run failed"
+  printf '%s' "$json" | jq -e '
+    [.in_flight[] | select(.id == "aegis-wait") | .doing | test("grp/app/aegis!870")] == [true]
+  ' >/dev/null || fail "the fixture must name !870 on the waiting row: $json"
+  printf '%s' "$json" | jq -e '
+    (.open_mrs | map(.key)) == ["mr-42-880", "mr-42-870", "mr-7-8"]
+    and ([.open_mrs[] | select(.key == "mr-42-870") | .state | startswith("mergeable")] == [true])
+  ' >/dev/null || fail "an MR another row only waits on must keep its own row and state: $json"
+  pass "an MR another underway row only waits on keeps its own open-MR row"
 }
 
 # The board payload built live (no --snapshot) asks the snapshot for the
@@ -4155,6 +4214,8 @@ fm_test_run \
   test_include_mrs_ignores_records_the_view_does_not_show \
   test_include_mrs_drops_archived_project_mrs \
   test_include_mrs_failure_degrades \
+  test_include_mrs_lists_a_recorded_mr_its_underway_row_does_not_name \
+  test_include_mrs_lists_an_mr_another_row_only_waits_on \
   test_live_board_payload_carries_the_open_mrs \
   test_include_prs_maps_custom_branch_prefix_to_task \
   test_partial_github_failure_degrades \

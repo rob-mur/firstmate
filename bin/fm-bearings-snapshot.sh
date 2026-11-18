@@ -35,9 +35,12 @@
 # `projects/<id>` read per distinct project (at most FM_BEARINGS_MR_PROJECT_MAX)
 # drops the MRs of an archived project; a project it cannot read keeps its MRs.
 # An MR is covered only when its exact URL or full reference (group/project!iid)
-# appears in this view's own projected output (an underway row, a decision, a
-# recorded PR, a queued item) - never by a fuzzy match, and never by a Done record
-# or a status line the view cuts short, since the board would then show it nowhere. A
+# appears where the board shows it: a decision (its text, or the PR its own task
+# recorded, which its card links), a queued or landed row, a contribution card,
+# or the visible name or `doing` text of the underway row of the task that
+# records that MR. It is never covered by a fuzzy match, a Done record, a status
+# line the view cuts short, a recorded PR no row shows, or a wait that another
+# task's underway row names, since the board would then not show it as its own. A
 # missing glab, no host, no auth, a failure or a timeout leaves open_mrs out, sets
 # the mrs: line to `unavailable (...)`, logs one stderr line, and exits 0.
 #
@@ -230,9 +233,9 @@ Opt-in surfaces: --fields bodies|paths|actions|endpoints|gate-text
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs),
   --include-mrs (adds open_mrs{key,repo,title,url,state,updated}: the captain's open
-  GitLab MRs, authored or awaiting their review, that the rest of this view does not
-  show by URL or full reference; the mrs: line says whether they were checked or
-  unavailable).
+  GitLab MRs, authored or awaiting their review, that no decision, queued, landed or
+  contribution row, nor the underway row of the task that records it, shows by URL or
+  full reference; the mrs: line says whether they were checked or unavailable).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 --include-mrs bounds: FM_BEARINGS_GITLAB_HOST (default: glab's configured host),
   FM_BEARINGS_MR_TIMEOUT seconds per glab call (10), FM_BEARINGS_MR_DETAIL_MAX MRs
@@ -1138,12 +1141,16 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
 # drop MRs of an archived project, then one bounded detail and approvals call per
 # uncovered MR (at most FM_BEARINGS_MR_DETAIL_MAX of them, run in parallel).
 # Read-only. An MR is covered when its exact web_url or full reference
-# (group/project!iid), not followed by another digit, appears in the projected
-# model; there is no fuzzy match. The canonical snapshot is deliberately not
+# (group/project!iid), not followed by another digit, appears in a projected
+# section the board shows (decisions, gates, landed, captain contributions), is
+# the recorded PR of an open decision's own task (its card links it), or appears
+# in the name or `doing` text of the underway row of the task that records it;
+# there is no fuzzy match. The canonical snapshot text is deliberately not
 # consulted: its Done records and full status lines name MRs the board never
-# shows, which would hide them from every card and row. A missing glab, no host,
-# or a failed or timed-out call leaves open_mrs out, says so on the mrs line, and
-# writes one line to stderr; it never fails the snapshot.
+# shows, which would hide them from every card and row. recorded_prs alone and
+# a wait on another task's MR do not cover either, for the same reason. A
+# missing glab, no host, or a failed or timed-out call leaves open_mrs out, says
+# so on the mrs line, and writes one line to stderr; it never fails the snapshot.
 MR_STATUS='not_requested (run: /bearings include MRs)'
 OPEN_MRS=null
 if [ "$INCLUDE_MRS" = 1 ]; then
@@ -1170,14 +1177,36 @@ if [ "$INCLUDE_MRS" = 1 ]; then
       mr_unavailable "glab api failed or timed out on $mr_host"
     else
       mr_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-mrs.XXXXXX")
-      printf '%s\n' "$MODEL" > "$mr_tmp/known"
+      mr_coverage_failed() { rm -rf "$mr_tmp"; echo "fm-bearings-snapshot: MR coverage projection failed" >&2; exit 1; }
+      mr_rec=$(printf '%s' "$SNAP" | jq -c \
+        '[.tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url}]') \
+        || mr_coverage_failed
+      # What the board shows: decision cards and waiting rows (their text and
+      # the PR a decision's own task recorded, which its card links), queued
+      # and charted rows, landed rows and contribution cards. An underway row
+      # shows only its name and its cut `doing`, and covers only the MR its own
+      # task records - a wait it names on another task's MR is not that MR's row.
+      printf '%s\n' "$MODEL" | jq --argjson rec "$mr_rec" '
+        ([.decisions_open[]?.id] | map(strings)) as $ids
+        | {decisions_open, gates, landed, contributions: (.contributions.captain // null),
+           decision_prs: [$rec[] | select(.id as $i | any($ids[]; . == $i)) | .url]}' > "$mr_tmp/known" \
+        || mr_coverage_failed
+      printf '%s' "$MODEL" | jq -c --argjson rec "$mr_rec" '
+        [.in_flight[]? | select(.state != "done") | . as $r
+         | {text: ("\(.name // "") \(.doing // "")"),
+            own: ([$rec[] | select(.id == $r.id) | .url] + [$r.pr_url // empty] | map(strings))}
+         | select(.own != [])]' > "$mr_tmp/rows" \
+        || mr_coverage_failed
       # Uncovered MRs, newest activity first.
-      mr_uncovered=$(printf '%s' "$mr_list" | jq -c --rawfile known "$mr_tmp/known" '
-        def recorded($s): ($s | length) > 0 and
-          any($known | indices($s)[]; ($known[(. + ($s | length)):(. + ($s | length) + 1)] | test("^[0-9]") | not));
+      mr_uncovered=$(printf '%s' "$mr_list" | jq -c --rawfile known "$mr_tmp/known" --slurpfile rows "$mr_tmp/rows" '
+        def names($t; $s): ($s | length) > 0 and
+          any($t | indices($s)[]; ($t[(. + ($s | length)):(. + ($s | length) + 1)] | test("^[0-9]") | not));
+        def shown($s): names($known; $s);
+        def own_row($u; $s): any($rows[0][]; any(.own[]; . == $u) and names(.text; $s));
         [ .[] | select(type == "object" and (.iid | type) == "number" and (.project_id | type) == "number"
                        and ((.web_url // "") | startswith("https://")))
-          | select((recorded(.web_url) or recorded(.references.full // "")) | not) ]
+          | .web_url as $u | (.references.full // "") as $ref
+          | select((shown($u) or shown($ref) or own_row($u; $u) or own_row($u; $ref)) | not) ]
         | sort_by(.updated_at // "") | reverse')
       # GitLab keeps an MR "opened" after its project is archived and does not
       # honour the list call's archive filter everywhere, so read each distinct
