@@ -172,8 +172,9 @@
 # board session itself ended. It routes nothing; bin/fm-board-page.sh route
 # owns delivery. It exits 3 like `answers` when the result is not fully
 # accounted for. `silent` also holds a result whose every queued item is a page
-# prompt, once `fm-board-page.sh routed` confirms each one reached its page, so
-# a page's answer goes to the page's agent and never wakes the handler.
+# prompt, once `fm-board-page.sh routed` confirms each one reached its page and
+# a live owning task was told, so a page's answer goes to the page's agent and
+# never wakes the handler; that header owns what counts as routed.
 #
 # `priority` is this adapter's half of the board-priority seam in
 # bin/fm-procevent.sh. It prints, as one compact JSON line, the
