@@ -32,8 +32,10 @@ The generator's header owns those rules.
 Status-sourced cards carry the key `status.[<mate>.]<task>.<key>`, and the snapshot row keeps `task`, `decision_key` and `mate`.
 The board's keyed-answer intake announces such a key as skipped, because no main-backlog hold owns it.
 Route the answer from the skipped row: run `FM_HOME=<home of the mate, or this home for a main task> bin/fm-send.sh <task> --resolve-key <decision_key> '<answer>'`, so the answer closes the question on the worker's side as well.
-A secondmate question the parent's own status log shows is read from the parent task, so it reaches the board even when the mate's home summary is invalid or empty; it is skipped only when the home is valid with no active work, or already lists the same key.
+A secondmate question the parent's own status log shows is read from the parent task, so it reaches the board even when the mate's home summary is invalid or empty; it is skipped only when the home already lists the same key.
 Its row has `mate: null` and `task` set to the mate id, so run that send under this home with the mate id as the task.
+Only a resolved line closes such a key: a mate that reports no active work keeps it listed with a note saying the key is not resolved.
+A mate whose home cannot be read keeps its last-read rows, each marked "could not read <mate>, last seen <time>", plus a warning row naming the read failure.
 A finished task whose last event names a live review page (a `/session/<id>` link) becomes a `review.<task>` card with the verb `review-ready` and the choices "Reviewed, carry on" and "Not yet, keep it on the board".
 The tailnet review-page origin lifts into card links alongside https URLs.
 Card links each sit on their own line and wrap instead of clipping, and the card title and about text are base size and never truncated.

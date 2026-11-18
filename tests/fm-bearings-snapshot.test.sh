@@ -841,12 +841,17 @@ test_parent_decision_is_untrusted_contradiction_only() {
       and .contradiction == true
       and (.parent_event.open_decisions | any(.key == "stale" and .verb == "needs-decision"))
   ' >/dev/null || fail "parent decision crossed structured-home authority boundary: $canonical"
+  # The home stays authoritative for its own state, but the open parent key is
+  # not dropped: it stays listed, noted as one the idle home no longer carries,
+  # until a resolved line closes it.
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "authority" and .state == "no_active_work" and .contradiction == true))
-      and (.decisions_open | any(.[]; .id == "authority") | not)
-  ' >/dev/null || fail "bearings promoted a stale parent decision: $json"
-  pass "parent decisions remain untrusted contradiction evidence"
+      and ([.decisions_open[] | select(.id == "authority")] | length) == 1
+      and (.decisions_open | any(.[]; .id == "authority" and .key == "status.authority.stale"
+        and .note == "authority reports no active work; key not resolved"))
+  ' >/dev/null || fail "bearings dropped or misreported an open parent key: $json"
+  pass "parent decisions stay contradiction evidence, and their open key stays listed with a note"
 }
 
 test_parent_evidence_reconciles_by_verb_and_key() {
@@ -2823,6 +2828,133 @@ EOF
   pass "active children reach Underway independently of a home captain hold"
 }
 
+
+seed_held_child() {  # <mate-home> <id> <title> <status-line>
+  local mate=$1 id=$2 title=$3 line=$4
+  mkdir -p "$mate/projects/$id"
+  printf -- '- [ ] %s - %s (repo: sample) (kind: ship) (since 2026-07-13)\n' \
+    "$id" "$title" >> "$mate/data/backlog.md"
+  fm_write_meta "$mate/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$mate/projects/$id" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" "$id" idle
+  printf '%s\n' "$line" > "$mate/state/$id.status"
+}
+
+# Reproduces the 2026-11-18 board: a child that paused or blocked left Under
+# way, because only working children reached the home ledger's active rows.
+test_paused_and_blocked_children_stay_under_way() {
+  local home mate fakebin json underway
+  home=$(make_home held-children-underway)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/held-children-underway-home"
+  make_valid_secondmate_home crew "$mate"
+  append_secondmate_registry "$home" crew "$mate"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$mate/data/backlog.md"
+  seed_working_child "$mate" child-run "running child"
+  seed_held_child "$mate" child-park "parked child" 'paused: waiting for the vendor build'
+  seed_held_child "$mate" child-block "blocked child" 'blocked [key=gpu-runner]: no GPU runner is free'
+  printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[] | select(.id | startswith("crew/")) | .id] | sort)
+        == ["crew/child-block", "crew/child-park", "crew/child-run"]
+      and (.in_flight | any(.[]; .id == "crew/child-park" and .state == "paused"
+        and .name == "parked child" and .repo == "sample" and (.doing | contains("vendor build"))))
+      and (.in_flight | any(.[]; .id == "crew/child-block" and .state == "blocked"
+        and (.doing | contains("GPU runner"))))
+      and (.in_flight | any(.[]; .id == "crew/child-run" and .state == "working"))
+      and (.decisions_open | any(.[]; .owner == "crew" and .decision_key == "gpu-runner"))
+  ' >/dev/null || fail "a paused or blocked child left Under way: $json"
+  underway=$(printf '%s' "$json" | "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot - \
+    | jq -c '[.underway[] | select(.id | startswith("crew/")) | .id] | sort')
+  [ "$underway" = '["crew/child-block","crew/child-park","crew/child-run"]' ] \
+    || fail "the board dropped a paused or blocked child from Under way: $underway"
+  pass "paused and blocked secondmate children stay in Under way with their own state"
+}
+
+# Reproduces the dropped wp-cd-gpu-runner key: the home finished its last child
+# and reported no active work, and the parent-log question it never resolved
+# vanished from every board section.
+test_open_parent_key_survives_a_home_with_no_active_work() {
+  local home mate fakebin json card
+  home=$(make_home open-key-idle-home)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/open-key-idle-home-mate"
+  make_valid_secondmate_home pruner "$mate"
+  append_secondmate_registry "$home" pruner "$mate"
+  fm_write_secondmate_meta "$home/state/pruner.meta" "$mate" "firstmate:fm-pruner" sample
+  printf 'blocked [key=gpu-runner]: CI needs a GPU runner before the next round\nworking [key=round-1]: round 1 under way\n' \
+    > "$home/state/pruner.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "pruner" and .state == "no_active_work"))
+      and (.decisions_open | any(.[]; .key == "status.pruner.gpu-runner" and .verb == "blocked"
+        and .owner == "pruner" and (.note | contains("no active work"))))
+  ' >/dev/null || fail "an unresolved parent-log key vanished for a home with no active work: $json"
+  card=$(printf '%s' "$json" | "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot - \
+    | jq -c '[.captains_call[], .waiting[] | select(.key == "status.pruner.gpu-runner")] | length')
+  [ "$card" = 1 ] || fail "the unresolved parent-log key is not on the board: $card"
+  printf 'resolved [key=gpu-runner]: runner added\n' >> "$home/state/pruner.status"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '.decisions_open | any(.[]; .key == "status.pruner.gpu-runner") | not' \
+    >/dev/null || fail "a resolved parent-log key stayed on the board: $json"
+  pass "an open parent-log key stays on the board until a resolved line closes it"
+}
+
+# Reproduces a child home read failure: once the home ledger cannot be read,
+# its rows stay on the board from the last good read, marked stale.
+test_unreadable_child_home_keeps_its_last_rows_marked_stale() {
+  local home mate fakebin json payload
+  home=$(make_home stale-child-home)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/stale-child-home-mate"
+  make_valid_secondmate_home cd "$mate"
+  append_secondmate_registry "$home" cd "$mate"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$mate/data/backlog.md"
+  seed_working_child "$mate" child-run "coverage names"
+  seed_held_child "$mate" child-block "cache layer" 'blocked [key=quota]: needs a larger quota'
+  printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "cd" and .freshness == "fresh" and (.stale_note // null) == null))
+      and ([.in_flight[] | select(.id | startswith("cd/"))] | length) == 2
+  ' >/dev/null || fail "the healthy first read did not show the child rows: $json"
+
+  printf 'not a ledger\n' > "$mate/state/home-summary.json"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    NET_LOG="$home/net.log" "$BEARINGS" --json)
+  printf '%s' "$json" | jq -e '
+    ("could not read cd, last seen 2026-07-11T18:00:00Z") as $note
+    | (.secondmates | any(.[]; .id == "cd" and .freshness == "cached" and .stale_note == $note))
+      and ([.in_flight[] | select(.id | startswith("cd/")) | .id] | sort) == ["cd/child-block", "cd/child-run"]
+      and all(.in_flight[] | select(.id | startswith("cd/")); .doing | startswith($note))
+      and (.decisions_open | any(.[]; .owner == "cd" and .decision_key == "quota" and .note == $note))
+      and (.omitted | any(.[]; .surface | contains("secondmate cd served from cached home ledger")))
+  ' >/dev/null || fail "an unreadable child home dropped or hid its last rows: $json"
+  payload=$(printf '%s' "$json" | "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot -)
+  printf '%s' "$payload" | jq -e '
+    ("could not read cd, last seen 2026-07-11T18:00:00Z") as $note
+    | ([.underway[] | select(.id | startswith("cd/"))] | length) == 2
+      and (.charted | any(.[]; .id == "stale-cd" and .kind == "warning" and .title == $note
+        and .dispatchable == false))
+      and (.captains_call | any(.[]; (.key | contains("quota")) and .detail == $note))
+  ' >/dev/null || fail "the board did not mark the stale child home: $payload"
+
+  rm -rf "$mate"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    NET_LOG="$home/net.log" "$BEARINGS" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "cd" and .freshness == "cached"))
+      and ([.in_flight[] | select(.id | startswith("cd/"))] | length) == 2
+      and (.decisions_open | any(.[]; .owner == "cd" and .decision_key == "quota"))
+  ' >/dev/null || fail "a missing child home dropped its last rows: $json"
+  pass "an unreadable or missing child home keeps its last rows, marked stale"
+}
+
 test_nameless_legacy_summary_uses_its_durable_identifier() {
   local parent remote_home fakebin json
   parent=$(make_home nameless-legacy-summary)
@@ -3142,7 +3274,9 @@ EOF
   ' >/dev/null || fail "canonical mixed-domain classification was wrong: $canonical"
   json=$(run "$home" "$fakebin" --json --fields bodies --all-landed)
   printf '%s' "$json" | jq -e '
-    ([.in_flight[].id] | sort) == ["hibit/hibit-worker", "home-assistant/prep", "wheel/wheel-worker"]
+    ([.in_flight[].id] | sort) == ["hibit/hibit-worker", "home-assistant/prep", "sshhip/unreadable-child", "wheel/wheel-worker"]
+      and (.in_flight | any(.id == "sshhip/unreadable-child" and .state == "unknown"
+        and (.doing | contains("dead-sshhip-child"))))
       and (.decisions_open | any(.id == "sshhip/reviewer-decision"))
       and (.decisions_open | any(.id == "home-assistant/captain-run") | not)
       and (.gates | any(.id == "production-observation" and .owner == "wheel"
@@ -3760,7 +3894,7 @@ EOF
     ([.secondmates[] | select(.freshness == "fresh" and .age_seconds == 10)] | length) == 4
       and ([.secondmates[] | select(.id == "ledger-1" and .freshness == "cached"
         and .age_seconds == 1000 and .provenance == "structured-home-cache")] | length) == 1
-      and ([.omitted[] | select(.surface == "secondmate ledger-1 served from cached home ledger")] | length) == 1
+      and ([.omitted[] | select(.surface | startswith("secondmate ledger-1 served from cached home ledger"))] | length) == 1
   ' >/dev/null || fail "one slow home prevented four fresh rows or hid its cache disclosure: $json"
   [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
     || fail "the mixed-speed snapshot made more than one remote read per ledger home"
@@ -4357,6 +4491,9 @@ fm_test_run \
   test_main_orphan_counterfactual_meta_clears_inventory_warning \
   test_working_captain_holds_keep_their_bucket_surfaces \
   test_active_children_project_independent_of_home_captain_hold \
+  test_paused_and_blocked_children_stay_under_way \
+  test_open_parent_key_survives_a_home_with_no_active_work \
+  test_unreadable_child_home_keeps_its_last_rows_marked_stale \
   test_nameless_legacy_summary_uses_its_durable_identifier \
   test_newest_filed_gates_are_selected_before_snapshot_bounds \
   test_underway_and_gate_rows_carry_the_durable_name_and_filed_date \

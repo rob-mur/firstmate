@@ -5,8 +5,8 @@
 # `fm-fleet-snapshot.v1`.
 # The command does not acquire the session lock, drain wakes, arm watchers,
 # mutate backlog state, or write reports. Its default ledger collector may
-# atomically refresh parent-side cached copies of remote home summaries under
-# state/secondmate-summary-cache, and it caches each local task's current-state
+# atomically refresh parent-side last-good copies of local and remote home
+# summaries under state/secondmate-summary-cache, and it caches each local task's current-state
 # read under state/crew-state-cache; those observational cache writes are its
 # only fleet-state mutation.
 #
@@ -89,11 +89,20 @@
 #     above. An unreadable-home fallback reports freshness.age_seconds from the
 #     observed status file's mtime instead: freshness is how fresh this snapshot's
 #     own observation is, never when a worker emitted the event.
-#     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
-#     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
-#     freshness is "cached" only for the cache source, and observed_at/age_seconds
-#     come from the selected summary's generation. Every successfully sampled home also carries
+#     Each structured-home record carries active_children, in_flight_children,
+#     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
+#     active_children lists only working children; in_flight_children lists
+#     every owned in-flight child in whatever current state it is in, and is
+#     null for a summary from an older producer that does not publish it.
+#     provenance.summary_source distinguishes "local-ledger", "remote-ledger",
+#     "local-ledger-cache", and "remote-ledger-cache". Every usable ledger read,
+#     local or remote, refreshes a last-good copy for its registered route under
+#     FM_SNAPSHOT_CACHE_DIR. When a later read fails, times out, exceeds the byte
+#     limit, finds the home missing or invalid, or finds the home state invalid,
+#     that last-good copy is served instead so the home's rows never silently
+#     vanish; freshness is then "cached" with read_failure naming why the live read
+#     was not used. observed_at/age_seconds come from the selected summary's
+#     generation. Every successfully sampled home also carries
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
@@ -288,9 +297,9 @@ hold-until date has arrived, and an undated hold remains below the aging thresho
 Cross-home collection uses FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the
 count bound) and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Every sampled remote home's state/home-summary.json is fetched concurrently
-under one FM_SNAPSHOT_BUDGET (default 5 seconds), with a valid prior copy under
-FM_SNAPSHOT_CACHE_DIR used when the live read fails, is invalid, or consumes the
-budget. Every ledger and cached copy must declare the current hold-classifier
+under one FM_SNAPSHOT_BUDGET (default 5 seconds). For local and remote homes
+alike, a valid prior copy under FM_SNAPSHOT_CACHE_DIR is used when the live read
+fails, is invalid, consumes the budget, or the home itself is missing or invalid. Every ledger and cached copy must declare the current hold-classifier
 schema, even when it contains no captain holds; older summaries are rejected. A
 home with neither a valid current ledger nor a valid current cached copy is
 reported unreadable with the reason; collection never computes a summary in
@@ -1268,6 +1277,15 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+    | ([ $owned_in_flight[] as $work
+         | select($work.current_role != "program")
+         | $tasks[]
+         | select(.id == $work.id)
+         | {id,kind,state:.current_state.state,
+            repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
+            name:(($work.title // null) | if . == null then null else trunc(70) end),
+            source:.current_state.source,
+            doing:((.current_state.detail // .current_state.state // "") | trunc(120))} ]) as $in_flight_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -1319,6 +1337,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         invalidity:$invalidity,
         state:$state,
         active_children:$active_all[:$child_n],
+        in_flight_children:$in_flight_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | tostring | gsub("\\s+"; " ")),
@@ -1348,6 +1367,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
           active_children:($active_all | length),
+          in_flight_children:($in_flight_all | length),
           decisions_open:($decisions_all | length),
           holds:($holds_all | length),
           queued:($queued_all | length),
@@ -1356,6 +1376,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         },
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
+          (if ($in_flight_all | length) > $child_n then {surface:"in_flight_children",count:(($in_flight_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
@@ -1934,6 +1955,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
   local row id home host remote registered registry_error task sampled_spawn_gen status_file status_observation_file event_raw event_note event_age observed_epoch observed_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
   local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot summary_index=0
+  local cache_eligible cache_home read_failure
   local seen_homes=''
   registry_file="$JSON_TRANSPORT_DIR/secondmate-registry.json"
   union_file="$JSON_TRANSPORT_DIR/secondmate-union.json"
@@ -2007,11 +2029,23 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         *) reason="invalid home: registered path is not absolute" ;;
       esac
     fi
+    # The last-good route cache is keyed by the registered route, so a home that
+    # later fails validation or disappears still finds its own last rows.
+    cache_path=
+    cache_eligible=false
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        [ -n "$host" ] || reason="invalid remote route: missing SSH host"
+        cache_path=$(snapshot_route_cache_path "$id" "$host" "$home" 2>/dev/null || true)
+      else
+        cache_path=$(snapshot_route_cache_path "$id" "" "$home" 2>/dev/null || true)
+      fi
+      [ -z "$cache_path" ] || cache_eligible=true
+    fi
+    if [ -z "$reason" ]; then
+      if [ "$remote" = true ]; then
+        [ -n "$host" ] || { reason="invalid remote route: missing SSH host"; cache_eligible=false; }
         case " $seen_homes " in
-          *" $host:$home "*) reason="invalid home: duplicate resolved remote route" ;;
+          *" $host:$home "*) reason="invalid home: duplicate resolved remote route"; cache_eligible=false ;;
           *) seen_homes="$seen_homes $host:$home" ;;
         esac
       elif ! validate_secondmate_home "$id" "$home" 2>/dev/null; then
@@ -2019,7 +2053,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
       else
         home=$VALIDATED_HOME
         case " $seen_homes " in
-          *" local:$home "*) reason="invalid home: duplicate resolved home route" ;;
+          *" local:$home "*) reason="invalid home: duplicate resolved home route"; cache_eligible=false ;;
           *) seen_homes="$seen_homes local:$home" ;;
         esac
       fi
@@ -2028,23 +2062,19 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     summary_age=0
     summary_observed=$SNAPSHOT_NOW
     summary_freshness=fresh
+    read_failure=
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        cache_path=$(snapshot_route_cache_path "$id" "$host" "$home" 2>/dev/null || true)
         collection_slot=$(jq -r --arg id "$id" 'select(.id == $id) | .slot' "$SNAPSHOT_COLLECT_DIR/manifest.jsonl" 2>/dev/null | head -1)
         collection_status=$(cat "$SNAPSHOT_COLLECT_DIR/$collection_slot.status" 2>/dev/null || true)
         if summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home" "$summary_file"; then
           summary_source='remote-ledger'
-          [ -z "$cache_path" ] || snapshot_cache_store "$summary_file" "$cache_path" || true
-        elif [ -n "$cache_path" ] && summary_file_read "$cache_path" "$home" "$summary_file"; then
-          summary_source='remote-ledger-cache'
-          summary_freshness=cached
         elif summary_file_oversized "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch"; then
-          reason="structured home ledger exceeded byte limit and no valid cached copy is available"
+          reason="structured home ledger exceeded byte limit"
         elif [ "$SNAPSHOT_COLLECTION_TIMED_OUT" -eq 1 ] && [ -z "$collection_status" ]; then
-          reason="structured home ledger collection timed out and no valid cached copy is available"
+          reason="structured home ledger collection timed out"
         else
-          reason="structured home ledger is missing, unreadable, or invalid and no valid cached copy is available"
+          reason="structured home ledger is missing, unreadable, or invalid"
         fi
       elif summary_file_read "$home/state/home-summary.json" "$home" "$summary_file"; then
         summary_source='local-ledger'
@@ -2053,13 +2083,8 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
       else
         reason="structured home ledger is missing, unreadable, or invalid"
       fi
-      if [ -z "$reason" ]; then
-        summary_age=$(snapshot_summary_age "$summary_file")
-        summary_observed=$(jq -r '.generated' "$summary_file")
-      fi
     fi
     if [ -z "$reason" ]; then
-      summary_sampled=true
       summary_valid=$(jq -r '.valid' "$summary_file")
       if [ "$summary_valid" != true ]; then
         summary_invalidity=$(jq -r '.invalidity.kind // "unknown"' "$summary_file")
@@ -2068,6 +2093,37 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
           *) reason="structured home state invalid" ;;
         esac
       fi
+    fi
+    if [ -z "$reason" ]; then
+      [ -z "$cache_path" ] || snapshot_cache_store "$summary_file" "$cache_path" || true
+    elif [ "$cache_eligible" = true ]; then
+      # A home that was readable before keeps its last good rows, served as
+      # cached with the failure that forced the fallback.
+      # A local home that failed validation has no canonical path this run, so
+      # the cached copy's own recorded home identifies it.
+      cache_home=$home
+      case "$remote:$reason" in
+        false:"invalid home: "*) cache_home=$(jq -r '.home // ""' "$cache_path" 2>/dev/null || true) ;;
+      esac
+      if [ -n "$cache_home" ] && summary_file_read "$cache_path" "$cache_home" "$summary_file"; then
+        read_failure=$reason
+        reason=
+        home=$cache_home
+        summary_freshness=cached
+        if [ "$remote" = true ]; then summary_source='remote-ledger-cache'; else summary_source='local-ledger-cache'; fi
+      fi
+    fi
+    if [ "$remote" = true ]; then
+      case "$reason" in
+        "structured home ledger"*) reason="$reason and no valid cached copy is available" ;;
+      esac
+    fi
+    if [ "$reason" = "structured home state invalid" ]; then summary_sampled=true; fi
+    if [ -z "$reason" ]; then
+      summary_age=$(snapshot_summary_age "$summary_file")
+      summary_observed=$(jq -r '.generated' "$summary_file")
+      summary_sampled=true
+      summary_valid=$(jq -r '.valid' "$summary_file")
     fi
 
     if [ -z "$reason" ]; then
@@ -2086,6 +2142,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
       jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg observed "$summary_observed" \
         --arg summary_source "$summary_source" --arg summary_freshness "$summary_freshness" --argjson summary_age "$summary_age" \
+        --arg read_failure "$read_failure" \
         --arg spawn_gen "$sampled_spawn_gen" \
         --argjson registered "$registered" --slurpfile summary "$summary_file" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
@@ -2099,8 +2156,10 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          reconcile_inventory:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_source:$summary_source,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
-         freshness:{status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age},
+         freshness:({status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age}
+           + (if $read_failure == "" then {} else {read_failure:$read_failure} end)),
          active_children:$summary.active_children,
+         in_flight_children:($summary.in_flight_children // null),
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          contributions:($summary.contributions // null),
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
@@ -2134,7 +2193,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$observed_age},
-         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+         active_children:[],in_flight_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}' >> "$records_file" || return 1
     fi

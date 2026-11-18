@@ -125,12 +125,15 @@
 #                      Captain's Call also shows what firstmate never held. A row
 #                      whose hold already has a card, or whose PR a card already
 #                      carries, adds none.
-#   waiting         -> waiting: a captain-held task whose reason is a wait or park on a
-#                      condition or date, with nothing for the captain to answer. The rule:
-#                      is_wait in bin/fm-bearings-question-lib.sh owns it - a captain
+#   waiting         -> waiting: a captain-held task, or a status blocked line, whose reason
+#                      is a wait or park on a condition or date, with nothing for the
+#                      captain to answer. The rule: is_wait in
+#                      bin/fm-bearings-question-lib.sh owns it - a captain
 #                      park is a wait; a question mark or numbered options make a
-#                      question; a blocked hold, a time gate naming a date, or a reason
-#                      that opens with wait wording is a wait. Waiting rows keep
+#                      question; a blocked hold, a blocked line with no decision key
+#                      that names what it waits on, a time gate naming a date, or a
+#                      reason that opens with wait wording is a wait; the row's
+#                      reason shows what it waits on. Waiting rows keep
 #                      snapshot order and are not part of the priority list.
 #   in_flight       -> underway: every row except state `done`, in snapshot order,
 #                      with the projected `name`.
@@ -142,8 +145,14 @@
 #                      reason is the only dispatchable row.
 #   secondmates, secondmate_reconcile
 #                   -> charted warning rows for a home whose books disagree
-#                      (`reconcile-<id>`) or whose state is unavailable
-#                      (`unavailable-<id>`).
+#                      (`reconcile-<id>`), whose state is unavailable
+#                      (`unavailable-<id>`), or that could not be read this time
+#                      and shows its last known rows (`stale-<id>`, titled with
+#                      the row's `stale_note`, with the read failure as reason).
+#   decision `note` -> a card's `detail` (an authored detail wins) and the start of
+#                      a waiting row's reason, so a row kept from an unreadable
+#                      home, or an open key its idle home no longer carries,
+#                      says why.
 #   priority        -> the order of captains_call (by card key) and underway (by id):
 #                      bin/fm-board-priority.sh holds the captain's ranking, ranked rows
 #                      come first in that order, and unranked rows keep snapshot order after.
@@ -516,8 +525,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         | . as $d
         | { key: $d.key,
             title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
-            reason: (if handed($d) then handed_reason($d)
-                     else (($d.reason_full // $d.reason) | nz(null) | if . == null then "waiting" else (clean_reason | nz("waiting")) end) end),
+            reason: ((if handed($d) then handed_reason($d)
+                      else (($d.reason_full // $d.reason) | nz(null) | if . == null then "waiting" else (clean_reason | nz("waiting")) end) end)
+                     | if ($d.note // null) == null then . else $d.note + " - " + . end),
             repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null),
             context: context_of($d) } ] ) as $waiting
   # A card link is labelled by what it points at, never by its raw URL: a
@@ -731,6 +741,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                      + ( [ (.links // [])[] | select(.page != null or ((.url // "") | startswith("http://dev-1.tailf848b0.ts.net:4387/"))) ]
                          | if length > 0 then {links: .} else {} end ) )
             end
+          # A decision from a home that could not be read this time shows why
+          # it may be out of date; an authored detail still wins.
+          | if ($d.note // null) != null and (.detail // null) == null then . + {detail: $d.note} else . end
           | overlay("captains_call"; $d.key; card_fields) as $ov
           | . + $ov
           | if ($ov | has("options")) then del(.malformed, .options_inferred) else . end
@@ -804,7 +817,13 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | map(select(.kind != null) | {key: .id, value: .}) | from_entries ) as $mismatch
   | ( [ ($snap.secondmates // [])[]
         | . as $m
-        | if $mismatch[$m.id] != null then
+        | ( if ($m.stale_note // null) != null then
+              { id: ("stale-" + ($m.id | gsub("[()]"; ""))), repo: null,
+                title: $m.stale_note,
+                reason: (($m.read_failure // null) | nz("showing the last rows read")),
+                dispatchable: false, kind: "warning" }
+            else empty end ),
+          ( if $mismatch[$m.id] != null then
             { id: ("reconcile-" + $m.id), repo: null,
               title: ($m.id + " books disagree with its task records"),
               reason: ($mismatch[$m.id].kind + ": " + (($mismatch[$m.id].ids // []) | join(", "))),
@@ -814,7 +833,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
               title: ($m.id + " state unavailable"),
               reason: ($m.reason | nz("state unknown")),
               dispatchable: false, kind: "warning" }
-          else empty end
+          else empty end )
         | . as $row | . + overlay("charted"; $row.id; charted_fields)
         | .dispatchable = false ] ) as $home_rows
 
