@@ -1667,7 +1667,19 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # fm-classify-lib.sh owns which lines count and what ends them). That line
 # already woke firstmate, so the lane is owed firstmate's answer rather than a
 # wedge alarm, and the recheck names the verb's own clearing action. Absent the
-# flag no read is spent and the lane keeps the unchanged ladder.
+# flag no read is spent on that newest-line evidence.
+#
+# In every home, flag or not, a worker PARKED at its prompt on a decision or
+# blocker it raised itself is a wait too (crew_parked_on_own_wait in
+# fm-classify-lib.sh owns the two signals: its own fold still holds the record
+# open, and fm-crew-state.sh reports parked or blocked from the status log). The
+# newest line need not be the question - folding one key into another leaves a
+# `resolved` line for the old key after it - and a live background shell does
+# not change the crew state, so neither puts the lane back on the ladder. A
+# busy pane or a running step reports another source and keeps the ladder, and
+# so does a lane whose fold holds nothing of its own. The fold read comes first
+# and the crew-state read only behind an open record, in the at-threshold
+# branch alone.
 #
 # The second record is OFF unless the home creates config/wedge-defer-parked-gate,
 # and that one guard is what makes an unconfigured home's behaviour identical to
@@ -1746,6 +1758,16 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
         supervisor 'clear the reported blocker and close it with fm-send --resolve-key' "$statusf"
     else
       wait_record 'declared decision' 'awaiting firstmate - its own newest line asks for a decision' \
+        supervisor 'answer the reported decision with fm-send --resolve-key' "$statusf"
+    fi
+    return 0
+  fi
+  if verb=$(crew_parked_on_own_wait "$task" "$statusf"); then
+    if [ "$verb" = blocked ]; then
+      wait_record 'declared blocker' 'awaiting firstmate - parked on its own open blocker' \
+        supervisor 'clear the reported blocker and close it with fm-send --resolve-key' "$statusf"
+    else
+      wait_record 'declared decision' 'awaiting firstmate - parked on its own open decision' \
         supervisor 'answer the reported decision with fm-send --resolve-key' "$statusf"
     fi
     return 0
