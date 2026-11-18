@@ -1551,6 +1551,66 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
+# Presentation anchor: `<length>:<md5-hex>` of the last presented line, capped
+# to its final 4096 bytes. A length under the cap means the window starts at a
+# line start. Prints nothing when the endpoint is zero or not at a line end.
+_fm_status_presentation_anchor() {  # <status-file> <endpoint>
+  perl -MFcntl=:DEFAULT -MDigest::MD5=md5_hex -e '
+    my ($path, $end) = @ARGV;
+    exit 0 if $end <= 0;
+    my $start = $end > 4097 ? $end - 4097 : 0;
+    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    sysseek($file, $start, 0) == $start or exit 1;
+    my ($buf, $want) = ("", $end - $start);
+    while (length($buf) < $want) {
+      my $read = sysread($file, my $chunk, $want - length($buf));
+      defined($read) && $read > 0 or exit 1;
+      $buf .= $chunk;
+    }
+    exit 0 unless substr($buf, -1) eq "\n";
+    my $nl = rindex($buf, "\n", length($buf) - 2);
+    my $line = $nl >= 0 ? substr($buf, $nl + 1) : ($start == 0 ? $buf : substr($buf, -4096));
+    $line = substr($line, -4096) if length($line) > 4096;
+    printf "%d:%s", length($line), md5_hex($line);
+  ' "$1" "$2"
+}
+
+# Prints the first line end in the status file whose preceding line matches the
+# anchor. The first match can only re-present lines, never hide one.
+_fm_status_presentation_anchor_offset() {  # <status-file> <anchor> <size>
+  perl -MFcntl=:DEFAULT -MDigest::MD5=md5_hex -e '
+    my ($path, $anchor, $size) = @ARGV;
+    my ($len, $digest) = $anchor =~ /\A([1-9][0-9]*):([0-9a-f]{32})\z/ or exit 1;
+    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my $buf = "";
+    while (length($buf) < $size) {
+      my $read = sysread($file, my $chunk, $size - length($buf));
+      defined($read) or exit 1;
+      last if $read == 0;
+      $buf .= $chunk;
+    }
+    my $at = -1;
+    while (($at = index($buf, "\n", $at + 1)) >= 0) {
+      my $end = $at + 1;
+      next if $end < $len;
+      next if $len < 4096 && $end > $len && substr($buf, $end - $len - 1, 1) ne "\n";
+      next unless md5_hex(substr($buf, $end - $len, $len)) eq $digest;
+      print $end;
+      exit 0;
+    }
+    exit 1;
+  ' "$1" "$2" "$3"
+}
+
+_fm_status_presentation_anchor_valid() {  # <anchor-or-empty>
+  case "$1" in
+    '') return 0 ;;
+    *[!0-9a-f:]*|*:*:*|:*|*:) return 1 ;;
+    *:*) return 0 ;;
+  esac
+  return 1
+}
+
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
@@ -1787,6 +1847,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
 
 status_presentation_cursor_offset() {  # <status-file>
   local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
+  local anchor='' row_anchor recovered
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -1795,15 +1856,17 @@ status_presentation_cursor_offset() {  # <status-file>
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
     offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
+    while IFS=$(printf '\t') read -r row_task ident legacy backstop row_anchor extra; do
       [ -n "$row_task" ] || continue
       [ -z "$extra" ] || return 1
       case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
       [ -n "$legacy" ] && [ -n "$ident" ] || return 1
+      _fm_status_presentation_anchor_valid "$row_anchor" || return 1
       if [ "$row_task" = "$task" ]; then
         [ -z "$offset" ] || return 1
         offset=$legacy
         cur_ident=$ident
+        anchor=$row_anchor
       fi
     done <<EOF
 $data
@@ -1825,12 +1888,21 @@ EOF
   _fm_status_read_ident_size "$f" || return 1
   cur_ident=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
   case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
-  if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
+  if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+    # A new identity whose content still holds the presented last line is the
+    # same log rewritten in place (sed -i, copy and rename), so resume after
+    # that line instead of replaying the presented history.
+    recovered=
+    if [ -n "$anchor" ]; then
+      recovered=$(_fm_status_presentation_anchor_offset "$f" "$anchor" "$size" 2>/dev/null) || recovered=
+    fi
+    case "$recovered" in ''|*[!0-9]*) offset=0 ;; *) offset=$recovered ;; esac
+  fi
   printf '%s' "$offset"
 }
 
 status_outcome_backstop_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
+  local f=$1 state task manifest data row_task ident presented row_backstop row_anchor backstop extra current size
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -1839,11 +1911,12 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
   [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
   data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
   backstop=0
-  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
+  while IFS=$(printf '\t') read -r row_task ident presented row_backstop row_anchor extra; do
     [ -n "$row_task" ] || continue
     [ -z "$extra" ] || return 1
     case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
     [ -n "$presented" ] && [ -n "$ident" ] || return 1
+    _fm_status_presentation_anchor_valid "$row_anchor" || return 1
     if [ "$row_task" = "$task" ]; then
       _fm_status_read_ident_size "$f" || return 1
       current=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
@@ -1996,7 +2069,7 @@ status_presentation_marker_commit() {
 # path selection and retention; publication also checks for unsafe collisions.
 # No status consumer reads that archive.
 status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 archive_published=0
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop anchor extra rc=0 found=0 archive_published=0
   local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -2027,11 +2100,12 @@ status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
     fi
     if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
       && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
+      while IFS=$(printf '\t') read -r row_task ident offset backstop anchor extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
         case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
         [ -n "$offset" ] || { rc=1; break; }
+        _fm_status_presentation_anchor_valid "$anchor" || { rc=1; break; }
         [ "$row_task" != "$task" ] || found=1
       done <<EOF
 $data
@@ -2068,14 +2142,15 @@ EOF
     elif ! : > "$tmp"; then
       rc=1
     else
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
+      while IFS=$(printf '\t') read -r row_task ident offset backstop anchor extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
         case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
         [ -n "$offset" ] || { rc=1; break; }
+        _fm_status_presentation_anchor_valid "$anchor" || { rc=1; break; }
         if [ "$row_task" != "$task" ]; then
-          printf '%s\t%s\t%s\t%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" >> "$tmp" \
-            || { rc=1; break; }
+          printf '%s\t%s\t%s\t%s%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" \
+            "${anchor:+$(printf '\t%s' "$anchor")}" >> "$tmp" || { rc=1; break; }
         fi
       done <<EOF
 $data
@@ -2135,8 +2210,12 @@ EOF
 }
 
 status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
+  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint anchor
+  local prior='' prior_task prior_ident prior_endpoint prior_anchor
   tmp="$state/.status-presentation-cursor.tmp.$$"
+  if [ -f "$state/.status-presentation-cursor" ] && [ ! -L "$state/.status-presentation-cursor" ]; then
+    prior=$(LC_ALL=C command cat "$state/.status-presentation-cursor" 2>/dev/null) || prior=
+  fi
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
@@ -2144,6 +2223,23 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
     f="$state/$task.status"
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { rm -f "$tmp"; return 1; }
+    # An append-only log never changes the bytes before a recorded endpoint, so
+    # an unchanged row keeps its anchor. Otherwise read it before the identity
+    # check, so it belongs to the recorded identity. Without an anchor, a later
+    # identity change resumes from byte zero.
+    anchor=
+    while IFS=$(printf '\t') read -r prior_task prior_ident prior_endpoint _ prior_anchor; do
+      if [ "$prior_task" = "$task" ] && [ "$prior_ident" = "$ident" ] \
+        && [ "$prior_endpoint" = "$endpoint" ]; then
+        anchor=$prior_anchor
+      fi
+    done <<EOF
+$prior
+EOF
+    if [ -z "$anchor" ] || ! _fm_status_presentation_anchor_valid "$anchor"; then
+      anchor=$(_fm_status_presentation_anchor "$f" "$endpoint" 2>/dev/null) || anchor=
+      _fm_status_presentation_anchor_valid "$anchor" || anchor=
+    fi
     _fm_status_read_ident_size "$f" || { rm -f "$tmp"; return 1; }
     cur_ident=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
@@ -2157,8 +2253,8 @@ ${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED:-}
 EOF
     case "$backstop" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$backstop" -le "$size" ] || { rm -f "$tmp"; return 1; }
-    printf '%s\t%s\t%s\t%s\n' "$task" "$ident" "$endpoint" "$backstop" >> "$tmp" \
-      || { rm -f "$tmp"; return 1; }
+    printf '%s\t%s\t%s\t%s%s\n' "$task" "$ident" "$endpoint" "$backstop" \
+      "${anchor:+$(printf '\t%s' "$anchor")}" >> "$tmp" || { rm -f "$tmp"; return 1; }
   done <<EOF
 $snapshot
 EOF
@@ -2195,8 +2291,10 @@ EOF
 # presented byte offset, and one atomic replacement commits only the contiguous
 # status spans that were successfully presented. A quiet fleet scan leaves
 # routine working/done bytes unacknowledged so a subsequently published signal
-# can still annotate them. A missing manifest row or changed file identity is
-# offset 0 for the current file, while malformed or unreadable cursor state
+# can still annotate them. A missing manifest row is offset 0 for the current
+# file. A changed file identity resumes after the first line matching the row's
+# anchor of the last presented line, because an in-place rewrite keeps that
+# prefix; with no anchor match it is offset 0. Malformed or unreadable cursor state
 # aborts presentation without advancing any offset. A trusted cursor at EOF
 # prints nothing, so already-presented bytes are not replayed as new. Teardown
 # retires a task's manifest row with its status file, so reusing a task ID starts
