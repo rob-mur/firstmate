@@ -106,7 +106,10 @@ path=${*: -1}
 # FAKE_GLAB_MANY=<n> serves n uncovered MRs !901.. in project 42 instead, each
 # with a passing pipeline and one approval; every detail call records how many
 # detail calls were running at once so a test can prove the reads are bounded.
+# FAKE_GLAB_PAD=<bytes> adds a field that long to every detail reply.
 if [ -n "${FAKE_GLAB_MANY:-}" ]; then
+  pad=""
+  [ -z "${FAKE_GLAB_PAD:-}" ] || pad=",\"pad\":\"$(head -c "$FAKE_GLAB_PAD" /dev/zero | tr '\0' x)\""
   case "$path" in
     merge_requests\?*reviewer_id=393\&*) echo '[]'; exit 0 ;;
     merge_requests\?*)
@@ -122,8 +125,8 @@ if [ -n "${FAKE_GLAB_MANY:-}" ]; then
       active="$NET_LOG.active"; mkdir -p "$active"; : > "$active/$$"
       sleep 0.3; ls "$active" | wc -l >> "$NET_LOG.concurrency"; rm -f "$active/$$"
       case "$path" in
-        */approvals) echo '{"approved":true,"approvals_left":0,"approved_by":[{"user":{"username":"ana"}}]}' ;;
-        *) echo '{"head_pipeline":{"status":"success"}}' ;;
+        */approvals) echo "{\"approved\":true,\"approvals_left\":0,\"approved_by\":[{\"user\":{\"username\":\"ana\"}}]$pad}" ;;
+        *) echo "{\"head_pipeline\":{\"status\":\"success\"}$pad}" ;;
       esac
       exit 0 ;;
   esac
@@ -1800,6 +1803,23 @@ test_include_mrs_reads_detail_for_every_listed_mr() {
   [ "$(grep -c 'projects/42/merge_requests/9[0-9]*$' "$home/net.log")" = 11 ] \
     || fail "only the kept MRs need a detail call: $(cat "$home/net.log")"
   pass "--include-mrs reads CI and approvals for every listed MR, a few at a time"
+}
+
+# Detail replies carry whole MR objects, so the map of every listed MR's detail
+# can outgrow the kernel's limit on one command-line argument (128 KiB on
+# Linux); the snapshot must still project it.
+test_include_mrs_projects_a_detail_map_past_the_argument_limit() {
+  local home fakebin json err
+  home=$(make_home mrs-huge); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"; err="$home/err"
+  json=$(FAKE_GLAB_MANY=13 FAKE_GLAB_PAD=20000 FM_BEARINGS_MR_DETAIL_PARALLEL=13 \
+    run "$home" "$fakebin" --include-mrs --json 2>"$err") \
+    || fail "--include-mrs run with a large detail map failed: $(cat "$err")"
+  printf '%s' "$json" | jq -e '
+    (.open_mrs | length) == 13
+    and all(.open_mrs[]; .state | (contains("CI passing") and contains("1 approval")))
+  ' >/dev/null || fail "every listed MR must carry its CI and approvals: $json"
+  pass "--include-mrs projects a detail map larger than one command-line argument may be"
 }
 
 # A glab failure, a hang, a missing glab or no host never breaks the snapshot: the
@@ -4204,6 +4224,7 @@ fm_test_run \
   test_include_mrs_ignores_records_the_view_does_not_show \
   test_include_mrs_drops_archived_project_mrs \
   test_include_mrs_reads_detail_for_every_listed_mr \
+  test_include_mrs_projects_a_detail_map_past_the_argument_limit \
   test_include_mrs_failure_degrades \
   test_include_mrs_lists_a_recorded_mr_its_underway_row_does_not_name \
   test_include_mrs_lists_an_mr_another_row_only_waits_on \
