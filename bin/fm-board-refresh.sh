@@ -89,6 +89,12 @@
 # FM_BOARD_REFRESH_NOTIFY_TIMEOUT seconds (default 20) with its outcome ignored.
 # state/.board-refresh.failure-notified marks the episode as told; the next
 # rebuilt board clears it, so the next failure is news again.
+# Each rebuilt board also tells a routed board-keeper, the same bounded way, when
+# its Captain's Call set (the `key` of each `captains_call` card in the payload)
+# differs from the set saved in state/.board-refresh.calls: one message naming
+# the keys that joined and left. An unchanged set sends nothing; with no saved
+# set (the first rebuild) every key has joined. The set is saved after the send
+# is attempted, and only while a board-keeper is routed.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,6 +113,7 @@ INPUTS="$STATE/.board-refresh.inputs"
 LAVISH_DIR="$STATE/.board-refresh.lavish-dir"
 LOG="$STATE/.board-refresh.log"
 NOTIFIED="$STATE/.board-refresh.failure-notified"
+CALLS="$STATE/.board-refresh.calls"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DEBOUNCE="${FM_BOARD_REFRESH_DEBOUNCE:-3}"
@@ -175,19 +182,51 @@ log() {
   tail -n 20 "$LOG" >"$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
 }
 
+# Whether data/secondmates.md routes a board-keeper secondmate.
+board_keeper_routed() {
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh" 2>/dev/null || return 1
+  secondmate_registry_line_for_id "$DATA/secondmates.md" board-keeper >/dev/null 2>&1
+}
+
+# Send board-keeper <message>, bounded and with its outcome ignored.
+tell_board_keeper() {  # <message>
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh" 2>/dev/null || return 0
+  FM_HOME="$FM_HOME" fm_run_timed "$NOTIFY_TIMEOUT" "$SEND" board-keeper "$1" \
+    </dev/null >/dev/null 2>&1 || true
+}
+
 # A failed build: log it and, once per episode, tell board-keeper (see header).
 log_failure() {
   log "$@"
   [ ! -e "$NOTIFIED" ] || return 0
-  # shellcheck source=bin/fm-secondmate-registry-lib.sh
-  . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh" 2>/dev/null || return 0
-  secondmate_registry_line_for_id "$DATA/secondmates.md" board-keeper || return 0
+  board_keeper_routed || return 0
   : >"$NOTIFIED" 2>/dev/null || return 0
-  # shellcheck source=bin/fm-timeout-lib.sh
-  . "$SCRIPT_DIR/fm-timeout-lib.sh" 2>/dev/null || return 0
-  FM_HOME="$FM_HOME" fm_run_timed "$NOTIFY_TIMEOUT" "$SEND" board-keeper \
-    "$LOG_LINE
-The bearings board build is failing." </dev/null >/dev/null 2>&1 || true
+  tell_board_keeper "$LOG_LINE
+The bearings board build is failing."
+}
+
+# After a rebuild, tell board-keeper which Captain's Call keys joined and left
+# since the last set it was told (see header).
+notify_call_change() {  # <payload file>
+  local keys old joined left
+  board_keeper_routed || return 0
+  keys=$(jq -r '.captains_call[]?.key // empty' "$1" 2>/dev/null | LC_ALL=C sort -u) || return 0
+  if [ -f "$CALLS" ]; then
+    old=$(cat "$CALLS" 2>/dev/null) || return 0
+    [ "$old" != "$keys" ] || return 0
+  else
+    old=
+  fi
+  joined=$(LC_ALL=C comm -13 <(printf '%s\n' "$old" | sed '/^$/d') <(printf '%s\n' "$keys" | sed '/^$/d') | paste -sd ' ' -)
+  left=$(LC_ALL=C comm -23 <(printf '%s\n' "$old" | sed '/^$/d') <(printf '%s\n' "$keys" | sed '/^$/d') | paste -sd ' ' -)
+  tell_board_keeper "The bearings board was rebuilt and its Captain's Call changed.
+Joined: ${joined:-none}
+Left: ${left:-none}"
+  if ! { printf '%s\n' "$keys" >"$CALLS.tmp" && mv "$CALLS.tmp" "$CALLS"; } 2>/dev/null; then
+    rm -f "$CALLS.tmp"
+  fi
 }
 
 # A skip repeats on every request, so it is logged only when it is news.
@@ -316,8 +355,10 @@ refresh_once() {
   fi
   printf '%s\n' "$sum" >"$SUM"
   if out=$("$SCRIPT_DIR/fm-bearings-board.sh" build --no-reopen "$tmp" 2>&1); then
-    rm -f "$tmp" "$NOTIFIED"
+    rm -f "$NOTIFIED"
     log "rebuilt board"
+    notify_call_change "$tmp"
+    rm -f "$tmp"
     return 0
   fi
   rm -f "$tmp"
