@@ -204,11 +204,94 @@ test_routed_reports_only_fully_delivered_lines() {
   show "$home" p1 --title P1 >/dev/null || fail "open failed"
   action p1 k1 | in_home "$home" "$PAGE" routed && fail "routed passed an undelivered action"
   action p1 k1 | in_home "$home" "$PAGE" route || fail "route failed"
-  action p1 k1 | in_home "$home" "$PAGE" routed || fail "routed refused a delivered action"
+  action p1 k1 | in_home "$home" "$PAGE" routed && fail "routed passed an action whose page names no task"
+  [ -s "$home/state/pages/p1/inbox/k1.json" ] || fail "an action with no owner left the page inbox"
   action nobody k2 | in_home "$home" "$PAGE" route 2>/dev/null && fail "route accepted an unregistered page"
   action nobody k2 | in_home "$home" "$PAGE" routed && fail "routed passed an action for an unregistered page"
   printf '%s\n' '{"app_ended":true}' | in_home "$home" "$PAGE" routed && fail "routed passed app_ended with a live page"
   pass "routed passes only lines that already reached a page agent"
+}
+
+# A home whose page p1 belongs to task t1: t1 has a record and a tmux window
+# named by TMUX_WINDOWS, and FM_BOARD_PAGE_CREW_STATE reads it as CREW_STATE.
+# The stub tmux logs typed text to send.log and never touches a real server.
+owned_home() {  # <name>
+  local home fakebin
+  home=$(make_home "$1")
+  fakebin="$home/fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  send-keys) for a in "$@"; do last=$a; done; printf '%s\n' "$last" >> "$FM_HOME/send.log"; exit 0 ;;
+  display-message) for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '\342\225\255\342\224\200\342\225\256\n\342\224\202 \342\224\202\n\342\225\260\342\224\200\342\225\257\n'; exit 0 ;;
+  list-windows) cat "$FM_HOME/windows"; exit 0 ;;
+esac
+exit 0
+SH
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/sleep"
+  cat > "$fakebin/crew-state" <<'SH'
+#!/usr/bin/env bash
+printf 'state: %s · source: test · %s\n' "$(cat "$FM_HOME/crew-state")" "$1"
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/sleep" "$fakebin/crew-state"
+  printf 'fm-t1\n' > "$home/windows"
+  printf 'working\n' > "$home/crew-state"
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  show "$home" p1 --title "Arch 821" --task t1 >/dev/null || fail "open with --task failed"
+  printf '%s\n' "$home"
+}
+
+owned() {  # <home> <command...>
+  local home=$1
+  shift
+  FM_BOARD_PAGE_CREW_STATE="$home/fakebin/crew-state" FM_SEND_SETTLE=0 in_home "$home" "$@"
+}
+
+test_route_steers_the_live_owning_task_once() {
+  local home body
+  home=$(owned_home ring)
+  action p1 c1 comment "syntax error in the diagram" | owned "$home" "$PAGE" route || fail "route failed"
+  [ -s "$home/state/pages/p1/inbox/c1.json" ] || fail "route did not deliver the action to the page inbox"
+  [ -f "$home/state/t1.inbox/001.msg" ] || fail "route did not steer the owning task"
+  body=$(bash -c '. "$1/bin/fm-task-inbox-lib.sh" && fm_task_inbox_body "$2"' _ "$ROOT" "$home/state/t1.inbox/001.msg")
+  assert_contains "$body" "p1" "the steer did not name the page"
+  assert_contains "$body" "syntax error in the diagram" "the steer did not carry the comment"
+  assert_contains "$body" "wait p1" "the steer did not say how to read the page inbox"
+  action p1 c1 comment "syntax error in the diagram" | owned "$home" "$PAGE" routed \
+    || fail "routed refused an action its live owner was told of"
+  action p1 c1 comment "syntax error in the diagram" | owned "$home" "$PAGE" route || fail "a repeated route failed"
+  owned "$home" "$PAGE" wait p1 --timeout-s 0 >/dev/null || fail "wait failed"
+  action p1 c1 comment "syntax error in the diagram" | owned "$home" "$PAGE" route || fail "routing a handled action failed"
+  assert_equals 1 "$(find "$home/state/t1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" \
+    "a re-run of route steered the owner again"
+  pass "route steers a page's live owning task once with the page id and the comment, and routed stays silent"
+}
+
+# Each no-owner case: the copy stays in the page inbox, nothing is steered,
+# and routed reports the line as not routed so the adapter wakes firstmate.
+assert_not_routed() {  # <home> <key> <why>
+  local home=$1 key=$2 why=$3
+  action p1 "$key" comment "look at this" | owned "$home" "$PAGE" route || fail "route failed ($why)"
+  [ -s "$home/state/pages/p1/inbox/$key.json" ] || fail "the page inbox lost the action ($why)"
+  [ -z "$(find "$home/state" -path '*/t1.inbox/*.msg' 2>/dev/null)" ] || fail "route steered a task that is not live ($why)"
+  action p1 "$key" comment "look at this" | owned "$home" "$PAGE" routed && fail "routed passed an action no live task was told of ($why)"
+  return 0
+}
+
+test_route_without_a_live_owner_leaves_routed_failing() {
+  local home
+  home=$(owned_home finished)
+  printf 'done\n' > "$home/crew-state"
+  assert_not_routed "$home" f1 "task finished"
+  home=$(owned_home gone)
+  printf 'elsewhere\n' > "$home/windows"
+  assert_not_routed "$home" g1 "endpoint gone"
+  home=$(owned_home norecord)
+  rm -f "$home/state/t1.meta"
+  assert_not_routed "$home" n1 "no task record"
+  pass "with no live owning task route keeps the action in the page inbox and routed reports it not routed"
 }
 
 test_ending_one_page_leaves_the_others_live() {
@@ -490,6 +573,8 @@ fm_test_run \
   test_bad_page_ids_are_refused \
   test_route_delivers_each_action_once_and_wait_prints_it \
   test_routed_reports_only_fully_delivered_lines \
+  test_route_steers_the_live_owning_task_once \
+  test_route_without_a_live_owner_leaves_routed_failing \
   test_ending_one_page_leaves_the_others_live \
   test_wait_delivers_pending_actions_before_ended \
   test_app_ended_ends_every_live_page \
