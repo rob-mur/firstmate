@@ -643,6 +643,115 @@ test_default_board_location() {
   pass "with no overrides the board and outbox live under ~/.local/share/fm-board-prototype"
 }
 
+NEW_MARK="## Your answer (write below this line)"
+OLD_MARK="Your answer (write below this line):"
+
+to_old_marks() {  # <board dir>  -> every card and baseline as the previous version wrote it (plain answer line)
+  local f
+  for f in "$1"/cards/*.md "$1"/.seen/*.md; do
+    [ -f "$f" ] || continue
+    python3 - "$f" "$NEW_MARK" "$OLD_MARK" <<'PY'
+import sys
+path, new, old = sys.argv[1:]
+lines = open(path).read().splitlines()
+open(path, "w").write("\n".join(old if l == new else l for l in lines) + "\n")
+PY
+  done
+}
+
+test_answer_mark_is_a_heading() {
+  local dir card
+  dir=$(fresh mark-heading)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  card="$dir/board/cards/w-c.ask.md"
+  assert_line "$NEW_MARK" "$card" "the answer line is a markdown heading"
+  assert_no_regex "^Your answer \(write below this line\):$" "$card" "the plain answer line is gone"
+  # With no baseline, only text below the heading counts.
+  rm -f "$dir/board/.seen/w-c.ask.md"
+  printf '%s\n' "Yes, cut them." >>"$card"
+  run_board "$dir" >/dev/null || fail "answer run failed"
+  assert_equals "Yes, cut them." "$(jq -r 'select(.kind == "answer" and .key == "w-c.ask") | .text' "$dir/outbox.jsonl")" \
+    "the text below the heading is the answer"
+  pass "the answer line is a heading, and text below it is read as the answer"
+}
+
+test_old_answer_mark_still_extracts() {
+  local dir
+  dir=$(fresh mark-old)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  to_old_marks "$dir/board"
+  # The board of the previous version: an answer under the plain line, with and without a baseline.
+  printf '%s\n' "Yes, cut them." >>"$dir/board/cards/w-c.ask.md"
+  rm -f "$dir/board/.seen/cd.key-b.md"
+  printf '%s\n' "a, but keep it short" >>"$dir/board/cards/cd.key-b.md"
+  run_board "$dir" >/dev/null || fail "run on the old board failed"
+  assert_equals "Yes, cut them." "$(jq -r 'select(.kind == "answer" and .key == "w-c.ask") | .text' "$dir/outbox.jsonl")" \
+    "an answer under the plain line is recorded"
+  assert_equals "a, but keep it short" \
+    "$(jq -r 'select(.kind == "answer" and .key == "cd.key-b") | .text' "$dir/outbox.jsonl")" \
+    "with no baseline, the text below the plain line is the answer"
+  assert_line "$OLD_MARK" "$dir/board/cards/w-c.ask.md" "an answered card keeps its plain line"
+  assert_line "Yes, cut them." "$dir/board/cards/w-c.ask.md" "and its answer"
+  pass "a card with the plain answer line of the previous version still gives its answer"
+}
+
+test_switch_to_heading_records_nothing_new() {
+  local dir before
+  dir=$(fresh mark-switch)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  ED_ACTION=answer ED_KEY=hold-a ED_TEXT=$'Drop them.\n\nThen ship.' run_board "$dir" >/dev/null || fail "answer run failed"
+  ED_ACTION=answer ED_KEY=hold-a ED_TEXT="Ship Friday." run_board "$dir" >/dev/null || fail "follow-up run failed"
+  to_old_marks "$dir/board"
+  before=$(cat "$dir/outbox.jsonl")
+  run_board "$dir" >/dev/null || fail "first run with the heading failed"
+  run_board "$dir" >/dev/null || fail "second run with the heading failed"
+  assert_equals "$before" "$(cat "$dir/outbox.jsonl")" "the switch to the heading records nothing new"
+  assert_line "$NEW_MARK" "$dir/board/cards/cd.key-b.md" "an unanswered card is rebuilt with the heading"
+  assert_line "$OLD_MARK" "$dir/board/cards/hold-a.md" "an answered card is left as it was"
+  assert_line "Ship Friday." "$dir/board/cards/hold-a.md" "with the captain's text"
+  # The same with no baselines, as a moved board has.
+  rm -rf "$dir/board/.seen"
+  to_old_marks "$dir/board"
+  run_board "$dir" >/dev/null || fail "run without baselines failed"
+  assert_equals "$before" "$(cat "$dir/outbox.jsonl")" "with no baselines the switch also records nothing new"
+  pass "switching a board from the plain answer line to the heading writes no new outbox line"
+}
+
+test_page_note_line_is_a_heading() {
+  local dir page old
+  dir=$(fresh_page page-note-heading)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  page="$dir/board/pages/rev.md"
+  assert_equals 2 "$(grep -cx '### Your note goes on a new line here' "$page")" "each note box is a heading"
+  assert_line "Hint: Your note" "$page" "the note box hint is a line under it"
+  # A page as the previous version built it: the plain note line, with the hint after a colon.
+  for old in "$page" "$dir/board/.seen/pages/rev.md" "$dir/board/.seen/pages/rev.built.md"; do
+    python3 - "$old" <<'PY'
+import sys
+path = sys.argv[1]
+out = []
+for l in open(path).read().splitlines():
+    if l == "Hint: Your note":
+        out[-1] = "Your note goes on a new line here: Your note"
+        continue
+    out.append("Your note goes on a new line here." if l == "### Your note goes on a new line here" else l)
+open(path, "w").write("\n".join(out) + "\n")
+PY
+  done
+  jq '.source = "old"' "$dir/board/.seen/pages/rev.json" >"$dir/rev.json" && mv "$dir/rev.json" "$dir/board/.seen/pages/rev.json"
+  # The captain writes under the plain line of r2 between runs, then a run rebuilds the page with the heading.
+  (cd "$dir/board" && ED_PAGE=rev ED_BLOCK=r2 ED_AFTER="Your note goes on a new line here." ED_TEXT="Keep the old test." \
+    ED_ACTION=page ../ed.sh) || fail "writing the note failed"
+  run_board "$dir" >/dev/null || fail "run on the old page failed"
+  assert_equals '{"block":"r2","text":"Keep the old test."}' \
+    "$(jq -c 'select(.kind == "comment") | {block, text}' "$dir/outbox.jsonl")" "a note under the plain line is recorded"
+  assert_equals "Keep the old test." "$(awk '/^<!-- block: r2 -->$/ {s=1} s && /^### Your note/ {getline; getline; print; exit}' "$page")" \
+    "the rebuild puts the note under the new heading"
+  run_board "$dir" >/dev/null || fail "run after the rebuild failed"
+  assert_equals 1 "$(comments "$dir/outbox.jsonl")" "the rebuild records nothing new"
+  pass "a page's note line is a heading, and a note under the old line is kept through the rebuild"
+}
+
 fm_test_run \
   test_card_reads_well_in_vim \
   test_cards_persist_across_runs \
@@ -658,6 +767,9 @@ fm_test_run \
   test_deferred_hold_is_charted \
   test_moved_board_and_outbox_record_nothing_new \
   test_old_answer_without_baseline_not_recorded_again \
+  test_answer_mark_is_a_heading \
+  test_old_answer_mark_still_extracts \
+  test_switch_to_heading_records_nothing_new \
   test_missing_lint_is_unchecked_not_passed \
   test_real_lint_flags_a_long_sentence \
   test_real_lint_reads_wrapped_options_unwrapped \
@@ -667,6 +779,7 @@ fm_test_run \
   test_page_letter_picks_option \
   test_page_rebuild_keeps_captain_text \
   test_page_slash_marker_without_baseline \
+  test_page_note_line_is_a_heading \
   test_page_missing_source_is_named \
   test_broken_page_reported_once_and_ack_survives_rebuild \
   test_default_board_location

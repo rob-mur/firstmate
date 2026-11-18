@@ -96,7 +96,10 @@ LINT = Path(os.environ.get("TUI_BOARD_LINT", str(Path.home() / ".claude/skills/p
 WIDTH = 78
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
 CARD_LINE = re.compile(r"(?:^|[\s(])cards/([^\s)]+)\.md\b")
-ANSWER_MARK = "Your answer (write below this line):"
+# The answer line is a heading so it stands out in the editor. A card of an older run has the
+# plain line (OLD_ANSWER_MARK); both are read, so either version's card gives its answer.
+ANSWER_MARK = "## Your answer (write below this line)"
+OLD_ANSWER_MARK = "Your answer (write below this line):"
 ACK = re.compile(r"^Received by firstmate at (\d{4}-\d\d-\d\d \d\d:\d\d) UTC - waiting on firstmate\.$")
 WITH_CAPTAIN, BROKEN, CHARTED, WITH_FIRSTMATE = "## With captain", "## Broken", "## Charted", "## With firstmate"
 DEFERRED = re.compile(r"^deferred until (\d{4}-\d\d-\d\d)")
@@ -353,12 +356,18 @@ def added_lines(before: list[str], after: list[str]) -> list[str]:
     return [l for tag, _, _, j1, j2 in sm.get_opcodes() if tag in ("insert", "replace") for l in after[j1:j2]]
 
 
+def is_answer_mark(line: str) -> bool:
+    """The answer line of a card: the heading, or the plain line of an older run."""
+    return line.strip() in (ANSWER_MARK, OLD_ANSWER_MARK)
+
+
 def captain_text(key: str) -> str:
     """Text the captain added to a card since the run last wrote or recorded it."""
     now = read_lines(card_path(key)) or []
     base = read_lines(SEEN / f"{key}.md")
     if base is None:  # a card without a baseline (an older run's): only text below the answer line counts
-        new = now[now.index(ANSWER_MARK) + 1:] if ANSWER_MARK in now else []
+        at = next((i for i, l in enumerate(now) if is_answer_mark(l)), None)
+        new = now[at + 1:] if at is not None else []
     else:
         new = added_lines(base, now)
     return "\n".join(l for l in new if not ACK.match(l)).strip()

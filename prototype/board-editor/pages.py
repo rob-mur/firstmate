@@ -333,11 +333,11 @@ class _Converter:
     def note(self, node: Node) -> None:
         self.cur.notes.append(node.attrs.get("name") or "")
         placeholder = squash(node.attrs.get("placeholder", ""))
+        lines = [NOTE_MARK]
         if placeholder and placeholder not in self.placeholders:
             self.placeholders.add(placeholder)
-            self.emit(wrap(f"Your note goes on a new line here: {placeholder}"))
-        else:
-            self.emit(["Your note goes on a new line here."])
+            lines += wrap(f"Hint: {placeholder}")
+        self.emit(lines)
 
     def list_lines(self, node: Node, indent: str) -> list[str]:
         out: list[str] = []
@@ -525,7 +525,21 @@ HELP = [
     "- You can also start a line with two slashes (//) to mark it as yours.",
     "- Save with :w. Close the tab with :q.",
 ]
-FIXED = {"Pick one:", "To pick, write its letter on its own line, like  b", "Your note goes on a new line here."}
+# Where the captain writes a note: a heading so it stands out in the editor. A page an older run
+# built has the plain line (OLD_NOTE_MARK) or that line with the field's hint after a colon.
+NOTE_MARK = "### Your note goes on a new line here"
+OLD_NOTE_MARK = "Your note goes on a new line here."
+FIXED = {"Pick one:", "To pick, write its letter on its own line, like  b", NOTE_MARK, OLD_NOTE_MARK}
+
+
+def same_agent_line(a: str, b: str) -> bool:
+    """Whether two agent lines are the same place in a page: equal, or both a note line (old or new)."""
+    return a == b or (is_note_mark(a) and is_note_mark(b))
+
+
+def is_note_mark(line: str) -> bool:
+    s = line.strip()
+    return s in (NOTE_MARK, OLD_NOTE_MARK) or s.startswith(OLD_NOTE_MARK[:-1] + ":")
 GONE = "## Comments on parts no longer on the page"
 LIST_ITEM = re.compile(r"^\s*(?:[-*]|\d+\.|[a-z]\))\s")
 
@@ -645,7 +659,7 @@ def place_chunks(lines: list[str], chunks: list[dict]) -> list[str]:
         else:
             seen = 0
             for i in range(start, end):
-                if lines[i] == c["after"]:
+                if same_agent_line(lines[i], c["after"]):
                     seen += 1
                     if seen == c["nth"]:
                         at = i + 1
