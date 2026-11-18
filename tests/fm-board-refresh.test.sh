@@ -705,6 +705,83 @@ test_the_board_rebuilds_during_an_active_away_window() {
   pass "the board rebuilds during an active away window while a chat bearings read still refuses"
 }
 
+# A home whose payload fails while $home/payload-fail exists, and whose fm-send
+# is a stub that records each message and exits with $home/send-status (0 if absent).
+make_notify_home() {  # <name> <with-board-keeper: 0|1>
+  local home
+  home=$(make_home "$1")
+  build_initial_board "$home"
+  printf '#!/usr/bin/env bash\n[ ! -e "%s/payload-fail" ] || exit 1\nexec "%s" "$@"\n' \
+    "$home" "$ROOT/bin/fm-bearings-board-payload.sh" > "$home/flaky-payload"
+  cat > "$home/send-stub" <<SH
+#!/usr/bin/env bash
+{ printf 'FM_HOME=%s\\n' "\$FM_HOME"; printf '%s\\n' "\$@"; printf -- '--\\n'; } >> "$home/sends"
+exit "\$(cat "$home/send-status" 2>/dev/null || echo 0)"
+SH
+  chmod +x "$home/flaky-payload" "$home/send-stub"
+  if [ "$2" = 1 ]; then
+    printf -- '- board-keeper - Keeps the bearings board healthy. (home: %s/keeper; scope: the board; projects: firstmate; added 2026-11-18)\n' \
+      "$TMP_ROOT" > "$home/data/secondmates.md"
+  fi
+  printf '%s\n' "$home"
+}
+
+notify_refresh() {  # <home> -> the refresh exit status
+  local home=$1
+  FM_BOARD_REFRESH_PAYLOAD="$home/flaky-payload" FM_BOARD_REFRESH_SEND="$home/send-stub" \
+    in_home "$home" "$REFRESH" --force
+}
+
+sends() {  # <home>
+  if [ -f "$1/sends" ]; then grep -c '^--$' "$1/sends"; else echo 0; fi
+}
+
+test_a_failure_episode_tells_board_keeper_once() {
+  local home
+  home=$(make_notify_home notify-once 1)
+  : > "$home/payload-fail"
+  notify_refresh "$home" && fail "a failed payload reported success"
+  notify_refresh "$home" && fail "a second failed payload reported success"
+  assert_equals "1" "$(sends "$home")" "two failures in one episode did not send exactly one notice"
+  grep -qx 'board-keeper' "$home/sends" || fail "the notice did not go to board-keeper: $(cat "$home/sends")"
+  grep -qx "FM_HOME=$home" "$home/sends" || fail "the notice was not sent from this home"
+  grep -q '^[0-9TZ:-]* payload generation failed$' "$home/sends" || fail "the notice lacks the failure line: $(cat "$home/sends")"
+  grep -qx 'The bearings board build is failing.' "$home/sends" || fail "the notice lacks its sentence"
+  rm -f "$home/payload-fail"
+  notify_refresh "$home" || fail "the recovering build failed: $(tail -3 "$home/state/.board-refresh.log")"
+  : > "$home/payload-fail"
+  notify_refresh "$home" && fail "a failed payload after recovery reported success"
+  assert_equals "2" "$(sends "$home")" "a failure after a successful build did not send a new notice"
+  pass "a failure episode tells board-keeper once, and a failure after a success is news again"
+}
+
+test_no_notice_without_a_board_keeper_route() {
+  local home
+  home=$(make_notify_home notify-none 0)
+  : > "$home/payload-fail"
+  notify_refresh "$home" && fail "a failed payload reported success"
+  printf -- '- other-mate - Does other work. (home: %s/other; scope: other; projects: firstmate; added 2026-11-18)\n' \
+    "$TMP_ROOT" > "$home/data/secondmates.md"
+  notify_refresh "$home" && fail "a failed payload reported success"
+  assert_equals "0" "$(sends "$home")" "a notice was sent with no board-keeper route"
+  grep -q 'payload generation failed' "$home/state/.board-refresh.log" || fail "the failure was not logged"
+  pass "no notice is sent without a board-keeper route"
+}
+
+test_a_failing_send_never_changes_the_build_result() {
+  local home rc
+  home=$(make_notify_home notify-send-fails 1)
+  printf '7\n' > "$home/send-status"
+  : > "$home/payload-fail"
+  rc=0; notify_refresh "$home" || rc=$?
+  assert_equals "1" "$rc" "a failing send changed the failed build's result"
+  assert_equals "1" "$(sends "$home")" "the failing send was not attempted"
+  rm -f "$home/payload-fail"
+  rc=0; notify_refresh "$home" || rc=$?
+  assert_equals "0" "$rc" "the build after a failing send did not succeed"
+  pass "a failing send never changes the build result"
+}
+
 fm_test_run \
   test_a_home_without_a_board_is_left_alone \
   test_the_board_is_rebuilt_only_when_fleet_state_changes \
@@ -729,4 +806,7 @@ fm_test_run \
   test_new_board_code_is_installed_with_an_unchanged_fleet \
   test_a_home_board_is_built_by_its_own_code_whoever_asks \
   test_a_home_replaces_a_refresher_another_code_root_left_running \
-  test_the_board_rebuilds_during_an_active_away_window
+  test_the_board_rebuilds_during_an_active_away_window \
+  test_a_failure_episode_tells_board_keeper_once \
+  test_no_notice_without_a_board_keeper_route \
+  test_a_failing_send_never_changes_the_build_result
