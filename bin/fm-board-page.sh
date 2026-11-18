@@ -101,20 +101,29 @@
 # {"key","page","tag","text","prompt","data"} for a page action, or
 # {"app_ended":true} when the board's Lavish session ended.
 # route    Deliver each action to its page's inbox, once (an already delivered
-#          key is skipped). Tag `page-end` ends that page instead, and
+#          key is skipped and never rings again). Then, when the page's --task
+#          names a live task in the page's home, steer that task through
+#          bin/fm-send.sh with the page id, the action's words, and the wait
+#          command that collects it, so an owner busy elsewhere still learns of
+#          it, and record that the owner was told under rung/<key>. A task is
+#          live when its record exists, bin/fm-crew-state.sh reads it as
+#          working, parked, blocked or paused, and its local endpoint is not
+#          positively gone. Tag `page-end` ends that page instead, and
 #          app_ended ends every live page. Exit 1 if any line names no
 #          registered page or cannot be read; every other line is still routed.
-# routed   Exit 0 only when every line is already delivered: each action sits
-#          in its page's inbox or handled folder, each page-end page is ended,
-#          and app_ended left no live page. The adapter stays silent about a
-#          board result only then, so an action that reached no page agent
-#          still wakes firstmate.
+# routed   Exit 0 only when every line reached a page agent: each action sits
+#          in its page's inbox or handled folder and its page's owning task was
+#          told of it, each page-end page is ended, and app_ended left no live
+#          page. The adapter stays silent about a board result only then, so an
+#          action whose page has no task, or whose task is finished or gone,
+#          still wakes firstmate; its copy stays in the page inbox.
 #
 # Where things live: the page's served files under $FM_HOME/.lavish/pages/<id>/
 # (inside the board's Lavish artifact folder, so the board can frame them, and
 # outside the board file Lavish watches, so writing them never reloads the
 # board), and its record under state/pages/<id>/: page.json
-# ({id,title,opened,state,replaces,task}) plus inbox/ and inbox/handled/.
+# ({id,title,opened,state,replaces,task}) plus inbox/, inbox/handled/ and
+# rung/ (one file per action key whose owning task route told, naming it).
 #
 # One refresh policy covers the whole board app: no frame ever reloads. The
 # board and each page poll their own data file and patch in place; the board
@@ -132,7 +141,9 @@
 # page and the parent's own refresh runs.
 #
 # FM_BOARD_PAGE_REFRESH overrides the refresh command (tests only); the default
-# is a detached `bin/fm-board-refresh.sh --force`.
+# is a detached `bin/fm-board-refresh.sh --force`. FM_BOARD_PAGE_CREW_STATE
+# overrides the task-state reader route asks (tests only); the default is
+# bin/fm-crew-state.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -366,6 +377,54 @@ delivered() {  # <page-id> <key>
   [ -f "$(inbox "$1")/$2.json" ] || [ -f "$(inbox "$1")/handled/$2.json" ]
 }
 
+# Whether <task> is a live owner in this page's home: its record exists, the
+# current-state owner reads it as still under way, and a local endpoint is not
+# positively gone (a run still reported running cannot hear a steer once its
+# worker's endpoint is gone). An endpoint that merely fails to answer is not
+# proof of death, as in bin/fm-crew-state.sh.
+owner_live() {  # <task-id>
+  local task=$1 meta verdict
+  [[ $task =~ ^[A-Za-z0-9._-]{1,128}$ ]] || return 1
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  verdict=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+    "${FM_BOARD_PAGE_CREW_STATE:-$SCRIPT_DIR/fm-crew-state.sh}" "$task" 2>/dev/null </dev/null) || return 1
+  case "$verdict" in
+    'state: working '*|'state: parked '*|'state: blocked '*|'state: paused '*) ;;
+    *) return 1 ;;
+  esac
+  # shellcheck disable=SC2016 # program text for the child bash, not expansion here.
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" bash -c '
+    . "$1/fm-tmux-lib.sh" && . "$1/fm-backend.sh" || exit 0
+    [ -z "$(fm_meta_get "$2" remote_host)" ] || exit 0
+    case "$(fm_backend_agent_state "$(fm_backend_of_meta "$2")" "$(fm_backend_target_of_meta "$2")")" in
+      dead|missing) exit 1 ;;
+    esac' _ "$SCRIPT_DIR" "$meta" </dev/null >/dev/null 2>&1
+}
+
+# Tell the page's owning task about a newly delivered action, once, and record
+# that it was told. Returns nonzero, recording nothing, when the page has no
+# live owner or the steer was not recorded; routed then wakes firstmate.
+ring_owner() {  # <page-id> <key> <line>
+  local page=$1 key=$2 line=$3 task words msg
+  task=$(field "$page" task)
+  [ -n "$task" ] && owner_live "$task" || return 1
+  words=$(jq -r '(.prompt // .text // "") | tostring' 2>/dev/null <<<"$line") || words=
+  [ "${#words}" -le 2000 ] || words="${words:0:2000}
+[cut short; the whole action is in the page inbox]"
+  msg="New action on board page $page ($(field "$page" title)), tag $(jq -r '.tag // "" | tostring' 2>/dev/null <<<"$line"):
+$words
+
+Read it from your page inbox and answer on the page: FM_HOME=$(printf '%q' "$FM_HOME") $(printf '%q' "$SCRIPT_DIR/fm-board-page.sh") wait $page --timeout-s 0"
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$task" "$msg" \
+    >/dev/null 2>&1 </dev/null || return 1
+  mkdir -p "$RECORDS/$page/rung" && printf '%s\n' "$task" >"$RECORDS/$page/rung/$key"
+}
+
+rung() {  # <page-id> <key>
+  [ -f "$RECORDS/$1/rung/$2" ]
+}
+
 live_pages() {
   local f
   for f in "$RECORDS"/*/page.json; do
@@ -396,8 +455,8 @@ cmd_route() {
     delivered "$page" "$key" && continue
     mkdir -p "$(inbox "$page")/handled"
     tmp=$(mktemp "$(inbox "$page")/.$key.XXXXXX") || { rc=1; continue; }
-    if jq -c . <<<"$line" >"$tmp"; then
-      mv -f "$tmp" "$(inbox "$page")/$key.json"
+    if jq -c . <<<"$line" >"$tmp" && mv -f "$tmp" "$(inbox "$page")/$key.json"; then
+      ring_owner "$page" "$key" "$line" || true
     else
       rm -f "$tmp"
       rc=1
@@ -419,7 +478,7 @@ cmd_routed() {
         if [ "$tag" = page-end ]; then
           [ "$(field "$page" state)" = ended ] || return 1
         else
-          [[ "$key" =~ ^[A-Za-z0-9._-]{1,128}$ ]] && delivered "$page" "$key" || return 1
+          [[ "$key" =~ ^[A-Za-z0-9._-]{1,128}$ ]] && delivered "$page" "$key" && rung "$page" "$key" || return 1
         fi
         ;;
       *) return 1 ;;
