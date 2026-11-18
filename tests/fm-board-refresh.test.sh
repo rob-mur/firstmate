@@ -583,6 +583,95 @@ test_a_secondmate_change_refreshes_the_parent_board() {
   pass "a secondmate kick or wake refreshes the parent board once, and a remote route does not"
 }
 
+# Scaffold a real brief for <task> in <home> and print its status command,
+# filled the way a worker fills it, with <state> and <note> in place.
+worker_status_command() {  # <home> <task> <state> <note>
+  local cmd
+  rm -rf "${1:?}/data/$2"
+  in_home "$1" "$ROOT/bin/fm-brief.sh" "$2" alpha --mode local-only >/dev/null 2>&1 \
+    || fail "brief scaffold failed"
+  # shellcheck disable=SC2016 # Match literal backticks in the generated brief.
+  cmd=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$1/data/$2/brief.md" | head -1)
+  [ -n "$cmd" ] || fail "the brief carries no status command"
+  cmd=${cmd//\{state\}/$3}
+  cmd=${cmd//<epoch>/$(date +%s)}
+  printf '%s\n' "${cmd//\{one short line\}/$4}"
+}
+
+# Run a worker's filled status command the way a worker does: a plain shell
+# with no FM_HOME or state overrides, only this test's tool stubs and a
+# refresher throttle short enough to wait out.
+worker_appends() {  # <home> <task> <state> <note>
+  local cmd
+  cmd=$(worker_status_command "$@")
+  PATH="$1/fakebin:$PATH" LAVISH_AXI_STATE_DIR="$1/lavish-state" \
+    FM_PROCEVENT_CLAIM_ROOT="$1/procevent-claims" \
+    FM_BOARD_REFRESH_MIN_INTERVAL=2 FM_BOARD_REFRESH_DEBOUNCE=0 \
+    bash -c "$cmd" || fail "the worker status command failed"
+}
+
+# The Captain's Call keys on the open board, read from its data file.
+board_call_keys() {  # <home> <pattern>
+  sed -n 's/^[^{]*\({.*}\)[^}]*$/\1/p' "$1/.lavish/bearings-board.data.js" \
+    | jq -r --arg re "$2" '[.captains_call[]? | (.key // .id) | select(test($re))] | join(",")'
+}
+
+test_a_decision_re_raised_after_its_answer_returns_to_the_board_at_once() {
+  local home
+  home=$(make_hold_home re-raise)
+  add_steerable_task "$home" t1
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  worker_appends "$home" t1 "needs-decision [key=pick-layout]" "Which layout should the board use, grid or list?"
+  await_rebuilds "$home" 2 || fail "a worker's question did not refresh the open board"
+  assert_equals "status.t1.pick-layout" "$(board_call_keys "$home" pick-layout)" "the worker's question is not on Captain's Call"
+  steer "$home" t1 "The captain chose the grid layout." --resolve-key pick-layout || fail "the answering steer failed"
+  await_rebuilds "$home" 3 || fail "the answer did not refresh the open board"
+  assert_equals "" "$(board_call_keys "$home" pick-layout)" "the answered question stayed on Captain's Call"
+  sleep 1.1
+  worker_appends "$home" t1 "needs-decision [key=pick-layout]" "How many grid columns should the board use, two or three?"
+  await_rebuilds "$home" 4 || fail "a question re-raised seconds after its answer did not refresh the open board"
+  assert_equals "status.t1.pick-layout" "$(board_call_keys "$home" pick-layout)" \
+    "the re-raised question is missing from Captain's Call"
+  grep -q 'grid columns' "$home/.lavish/bearings-board.data.js" \
+    || fail "the open board does not show the re-raised question's new text"
+  pass "a decision a worker re-raises seconds after its answer is back on the open board's Captain's Call without a manual kick"
+}
+
+test_a_new_decision_from_a_worker_reaches_the_board_and_other_lines_do_not_kick() {
+  local home parent mate
+  home=$(make_hold_home new-key)
+  add_steerable_task "$home" t1
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  worker_appends "$home" t1 "working" "building the layout"
+  sleep 0.5
+  assert_equals 1 "$(rebuilt_count "$home")" "a working line refreshed the board"
+  [ ! -e "$home/state/.board-refresh.pending" ] || fail "a working line recorded a refresh request"
+  worker_appends "$home" t1 "needs-decision [key=name-pick]" "Which public name should ship, Atlas or Beacon?"
+  await_rebuilds "$home" 2 || fail "a brand-new question did not refresh the open board"
+  assert_equals "status.t1.name-pick" "$(board_call_keys "$home" name-pick)" "the new question is not on Captain's Call"
+  parent=$(make_home new-key-parent)
+  mate=$(make_mate_home new-key-mate "$parent")
+  printf -- '- new-key-mate - A test mate. (home: %s; scope: tests; projects: none; added 2026-11-18)\n' "$mate" \
+    > "$parent/data/secondmates.md"
+  build_initial_board "$parent"
+  counted_refresh "$parent" || fail "baseline parent refresh failed"
+  # The parent shows a mate's decision from the mate's home summary, which the
+  # mate publishes on its own schedule, so the kick's outcome here is a fresh
+  # parent snapshot rather than a card.
+  FM_BOARD_REFRESH_PAYLOAD="$parent/counted-payload" \
+    worker_appends "$mate" m1 "needs-decision [key=mate-pick]" "Which colour should the mate use, red or blue?"
+  for _ in $(seq 1 100); do
+    [ "$(payload_runs "$parent")" -ge 2 ] && [ ! -e "$parent/state/.board-refresh.lock" ] && break
+    sleep 0.1
+  done
+  assert_equals 2 "$(payload_runs "$parent")" "a secondmate worker's question did not refresh the parent board"
+  [ ! -e "$mate/.lavish/bearings-board.html" ] || fail "the secondmate worker's kick built a board in its own home"
+  [ ! -e "$mate/state/.board-refresh.pending" ] || fail "the secondmate worker's kick recorded a request in its own home"
+  pass "a worker's brand-new question refreshes the open board, in its own home or a secondmate's parent, and a working line does not"
+}
+
 test_new_board_code_is_installed_with_an_unchanged_fleet() {
   local home tmpl
   home=$(make_home new-code)
@@ -879,6 +968,8 @@ fm_test_run \
   test_an_answered_hold_ranked_first_never_returns_as_a_card \
   test_a_done_task_ranked_first_never_renders_as_a_card \
   test_a_secondmate_change_refreshes_the_parent_board \
+  test_a_decision_re_raised_after_its_answer_returns_to_the_board_at_once \
+  test_a_new_decision_from_a_worker_reaches_the_board_and_other_lines_do_not_kick \
   test_new_board_code_is_installed_with_an_unchanged_fleet \
   test_a_home_board_is_built_by_its_own_code_whoever_asks \
   test_a_home_replaces_a_refresher_another_code_root_left_running \
