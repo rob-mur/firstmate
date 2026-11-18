@@ -19,7 +19,9 @@
 # so; otherwise a reason with a question mark or its
 # own option list (option_parse) is a question, even when an option says
 # "until" or "wait"; otherwise a hold_until or until date, a hold whose bucket is blocked
-# (it waits on another task), a reason that opens with a time gate naming a date
+# (it waits on another task), a status blocked line with no decision key whose
+# reason names what it waits on anywhere (depends on, waits or waiting on or
+# for, blocked on or by, or parked, paused or held until), a reason that opens with a time gate naming a date
 # ("not before 2026-12-01", "revisit after ..."), or a reason that opens with
 # parks, pauses, freezes or frozen, resumes, holds until, waits for or on,
 # until, or re-runs is a wait. The keyword test is anchored to the start of the
@@ -247,6 +249,9 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
       elif (($d.hold_until // $d.until // "") | tostring | length) > 0
            and (($d.hold_until // $d.until) != "-") then true
       elif ($d.hold_bucket // "") == "blocked" then true
+      elif ($d.source // "") == "status" and ($d.verb // "") == "blocked"
+           and (($d.decision_key // "default") == "default")
+           and ($r | test("(^|[^a-z])(depends? on|depending on|dependent on|waits? (on|for)|waiting (on|for)|blocked (on|by)|(parked|paused|held) until)([^a-z]|$)"; "i")) then true
       elif ($r | test("^[[:space:]]*(not before|no earlier than|on or after|revisit|check back|time[- ]gated?|after)([^a-z][^.?!]{0,40})?[0-9]{4}-[0-9]{2}-[0-9]{2}"; "i")) then true
       else ($r | test("^[[:space:]]*(parked|paused|frozen|freeze|on hold|held until|hold until|resume|resuming|waiting (for|on|until)|waits? (for|until|on)|until|re-?runs?)([^a-z]|$)"; "i")) end;
   def is_review($d):

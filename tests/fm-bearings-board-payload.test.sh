@@ -702,6 +702,42 @@ test_a_task_status_question_becomes_a_card_and_a_wait_a_waiting_row() {
   pass "task and secondmate status questions reach the board as cards or waiting rows"
 }
 
+# A keyless blocked line that names what it waits on is a dependency wait, not
+# a captain call: it lands in Waiting with that dependency in its reason, never
+# in Captain's Call and never nowhere. A keyed blocked line, or a keyless one
+# that names no dependency, stays a card.
+test_a_keyless_blocked_line_naming_a_dependency_waits_instead_of_a_card() {
+  local snap="$TMP_ROOT/dep-wait.json" p k
+  fresh_homes dep-wait
+  write_snapshot "$TMP_ROOT/dep-wait-base.json"
+  jq '.decisions_open = [
+        {id: "workload-pruner", key: "status.workload-pruner.default", verb: "blocked", source: "status", task: "workload-pruner", decision_key: "default", mate: null, owner: "workload-pruner",
+         title_full: "workload-pruner", reason_full: "corr=6666af660f0353c1 R1-I1 GPU measurement depends on continuous-delivery #896 (no pipeline path runs a task on a GPU runner): https://forgejo.example/rob/continuous-delivery/issues/896. Parked until #896 lands.", summary: "depends on cd #896"},
+        {id: "babysit", key: "status.babysit.default", verb: "blocked", source: "status", task: "babysit", decision_key: "default", mate: null, owner: "(main)",
+         title_full: "babysit", reason_full: "MR 870 push is blocked: the pre-push hook gets 401. 876 waits on 870. Loop continues.", summary: "MR 870 push blocked"},
+        {id: "keyed", key: "status.keyed.wp-x", verb: "blocked", source: "status", task: "keyed", decision_key: "wp-x", mate: null, owner: "(main)",
+         title_full: "keyed", reason_full: "this depends on cd #896; route it to the cd second mate", summary: "keyed"},
+        {id: "disk", key: "status.disk.default", verb: "blocked", source: "status", task: "disk", decision_key: "default", mate: null, owner: "(main)",
+         title_full: "disk", reason_full: "disk still full, needs space freed", summary: "disk full"}]' \
+    "$TMP_ROOT/dep-wait-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  for k in status.workload-pruner.default status.babysit.default; do
+    assert_equals "0" "$(jq --arg k "$k" '[.captains_call[] | select(.key == $k)] | length' <<<"$p")" "a keyless dependency wait $k became a Captain's Call card"
+    assert_equals "1" "$(jq --arg k "$k" '[.waiting[] | select(.key == $k)] | length' <<<"$p")" "a keyless dependency wait $k is not in Waiting"
+  done
+  jq -e '.waiting[] | select(.key == "status.workload-pruner.default") | .reason | contains("depends on continuous-delivery #896")' <<<"$p" >/dev/null \
+    || fail "the waiting row does not show what it waits on: $p"
+  jq -e '.waiting[] | select(.key == "status.babysit.default") | .reason | contains("876 waits on 870")' <<<"$p" >/dev/null \
+    || fail "the babysit waiting row does not show what it waits on: $p"
+  for k in status.keyed.wp-x status.disk.default; do
+    assert_equals "1" "$(jq --arg k "$k" '[.captains_call[] | select(.key == $k)] | length' <<<"$p")" "blocked line $k should stay a card"
+    assert_equals "0" "$(jq --arg k "$k" '[.waiting[] | select(.key == $k)] | length' <<<"$p")" "blocked line $k should not wait"
+  done
+  printf '%s\n' "$p" > "$TMP_ROOT/dep-wait-payload.json"
+  validates "$TMP_ROOT/dep-wait-payload.json" || fail "a payload with dependency waits did not satisfy the board validator"
+  pass "a keyless blocked line that names a dependency waits with it, and keyed or dependency-free blocked lines stay cards"
+}
+
 test_urls_in_a_question_become_card_links() {
   local snap="$TMP_ROOT/urls.json" p
   write_snapshot "$TMP_ROOT/urls-base.json"
@@ -1529,6 +1565,7 @@ fm_test_run \
   test_a_lapsed_time_gate_returns_the_hold_to_captains_call \
   test_every_question_card_gets_real_default_choices \
   test_a_task_status_question_becomes_a_card_and_a_wait_a_waiting_row \
+  test_a_keyless_blocked_line_naming_a_dependency_waits_instead_of_a_card \
   test_urls_in_a_question_become_card_links \
   test_a_tailnet_review_page_link_and_a_review_card_get_choices \
   test_a_secondmate_status_question_is_titled_from_its_decision_not_its_home \

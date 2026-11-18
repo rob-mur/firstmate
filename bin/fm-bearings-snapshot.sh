@@ -50,9 +50,15 @@
 # Contributions project cached coverage and required actors from fm-contributions.sh;
 # only captain rows are exposed, with counts for the other actors and unmeasured homes. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
-# Underway (in_flight) projects every main live worker plus every active child
-# from every readable secondmate ledger, independently of that home's
-# bearings_state. Each row's name is the durable task title when nonblank and
+# Underway (in_flight) projects every main live worker plus every in-flight
+# child, working, paused, blocked or otherwise, from every readable secondmate
+# ledger, independently of that home's bearings_state. A ledger from an older
+# producer without in_flight_children contributes its active children plus its
+# child-state holds. A home served from its last-good cached ledger (freshness
+# "cached") keeps those rows; its secondmates[] row carries stale_note ("could
+# not read <id>, last seen <time>") and read_failure, each of its underway rows'
+# doing starts with that note, and each of its decisions_open rows carries it as
+# note. Each row's name is the durable task title when nonblank and
 # its durable task id otherwise, so renderers always receive a task-identifying
 # label instead of having to substitute run status. A home classified
 # captain_decision because it has an open
@@ -71,9 +77,11 @@
 # plus reason_earlier when the same key was raised before with other text. A
 # secondmate question the parent status log shows (the wake drain's open
 # decisions) is read from the parent task itself, so it reaches the board even
-# when the home summary is invalid; it is skipped only when the home is valid
-# with no active work, or already lists the same question under the same key or
-# as an open question of the child task that key names. A finished task whose last
+# when the home summary is invalid; it is skipped only when the home already
+# lists the same question under the same key or as an open question of the
+# child task that key names. Only a resolved line closes it: when the home is
+# valid with no active work the row stays, with note "<id> reports no active
+# work; key not resolved". A finished task whose last
 # event names a live review page becomes a source:"review-page" row. The
 # buckets are total and mutually exclusive, so every captain hold appears in
 # exactly one decision bucket and none can fall through both. An actively worked
@@ -199,13 +207,15 @@ An active away window refuses (exit 3) unless --during-away is given, which the
 board build passes so the captain can read the board while away.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
-  secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
+  secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason,
+    stale_note,read_failure},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,title,reason,title_full,reason_full,summary,question,owner,
     hold_until,hold_bucket,hold_set,hold_reconciled,origin,choices,answers,notes,report_path
       (captain holds only),
     handed_at,handed_via,handed_task,raised_at (handed decisions only),
-    pr_url (a PR or MR its home recorded, when the reason links none)},
+    pr_url (a PR or MR its home recorded, when the reason links none),
+    note (a row kept from an unreadable home or an idle home's open key)},
   landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed,title_full,reason_full,answers,notes,report_path},
   reports{id,path}, recorded_prs{id,url},
@@ -585,7 +595,21 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold"
             and live_captain_call)]) as $captain_holds
        | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
+       | . as $rec
        | . + {
+           stale_note:(if .freshness.status == "cached"
+                       then "could not read " + .id + ", last seen " + (.freshness.observed_at // "an unknown time")
+                       else null end),
+           # Every in-flight child, whatever its state. A summary from an older
+           # producer lists only working children, so its child-state holds
+           # are added back with the state its endpoint row records.
+           bearings_in_flight:(if (.in_flight_children | type) == "array" then .in_flight_children
+             else (.active_children // [])
+               + [ .holds[]? | select(.source == "child-state") | . as $h
+                   | {id,kind:null,
+                      state:(([$rec.endpoints[]? | select(.id == $h.id) | .state][0]) // "held"),
+                      repo:null,name:(.title // null),source:"child-state",
+                      doing:(.reason // "held")} ] end),
            bearings_captain_holds:$captain_holds,
            bearings_holds:(if .current.state == "captain_decision" then $backlog_holds else .holds end),
            bearings_state:(
@@ -612,10 +636,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                     ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
                   elif .bearings_state == "no_active_work" then "No active child work"
                   else (.current.reason // "Current home state unavailable") end) | trunc(120)),
-          provenance:(if .provenance.summary_source == "remote-ledger-cache" then "structured-home-cache"
+          provenance:(if .provenance.summary_source == "remote-ledger-cache"
+                         or .provenance.summary_source == "local-ledger-cache" then "structured-home-cache"
                       else .provenance.selected end),freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
-          reason:(.current.reason // "-")} ]) as $secondmates_all
+          reason:(.current.reason // "-"),stale_note,
+          read_failure:(.freshness.read_failure // null)} ]) as $secondmates_all
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
@@ -629,7 +655,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
      + [ $secondmate_views[] as $m
-         | $m.active_children[]?
+         | $m.bearings_in_flight[]?
          | {id:($m.id + "/" + .id),
             kind:(.kind // "secondmate"),
             state:(.state // "working"),
@@ -637,7 +663,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             name:((.name // "") as $name
                   | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
                      then $name else ($m.id + "/" + .id) end) | trunc(70)),
-            doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
+            doing:(((.doing // .state) | trunc(90)) as $d
+                   | if $m.stale_note == null then $d else $m.stale_note + " - " + $d end)} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
@@ -656,13 +683,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             answers:(.hold_answers // []),notes:(.body_notes // []),
             report_path:(.report_path // null)} ]
      + [ . as $root | .tasks[]? | . as $t
-         # A secondmate home that is valid and reports no active work is
-         # authoritative: a parent-log question for it is stale (contradiction
-         # evidence only). Any other state keeps the drain-visible question.
-         | select($t.kind != "secondmate"
-                  or ([ ($root.secondmate_current.records // [])[]
-                        | select(.id == $t.id and .provenance.summary_valid == true
-                                 and .current.state == "no_active_work") ] | length) == 0)
+         # An open parent-log question stays until a resolved line closes it.
+         # When the home reports no active work the row says so, because the
+         # home no longer carries the work that raised it.
+         | (if $t.kind == "secondmate"
+                and ([ ($root.secondmate_current.records // [])[]
+                       | select(.id == $t.id and .provenance.summary_valid == true
+                                and .current.state == "no_active_work") ] | length) > 0
+            then $t.id + " reports no active work; key not resolved"
+            else null end) as $idle_note
          # The same decision already carried by the home own status log is not
          # listed twice: the parent row names it by the same key, or by the
          # child task whose own log raised it (a relay keys it by that task).
@@ -672,7 +701,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                         | select(.id == $t.id) | .decisions_open[]?
                         | select(.source == "status" and (.key == $k or .id == $k)) ] | length) == 0)
          | status_question_row((if $t.kind == "secondmate" then $t.id else "(main)" end);
-                               null; $t.id; ($t.backlog.title // $t.id)) ]
+                               null; $t.id; ($t.backlog.title // $t.id))
+         | if $idle_note == null then . else . + {note:$idle_note} end ]
      + [ .tasks[]? | . as $t | review_page_row($t) ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
@@ -709,7 +739,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                    report_path:(.report_path // null)} ]
             + [ $m.decisions_open[]?
                 | select(.source == "status")
-                | status_question_row($m.id; $m.id; .id; .id) ])[] ]) as $decisions_all
+                | status_question_row($m.id; $m.id; .id; .id) ])[] ]
+     # A row whose home could not be read this time is its last known row.
+     | ([ $secondmate_views[] | select(.stale_note != null) | {key:.id,value:.stale_note} ]
+        | from_entries) as $stale_notes
+     | map(. as $d
+           | ($stale_notes[$d.owner] // null) as $stale
+           | if $stale == null then .
+             else . + {note:(if ($d.note // null) == null then $stale else $stale + "; " + $d.note end)} end)
+    ) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]
@@ -846,8 +884,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
         (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),
         (($snap.secondmate_current.records // [])[]
-         | select(.provenance.summary_source == "remote-ledger-cache")
-         | {surface:("secondmate " + .id + " served from cached home ledger"),reveal:"inspect the home ledger publication and remote route"}),
+         | select(.provenance.summary_source == "remote-ledger-cache" or .provenance.summary_source == "local-ledger-cache")
+         | {surface:("secondmate " + .id + " served from cached home ledger"
+                     + (if .freshness.read_failure then ": " + .freshness.read_failure else "" end)),
+            reveal:(if .provenance.summary_source == "local-ledger-cache"
+                    then "inspect the home and its home ledger publication"
+                    else "inspect the home ledger publication and remote route" end)}),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
