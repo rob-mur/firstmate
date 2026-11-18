@@ -4,6 +4,7 @@
 # Usage:
 #   fm-board-refresh.sh [--force]
 #   fm-board-refresh.sh --kick
+#   fm-board-refresh.sh --kick-decision <status-file>
 #
 # Regenerates the board payload (bin/fm-bearings-board-payload.sh, which applies
 # the captain's stored priority) and, only when it differs from the last one
@@ -24,6 +25,13 @@
 # reconcile request recorded (bin/fm-captain-hold.sh), each steer recorded in a
 # task inbox (bin/fm-send.sh), each task cleanup (bin/fm-teardown.sh), and each
 # main wake drain (bin/fm-wake-drain.sh).
+#
+# --kick-decision is --kick for a worker's status command (bin/fm-brief.sh): it
+# kicks only when the newest line of <status-file> is a needs-decision or
+# blocked line, a question for the captain, and does nothing otherwise. So a
+# decision a worker raises, or re-raises seconds after the captain answered it,
+# reaches the board's Captain's Call at its next pass, as an answer does, rather
+# than when the watcher next queues the line as a wake.
 #
 # A board is built only by its own home's code. When $FM_HOME carries its own
 # bin/fm-board-refresh.sh and that is not this file, this script runs that one
@@ -145,16 +153,36 @@ forward_kick_to_parent() {
     "$0" --kick >/dev/null 2>&1 || true
 }
 
+# Record a refresh request and start a refresher detached; never returns.
+kick() {
+  if [ ! -f "$BOARD" ]; then
+    forward_kick_to_parent
+    exit 0
+  fi
+  mkdir -p "$STATE" 2>/dev/null && : >"$PENDING" 2>/dev/null || exit 0
+  ( nohup "$0" >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
+  exit 0
+}
+
+# 0 when the newest line of <status-file> asks the captain a question.
+newest_line_asks_captain() {  # <status-file>
+  local line verb
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  line=$(tail -n 1 -- "$1" 2>/dev/null) || return 1
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$SCRIPT_DIR/fm-classify-lib.sh" 2>/dev/null || return 1
+  status_line_verb "$line" verb
+  case "$verb" in needs-decision|blocked) return 0 ;; esac
+  return 1
+}
+
 FORCE=0
 case "${1:-}" in
   --force) FORCE=1 ;;
-  --kick)
-    if [ ! -f "$BOARD" ]; then
-      forward_kick_to_parent
-      exit 0
-    fi
-    mkdir -p "$STATE" 2>/dev/null && : >"$PENDING" 2>/dev/null || exit 0
-    ( nohup "$0" >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
+  --kick) kick ;;
+  --kick-decision)
+    [ "$#" -eq 2 ] || { echo "fm-board-refresh: --kick-decision needs one status file" >&2; exit 2; }
+    newest_line_asks_captain "$2" && kick
     exit 0
     ;;
   -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
