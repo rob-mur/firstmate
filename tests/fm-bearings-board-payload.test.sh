@@ -1516,6 +1516,35 @@ test_a_numbered_recommended_option_line_gets_buttons() {
   pass "a numbered (1, recommended) option line gets buttons and its recommendation"
 }
 
+# An abbreviation such as "e.g." or "i.e." never ends a sentence, so a
+# question that holds one is the card heading whole and the body keeps the
+# text around it. The text is the pdm secondmate's real captain-hold line.
+test_an_abbreviation_never_ends_the_card_question() {
+  local snap="$TMP_ROOT/abbrev.json" p card line reason
+  line="needs-decision [key=captain-hold-pdm-99-version-2]: captain hold pdm-99-version: Where should pdm --version get the release semver (e.g. 1.2.0) for 'proton-drive-mount 1.2.0 (4f84552 2026-11-15)'? Designs: https://forgejo.clarob.uk/rob/proton-drive-mount/issues/99#issuecomment-34788 . (a, recommended) each release ships ... (d) no semver: print only commit and date."
+  reason=${line#*]: }
+  fresh_homes abbrev
+  write_snapshot "$TMP_ROOT/abbrev-base.json"
+  jq --arg r "$reason" --arg i "${reason/e.g./i.e.}" '.decisions_open = [
+        {id: "pdm", key: "status.pdm.captain-hold-pdm-99-version-2", verb: "needs-decision", source: "status",
+         task: "pdm", decision_key: "captain-hold-pdm-99-version-2", owner: "pdm", title: "pdm --version semver", reason: $r},
+        {id: "pdm", key: "status.pdm.captain-hold-pdm-99-version-ie", verb: "needs-decision", source: "status",
+         task: "pdm", decision_key: "captain-hold-pdm-99-version-ie", owner: "pdm", title: "pdm --version semver", reason: $i}]' \
+    "$TMP_ROOT/abbrev-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card=$(jq -c '.captains_call[] | select(.key == "status.pdm.captain-hold-pdm-99-version-2")' <<<"$p")
+  assert_equals "Where should pdm --version get the release semver (e.g. 1.2.0) for 'proton-drive-mount 1.2.0 (4f84552 2026-11-15)'?" \
+    "$(jq -r .question <<<"$card")" "e.g. does not end the card question: $card"
+  jq -e '.about // "" | test("[(]e[.]g[.] Designs") | not' <<<"$card" >/dev/null \
+    || fail "the card body is cut at e.g.: $card"
+  card=$(jq -c '.captains_call[] | select(.key == "status.pdm.captain-hold-pdm-99-version-ie")' <<<"$p")
+  assert_equals "Where should pdm --version get the release semver (i.e. 1.2.0) for 'proton-drive-mount 1.2.0 (4f84552 2026-11-15)'?" \
+    "$(jq -r .question <<<"$card")" "i.e. does not end the card question: $card"
+  printf '%s\n' "$p" > "$TMP_ROOT/abbrev-payload.json"
+  validates "$TMP_ROOT/abbrev-payload.json" || fail "the payload did not satisfy the board validator"
+  pass "an abbreviation such as e.g. or i.e. never ends the card question"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -1651,4 +1680,5 @@ fm_test_run \
   test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them \
   test_a_secondmate_decision_is_answerable_from_its_card \
   test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer \
-  test_a_numbered_recommended_option_line_gets_buttons
+  test_a_numbered_recommended_option_line_gets_buttons \
+  test_an_abbreviation_never_ends_the_card_question
