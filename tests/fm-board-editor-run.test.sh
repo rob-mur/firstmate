@@ -1069,9 +1069,12 @@ test_vim_captain_marker_keys() {
     "backslash-c in normal mode writes the marker with the cursor inside it"
   vim_edit "$dir" cards/hold-a.md "^## Your answer" 'o\<C-g>cfine by me' || fail "vim failed"
   assert_line "<!--captain: fine by me -->" "$card" "Ctrl-g c in insert mode writes the marker with the cursor inside it"
+  vim_edit "$dir" cards/hold-a.md "^<!--captain: fine" '\<C-g>cand soon' || fail "vim failed"
+  assert_line "<!--captain: and soon --><!--captain: fine by me -->" "$card" \
+    "Ctrl-g c in normal mode writes the marker with the cursor inside it"
   run_board "$dir" >/dev/null || fail "the record run failed"
-  assert_equals '["only if green","fine by me"]' \
-    "$(jq -c 'select(.kind == "answer") | .captain_words' "$dir/outbox.jsonl")" "both markers are recorded as the captain's"
+  assert_equals '["only if green","and soon","fine by me"]' \
+    "$(jq -c 'select(.kind == "answer") | .captain_words' "$dir/outbox.jsonl")" "every marker is recorded as the captain's"
   pass "the editor's keys write a captain marker that the run records"
 }
 
@@ -1090,6 +1093,31 @@ EOF
   assert_equals "1 1 2 2 -1" "$(tr '\n' ' ' <"$dir/hl" | sed 's/ $//')" \
     "one FmCaptain match per window finds one-line and two-line markers and no other comment"
   pass "captain markers are highlighted in their own colour"
+}
+
+test_nvim_normal_ctrl_g_c_map() {
+  local dir out
+  command -v nvim >/dev/null 2>&1 || { pass "skip: no nvim"; return; }
+  dir=$(fresh nvim-map)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  out=$( cd "$dir/board" && timeout 30 nvim --headless --clean -i NONE -S "$VIM_SCRIPT" \
+    -c 'call writefile([maparg("<C-g>c", "n"), maparg("<C-g>c", "i")], "'"$dir"'/maps")' -c 'qa!' cards/hold-a.md 2>&1 )
+  [ -f "$dir/maps" ] || fail "nvim did not write the maps: $out"
+  assert_equals 'i<!--captain:  --><Left><Left><Left><Left>' "$(sed -n 1p "$dir/maps")" \
+    "nvim has a normal-mode Ctrl-g c map that writes the marker"
+  assert_equals '<!--captain:  --><Left><Left><Left><Left>' "$(sed -n 2p "$dir/maps")" \
+    "nvim keeps the insert-mode Ctrl-g c map"
+  pass "Ctrl-g c is mapped in normal and insert mode in nvim"
+}
+
+test_board_hint_names_ctrl_g_c() {
+  local dir
+  dir=$(fresh hint)
+  run_board "$dir" >/dev/null || fail "first run failed"
+  grep -qF -- '- To mark text as yours anywhere, press Ctrl-g c (in any mode): it writes <!--captain:  -->.' \
+    "$dir/board/board.md" || fail "board.md does not give the Ctrl-g c hint"
+  grep -qF '\c' "$dir/board/board.md" && fail "board.md still advertises \\c"
+  pass "the board hint names Ctrl-g c in any mode and not \\c"
 }
 
 fm_test_run \
@@ -1135,4 +1163,6 @@ fm_test_run \
   test_captain_marker_recorded_verbatim \
   test_page_captain_marker \
   test_vim_captain_marker_keys \
-  test_captain_marker_highlighted
+  test_captain_marker_highlighted \
+  test_nvim_normal_ctrl_g_c_map \
+  test_board_hint_names_ctrl_g_c

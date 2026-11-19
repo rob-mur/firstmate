@@ -45,8 +45,8 @@ card has a check.
 Text the captain marks <!--captain: ...--> anywhere in a card or a page is
 theirs: the run records it verbatim once, with its words (without the marker)
 as "captain_words", and a marker put into a line of the card or page is only
-the marker, not a rewrite of the line. In vim or nvim, \\c (normal mode) and
-Ctrl-g c (insert mode) write an empty marker with the cursor inside it. A captain hold deferred to a future date (the source lists it
+the marker, not a rewrite of the line. In vim or nvim, Ctrl-g c (in any mode)
+writes an empty marker with the cursor inside it. A captain hold deferred to a future date (the source lists it
 as "deferred until <date>") is listed under "Charted" until that date, as the
 real board charts it.
 
@@ -1165,7 +1165,7 @@ def render_board(model: dict, live: dict, settled: set[str], places: dict[str, l
         "- In a card, press Enter on a page line to open that page in a new tab.",
         "- Press Enter on a report path (data/<task>/report.md) to open that report in a new tab.",
         "- Press Enter or gx on a web address to open it in the browser.",
-        "- To mark text as yours anywhere, press \\c (or Ctrl-g c while you type): it writes <!--captain:  -->.",
+        "- To mark text as yours anywhere, press Ctrl-g c (in any mode): it writes <!--captain:  -->.",
         "- Write your answer at the bottom of the card. Save it with :wq.",
         "- Move a line to change the order (dd, then p).",
         "- Save and quit everything with :wqa.",

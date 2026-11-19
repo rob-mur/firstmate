@@ -2,8 +2,9 @@
 " Enter, gf and gx on a line open what it names: a board file (cards/, pages/ or reports/) in a new
 " tab, a web address through the opener ($TUI_BOARD_OPENER, else xdg-open), and a report path
 " (data/<task>/report.md) as the report's copy under reports/<home>/ in a new tab.
-" Text marked <!--captain: ...--> is the captain's own and is highlighted. \c in normal mode and
-" Ctrl-g c in insert mode write an empty marker, <!--captain:  -->, with the cursor inside it.
+" Text marked <!--captain: ...--> is the captain's own and is highlighted. Ctrl-g c, in insert or
+" normal mode, writes an empty marker, <!--captain:  -->, and leaves the cursor inside it in insert
+" mode. <Leader>c in normal mode does the same.
 let s:board = getcwd()
 let s:file = '\%(cards\|pages\|reports\|notes\)/[^ )\]`]\+\.\%(md\|txt\)'
 let s:url = 'https\?://[^ 	<>"`]\+'
@@ -101,6 +102,7 @@ function! s:Map() abort
   nnoremap <buffer> <silent> <CR> <Cmd>call <SID>Open('cr')<CR>
   " The captain's marker: the cursor lands between the two spaces, ready to type.
   inoremap <buffer> <C-g>c <lt>!--captain:  --><Left><Left><Left><Left>
+  nnoremap <buffer> <C-g>c i<lt>!--captain:  --><Left><Left><Left><Left>
   nnoremap <buffer> <Leader>c i<lt>!--captain:  --><Left><Left><Left><Left>
   if !exists('w:fm_captain')
     let w:fm_captain = matchadd('FmCaptain', '\c<!--\s*captain:\%(\%(<!--\)\@!\_.\)\{-}-->')
