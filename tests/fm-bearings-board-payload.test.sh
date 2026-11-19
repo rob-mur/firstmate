@@ -870,6 +870,30 @@ test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice(
   pass "one question renders one card that keeps the richer text and loses no choice"
 }
 
+# A worker that raised a captain hold and then posted an unkeyed needs-decision
+# announcing it (cd's #930 identity call, "...; card cd-930-identity") gets one
+# card: the unkeyed line naming the held task is dropped, the hold card stays.
+test_an_unkeyed_status_line_naming_a_held_card_does_not_make_a_second_card() {
+  local snap="$TMP_ROOT/names-hold.json" p line
+  line="#930 follow-on from the captain's Secret Manager answer: every cloud runner job of every repo runs as one shared Google account, so which identity may read the image-push key? (a, recommended) per-job Forgejo OIDC admitted only for continuous-delivery and runner-image, desktop needs no stored credential for it; (b) the shared runner account plus a desktop credential, which lets every adopter read the key. Security-sensitive new trust path, so raised; card cd-930-identity. https://forgejo.clarob.uk/rob/continuous-delivery/issues/930#issuecomment-34897"
+  fresh_homes names-hold
+  write_snapshot "$TMP_ROOT/names-hold-base.json"
+  jq --arg line "$line" '.decisions_open = [
+        {id: "cd/cd-930-identity", key: "cd-930-identity", verb: "captain-hold", title: "Image-push key identity", reason: "Which identity should be allowed to read the new image-push key?", owner: "cd"},
+        {id: "cd", key: "status.cd.default", task: "cd", decision_key: "default", source: "status", verb: "needs-decision", title: "cd", reason: $line, reason_full: $line, owner: "cd", mate: "cd"},
+        {id: "cd2", key: "status.cd2.default", task: "cd2", decision_key: "default", source: "status", verb: "needs-decision", title: "cd2", reason: "Rotate the cd-930-identity-old key now or keep it?", owner: "cd", mate: "cd"},
+        {id: "other", key: "status.other.default", task: "other", decision_key: "default", source: "status", verb: "needs-decision", title: "other", reason: "Ship card cd-930-identity in this home too?", owner: "other", mate: "other"}]' \
+    "$TMP_ROOT/names-hold-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "0" "$(jq '[.captains_call[], .waiting[]] | map(select(.key == "status.cd.default")) | length' <<<"$p")" "the unkeyed line naming the held card renders no card or waiting row"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "cd-930-identity")] | length' <<<"$p")" "the held card stays"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.cd2.default")] | length' <<<"$p")" "a line naming only a longer id is not folded"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.other.default")] | length' <<<"$p")" "a line in another home naming the id is not folded"
+  printf '%s\n' "$p" > "$TMP_ROOT/names-hold-payload.json"
+  validates "$TMP_ROOT/names-hold-payload.json" || fail "a payload with a dropped announcing line did not satisfy the board validator"
+  pass "an unkeyed status line naming a held card is dropped and the held card stays"
+}
+
 test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question() {
   local snap="$TMP_ROOT/parked.json" p
   fresh_homes parked
@@ -1654,6 +1678,7 @@ fm_test_run \
   test_a_tailnet_review_page_link_and_a_review_card_get_choices \
   test_a_secondmate_status_question_is_titled_from_its_decision_not_its_home \
   test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice \
+  test_an_unkeyed_status_line_naming_a_held_card_does_not_make_a_second_card \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
   test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids \
   test_a_long_asking_sentence_still_heads_its_card_as_a_question \
