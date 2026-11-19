@@ -1569,6 +1569,52 @@ test_an_abbreviation_never_ends_the_card_question() {
   pass "an abbreviation such as e.g. or i.e. never ends the card question"
 }
 
+# A sentence a worker addresses to firstmate ("Firstmate: ...", "Firstmate, ...")
+# is not for the captain: the card drops it from its question and body, and it
+# never sticks to the last option. A sentence that only mentions firstmate stays.
+# Each option the reason marks "(a, recommended)" stays the card recommendation.
+# The reasons are the real lines from the aegis-879 review, the runner FUSE
+# apply, and the ForgeArm design hold.
+test_a_sentence_addressed_to_firstmate_never_reaches_the_card() {
+  local snap="$TMP_ROOT/addressee.json" p card mr fuse arm mention
+  mr='Review of https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/879 is done and nothing is posted (verdict: request changes, small; low danger, seed-only, prod never mounts the seed router; one blocker: the default 10-claim seed shows 8 of 16 status pairs, and the description claims code for claims 2-4 that the branch lacks). Which held comments do you want posted, numbered in data/aegis-879-review/report.md? (a, recommended) Post 1, 2, 3, 4, 6 with request changes (b) Post 1-4 and 6-10 (adds the test gaps) (c) Post all 12 (d) Post none. Firstmate: the inventory is this one call, please register it and attest completion.'
+  fuse='May the two FUSE cluster changes be applied live now, before the FUSE PR opens? (a, recommended) the worker plans again and applies only if the plans are unchanged: infra/shared = 1 in-place change, adding node-pool label clusterautoscaler-nodetemplate-resources.squat.ai/fuse=10 with no node-pool replacement; infra/cluster = 1 add, the FUSE device-plugin DaemonSet (about 50m CPU and 20Mi). After that it opens the PR, and that PR'"'"'s FUSE job, started with the pool at zero, is the scale-from-zero check. (b) open the PR first and apply later: its FUSE job cannot be scheduled and blocks all cluster dispatch for up to 1 h. (c) apply only the DaemonSet now and hold the node label: FUSE jobs then run only while another job keeps a node up. No new spend in any option. Branch: https://forgejo.clarob.uk/rob/runner-image/src/branch/fm/runner-fuse-ship (via-helper)'
+  arm='captain hold cd-forge-arm-lab: Which ForgeArm acceptance design should we build first? (a, recommended) a test that starts a throwaway Forgejo, runs the real arm on new, existing and already-armed repo shapes, and compares the result with a reviewed golden per shape, plus cheap static checks of the seeded files against the pipeline they call; about 60 s, so you review a diff instead of re-running the arm. (b) the static checks alone now, then decide after measuring what they miss. (c) shapes and goldens on today'"'"'s fake forge only, with no new infrastructure. (d) the full stack with a runner, on main only, with the highest upkeep. https://forgejo.clarob.uk/rob/continuous-delivery/issues/932'
+  mention='Should the sweep keep the old logs? Firstmate already archived them last week. (a) keep them (b) drop them. Firstmate, the sweep is idle until this is answered.'
+  fresh_homes addressee
+  write_snapshot "$TMP_ROOT/addressee-base.json"
+  jq --arg mr "$mr" --arg fuse "$fuse" --arg arm "$arm" --arg mention "$mention" '.decisions_open = [
+        {id: "aegis-879-review", key: "status.aegis-879-review.mr879-comments", verb: "needs-decision", source: "status",
+         task: "aegis-879-review", decision_key: "mr879-comments", owner: "(main)", reason: $mr},
+        {id: "runner-fuse", key: "status.runner-fuse.runner-fuse-apply", verb: "needs-decision", source: "status",
+         task: "runner-fuse", decision_key: "runner-fuse-apply", owner: "(main)", reason: $fuse},
+        {id: "cd-forge-arm", key: "status.cd-forge-arm.captain-hold-cd-forge-arm-lab-1", verb: "needs-decision", source: "status",
+         task: "cd-forge-arm", decision_key: "captain-hold-cd-forge-arm-lab-1", owner: "(main)", reason: $arm},
+        {id: "sweep", key: "status.sweep.logs", verb: "needs-decision", source: "status",
+         task: "sweep", decision_key: "logs", owner: "(main)", reason: $mention}]' \
+    "$TMP_ROOT/addressee-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card=$(jq -c '.captains_call[] | select(.key == "status.aegis-879-review.mr879-comments")' <<<"$p")
+  jq -e '[.title, .question, .about, .context.reason, (.options[].label)] | map(. // "") | any(test("Firstmate|attest completion")) | not' <<<"$card" >/dev/null \
+    || fail "the card shows the sentence addressed to firstmate: $card"
+  jq -e '(.about // "") | test("branch lacks[)][.]$")' <<<"$card" >/dev/null \
+    || fail "the card body lost the text before the sentence addressed to firstmate: $card"
+  jq -e '[.options[] | .label] == ["Post 1, 2, 3, 4, 6 with request changes", "Post 1-4 and 6-10 (adds the test gaps)", "Post all 12", "Post none"]' <<<"$card" >/dev/null \
+    || fail "the MR 879 card did not keep its four options intact: $card"
+  for key in status.aegis-879-review.mr879-comments status.runner-fuse.runner-fuse-apply status.cd-forge-arm.captain-hold-cd-forge-arm-lab-1; do
+    assert_equals "option-a" "$(jq -r --arg k "$key" '.captains_call[] | select(.key == $k) | .recommend_value' <<<"$p")" \
+      "the (a, recommended) option is the recommendation of $key"
+  done
+  card=$(jq -c '.captains_call[] | select(.key == "status.sweep.logs")' <<<"$p")
+  jq -e '(.about // "") | test("Firstmate already archived them last week[.]")' <<<"$card" >/dev/null \
+    || fail "a sentence that only mentions firstmate was dropped: $card"
+  jq -e '[.question, .about, (.options[].label)] | map(. // "") | any(test("Firstmate, the sweep")) | not' <<<"$card" >/dev/null \
+    || fail "the card shows the sentence addressed to firstmate with a comma: $card"
+  printf '%s\n' "$p" > "$TMP_ROOT/addressee-payload.json"
+  validates "$TMP_ROOT/addressee-payload.json" || fail "the payload did not satisfy the board validator"
+  pass "a sentence addressed to firstmate never reaches the card, and (a, recommended) stays the recommendation"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -1706,4 +1752,5 @@ fm_test_run \
   test_a_secondmate_decision_is_answerable_from_its_card \
   test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer \
   test_a_numbered_recommended_option_line_gets_buttons \
-  test_an_abbreviation_never_ends_the_card_question
+  test_an_abbreviation_never_ends_the_card_question \
+  test_a_sentence_addressed_to_firstmate_never_reaches_the_card
