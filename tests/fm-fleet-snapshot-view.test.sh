@@ -1131,6 +1131,42 @@ test_busy_pane_keeps_keyed_decision() {
   pass "a busy pane read keeps a keyed open decision"
 }
 
+# The fold names an unkeyed decision "default", the same name a worker gives a
+# question it raises with an explicit [key=default]. The explicit key is still
+# a key: the question stays open until its resolved line, so a busy pane must
+# not drop it with the unkeyed ones.
+test_busy_pane_keeps_explicit_default_key() {
+  local home fakebin out gen
+  home=$(make_home busy-default-key)
+  mkdir -p "$home/projects/scout-wt6"
+  fm_write_meta "$home/state/busy-default.meta" \
+    "window=firstmate:fm-busy-default" \
+    "worktree=$home/projects/scout-wt6" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=scout"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" busy-default)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" busy-default busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf '%s\n' \
+    'needs-decision [at=1795005836]: waiting on the pick on the page' \
+    'resolved [key=default] [at=1795005972]: carried by board card picks' \
+    'needs-decision [key=default] [at=1795009102]: post these texts now? (a) yes (b) change them' \
+    > "$home/state/busy-default.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "busy-default")
+    | .current_state.state == "working"
+      and .current_state.source == "pane"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+      and .hints.open_decisions[0].key == "default"
+  ' >/dev/null || fail "a busy pane read must not drop an explicit [key=default] decision: $out"
+  pass "a busy pane read keeps an explicit [key=default] decision"
+}
+
 # A pane read that cannot tell busy from idle proves nothing about the decision,
 # so it keeps every open decision, keyed or not.
 test_unknown_pane_keeps_open_decisions() {
@@ -1307,6 +1343,7 @@ fm_test_run \
   test_completed_scout_report_is_pointer_not_pending \
   test_parked_scout_decision_stays_pending \
   test_busy_pane_keeps_keyed_decision \
+  test_busy_pane_keeps_explicit_default_key \
   test_unknown_pane_keeps_open_decisions \
   test_a_reraised_decision_carries_its_earlier_text \
   test_current_state_cache_follows_status_and_ttl \
