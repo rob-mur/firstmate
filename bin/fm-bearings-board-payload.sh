@@ -103,7 +103,9 @@
 #                      no decision; a hold or status card keeps its own text, so one
 #                      that does not ask is refused until its reason or overlay asks.
 #                      Every reason shown has its `corr=<hex>`
-#                      tokens removed (clean_reason in bin/fm-bearings-question-lib.sh).
+#                      tokens and its sentences addressed to firstmate ("Firstmate:
+#                      ...", "Firstmate, ...") removed (clean_reason in
+#                      bin/fm-bearings-question-lib.sh).
 #                      A reason answered on its Lavish page (a tailnet page link plus
 #                      "is on the ... page", "ready on the ... page", "ready for ...
 #                      on its ... page", "the page shows", "answer ... on the page")
