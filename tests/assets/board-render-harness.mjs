@@ -9,7 +9,7 @@
 //   { stats:[{n,label}], waiting:{shown,rows}, open_mrs:{shown,rows:[{text,links}]},
 //     captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text,action}],
-//     pages:[{page,text}],notes:[text],options:[{value,label,aside}],
+//     pages:[{page,text}],notes:[text],options:[{value,label,aside,rec}],
 //     answer_box:null|{tag,name,label,placeholder,before_aside}}],
 //     empty, more, error }
 import { readFileSync } from "node:fs";
@@ -171,6 +171,8 @@ const call = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
       value: lab.children.find((c) => c.tagName === "input")?.value ?? "",
       label: lab.findAll((c) => c.className.includes("bb-opt__label"))[0]?.textContent ?? "",
       aside: g.className.includes("bb-opts--aside"),
+      // Whether the option shows the card's recommendation pill.
+      rec: lab.findAll((c) => c.className.split(/\s+/).includes("bb-opt__rec")).length > 0,
     }))),
   // The free-text answer box: what it is, the label shown with it, and whether
   // it sits above the separate reconcile group.
