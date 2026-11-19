@@ -487,11 +487,18 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # reads as a question and the decision check in build still sees it ask.
   # It drops each URL with the word before it, except a link its own kind word
   # leads, which shows as its number ("deploy X (PR 133)?").
+  # An asking sentence too long to show whole that ends in a clause which asks
+  # ("..., so how should I deploy X?") is cut to that clause, whole.
     def short_text_n($n):
       tostring | label_urls(false) | gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | (sentences[0] // .)
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?](?: (?=[?]))?"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
+      | if length > $n and endswith("?") then
+          ([match("(?:[,;]|[[:space:]]-) (?:(?:so|and|but|then|now|or) )?(?<q>(?:how|what|which|who|when|where|why|whether|should|shall|can|could|will|would|do|does|did|is|are|may|must|might) [^,;]*[?])$"; "i")][0]
+           | .captures[0].string // null) as $c
+          | if $c != null and ($c | length) <= $n then $c | cap else . end
+        else . end
       | if length <= $n then .
         elif endswith("?") then (.[:($n - 2)] | sub(" [^ ]*$"; "")) + "…?"
         else (.[:($n - 1)] | sub(" [^ ]*$"; "")) + "…" end;
