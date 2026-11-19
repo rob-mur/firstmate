@@ -175,7 +175,9 @@
 # check, a card whose key or `context.task` the page record names in `task`
 # (bin/fm-board-page.sh open --task), whose key is the page id, or whose text
 # (title, question, about, context reason or notes) names the page id as a
-# whole word gains a `{page, label}` link to it, and a Waiting or Charted row
+# whole word, or names the page title whole when that title is 12 characters
+# or more ("Architecture page: board tab 'Architecture: MR 887 net-only
+# claims'"), gains a `{page, label}` link to it, and a Waiting or Charted row
 # matched the same way gains `context.page` ({id, title}).
 #
 # EVERY BOARD ITEM MAY CARRY `context`, what it expands to show in place: an
@@ -564,10 +566,14 @@ lavish_session_pages() {  # <pages-json>
 attach_page_links() {  # <pages-json>
   jq -c --argjson pages "$1" '
     def names($id): type == "string" and test("(^|[^a-z0-9-])" + $id + "($|[^a-z0-9-])"; "i");
+    def names_title($t):
+      type == "string" and ($t | type == "string" and length >= 12)
+      and (ascii_downcase | contains($t | ascii_downcase));
     def task_ids($i): [$i.key, $i.id, ($i.context.task // null)] | map(strings | ., (split("/") | last)) | unique;
     def about_page($i; $p):
       (task_ids($i) as $t | ($t | index([$p.id])) or ($p.task != null and ($t | index([$p.task]))))
-      or any(($i.title, $i.question, $i.about, $i.reason, $i.context.reason, ($i.context.notes // [])[]); names($p.id));
+      or any(($i.title, $i.question, $i.about, $i.reason, $i.context.reason, ($i.context.notes // [])[]);
+             names($p.id) or names_title($p.title));
     def pages_for($i): [ $pages[] | select(about_page($i; .)) ];
     .captains_call |= map(
       . as $c

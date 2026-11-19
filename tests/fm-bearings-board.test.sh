@@ -1341,9 +1341,43 @@ test_a_page_about_a_task_links_its_card_and_context_in_place() {
   pass "a live page about a task links its card and its Waiting and Charted context in place"
 }
 
+# A card whose text names a live page by its title links that page in place,
+# as the real mr887-comments line names "board tab 'Architecture: MR 887
+# net-only claims'" for a page recorded with no task.
+test_a_card_that_names_a_page_title_links_that_page() {
+  local home data dir out
+  home=$(make_home page-title-link)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null 2>&1 || fail "the first build failed"
+  dir=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-board-page.sh" dir architecture-887) \
+    || fail "the page folder was not given"
+  printf '<html></html>\n' > "$dir/page.html"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_BOARD_PAGE_REFRESH=true \
+    "$ROOT/bin/fm-board-page.sh" open architecture-887 --title "Architecture: MR 887 net-only claims" >/dev/null \
+    || fail "the page did not open"
+  jq '.captains_call += [
+    {"key":"status.aegis-887-review.mr887-comments","type":"decision","repo":"aegis","title":"aegis-887-review: Which held comments should go on MR 887?",
+     "about":"Verdict: request changes, small. Report: /home/rob/repos/firstmate/data/aegis-887-review/report.md Architecture page: board tab '"'"'Architecture: MR 887 net-only claims'"'"'.",
+     "options":[{"value":"option-a","label":"Post 1, 2, 3, 4, 5 with request changes"},{"value":"option-d","label":"Post none"}],
+     "context":{"task":"aegis-887-review"}},
+    {"key":"other-arch","type":"decision","repo":"aegis","title":"Architecture review",
+     "question":"Approve the architecture?",
+     "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the card naming a page title was refused: $out"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    ([.captains_call[] | select(.key == "status.aegis-887-review.mr887-comments") | .links[]]
+       == [{"page":"architecture-887","label":"Architecture: MR 887 net-only claims"}])
+    and ([.captains_call[] | select(.key == "other-arch") | .links // [] | .[] | select(has("page"))] == [])
+  ' >/dev/null || fail "the card naming the page title did not link it, or a card naming only a word of it did: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '[.captains_call[] | {key, links}]')"
+  pass "a card that names a live page by its title links that page in place"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_flags_a_card_without_recorded_choices_or_a_link
 test_a_page_about_a_task_links_its_card_and_context_in_place
+test_a_card_that_names_a_page_title_links_that_page
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
 test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board

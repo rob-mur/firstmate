@@ -74,7 +74,8 @@
 #                      question or review-page card carries `from_status`. Every card, waiting
 #                      row, and charted row also carries `context` ({task, reason,
 #                      answers[{at, mode, text}], notes, report} from the snapshot's
-#                      structured fields), which the board expands in place. Options the text refers to but does
+#                      structured fields; with no recorded report, the local report or
+#                      page path the reason names), which the board expands in place. Options the text refers to but does
 #                      not list ("A/B/C") come from its other listing or its `reason_earlier`
 #                      lines; when none lists them the card carries `malformed`, a sentence
 #                      saying so, and no button for them (recover_options). And any
@@ -90,7 +91,7 @@
 #                      A hold whose reason is a wait or park rather than a question moves
 #                      to `waiting` instead (see below). Each remaining card leads with
 #                      one short `question` (at most 120 characters, a cut asking
-#                      sentence keeping its closing "?", first letter
+#                      sentence keeping its closing "?" and never cut inside a parenthesis that closes right before that "?", first letter
 #                      capitalised): for a reason with its own options, the sentence
 #                      that introduces them (without a leading "Captain call:" or
 #                      "Decision needed:" label); else the sentence led by "Question:", else
@@ -381,7 +382,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     (($copy[$section] // {})[$id] // {}) | with_entries(select(.key as $k | $allowed | index($k)));
   # What a board item expands to show in place: its task, the full hold or gate
   # reason, each recorded captain answer with its date and words, the task notes,
-  # and its report, all from the snapshot structured fields.
+  # and its report, all from the snapshot structured fields; a row with no
+  # recorded report takes the local report or page path its reason names (a
+  # ".../report.md" first, else the first absolute .md or .html path).
   def context_of($d):
     ( {task: (($d.task // $d.id // $d.key) | if type == "string" and length > 0 then . else null end),
        reason: (($d.reason_full // $d.reason) | nz(null)
@@ -390,7 +393,10 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                   | {at: (.at // null), mode: (.mode // null), text: ((.text // "") | tostring)}
                   | select(.text != "") ][:12],
        notes: [ ($d.notes // [])[] | strings | select(length > 0) ][:12],
-       report: ($d.report_path | if type == "string" and length > 0 then . else null end)} )
+       report: (($d.report_path | if type == "string" and length > 0 then . else null end)
+                // ((($d.reason_full // $d.reason // "") | tostring
+                     | [ scan("(?<![^[:space:](])/[^[:space:]()<>\"\u0027;,]+[.](?:md|html)(?![[:alnum:]])") ]) as $p
+                    | ([ $p[] | select(test("/report[.]md$")) ][0] // $p[0])))} )
     | with_entries(select(.value != null and .value != []));
 
   ($snap.contributions.captain // []) as $contrib
@@ -488,7 +494,10 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # It drops each URL with the word before it, except a link its own kind word
   # leads, which shows as its number ("deploy X (PR 133)?").
   # An asking sentence too long to show whole that ends in a clause which asks
-  # ("..., so how should I deploy X?") is cut to that clause, whole.
+  # ("..., so how should I deploy X?") is cut to that clause, whole; one that
+  # ends in a parenthesis drops that parenthesis whole ("Which comments should
+  # go on MR 887 (verdict: ...)?" reads "... on MR 887?"), and a cut never
+  # ends inside a parenthesis that closes right before the "?".
     def short_text_n($n):
       tostring | label_urls(false) | gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | (sentences[0] // .)
@@ -499,9 +508,16 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
            | .captures[0].string // null) as $c
           | if $c != null and ($c | length) <= $n then $c | cap else . end
         else . end
+      | if length > $n and test("[^[:space:]][[:space:]]*\\([^()]*\\)[?]$") then
+          (sub("[[:space:]]*\\([^()]*\\)[?]$"; "") + "?") as $a
+          | if ($a | length) <= $n then $a else . end
+        else . end
       | if length <= $n then .
-        elif endswith("?") then (.[:($n - 2)] | sub(" [^ ]*$"; "")) + "…?"
-        else (.[:($n - 1)] | sub(" [^ ]*$"; "")) + "…" end;
+        else endswith("?") as $asks | test("[)][?]$") as $paren_asks
+          | (.[:(if $asks then $n - 2 else $n - 1 end)] | sub(" [^ ]*$"; "")
+             | if $paren_asks and ([scan("[(]")] | length) > ([scan("[)]")] | length)
+               then sub("[[:space:]]*[(][^()]*$"; "") else . end)
+          + (if $asks then "…?" else "…" end) end;
     def short_text: short_text_n(80);
     # The sentence that asks: one led by "Question:" (prefix dropped), else the
     # first ending in "?", else the first sentence.
