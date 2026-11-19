@@ -1615,6 +1615,30 @@ test_a_sentence_addressed_to_firstmate_never_reaches_the_card() {
   pass "a sentence addressed to firstmate never reaches the card, and (a, recommended) stays the recommendation"
 }
 
+# A URL written right before its "?" with a space between ("on <url> ?") reads
+# as its link label with the "?" against it ("on PR 135?"), never "PR 135 ?".
+# The reason is the real line from the pdm registry namespace hold.
+test_a_link_label_right_before_a_question_mark_keeps_no_space() {
+  local snap="$TMP_ROOT/label-qmark.json" p card line reason
+  line="needs-decision [key=captain-hold-pdm-registry-ns-1] [at=1795093479]: captain hold pdm-registry-ns: Will you read and dismiss the acknowledgement review on https://forgejo.clarob.uk/rob/proton-drive-mount/pulls/135 ? It changes only devenv.nix: build records move to the shared registry prefix with namespace proton-drive-mount, as continuous-delivery #810 requires. CI is green and published to the shared registry. Once you dismiss it, I merge."
+  reason=${line#*]: }
+  fresh_homes label-qmark
+  write_snapshot "$TMP_ROOT/label-qmark-base.json"
+  jq --arg r "$reason" '.decisions_open = [
+        {id: "pdm", key: "status.pdm.captain-hold-pdm-registry-ns-1", verb: "needs-decision", source: "status",
+         task: "pdm", decision_key: "captain-hold-pdm-registry-ns-1", owner: "pdm", reason: $r}]' \
+    "$TMP_ROOT/label-qmark-base.json" > "$snap"
+  p=$(FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$snap") || fail "the generator failed"
+  card=$(jq -c '.captains_call[] | select(.key == "status.pdm.captain-hold-pdm-registry-ns-1")' <<<"$p")
+  jq -e '[.title, .question, .about] | map(. // "") | any(test(" [?]")) | not' <<<"$card" >/dev/null \
+    || fail "the card keeps a space before its question mark: $card"
+  jq -e '[.title, .question, .about] | map(. // "") | any(contains("review on PR 135?"))' <<<"$card" >/dev/null \
+    || fail "the card does not ask about PR 135 with the question mark against its label: $card"
+  printf '%s\n' "$p" > "$TMP_ROOT/label-qmark-payload.json"
+  validates "$TMP_ROOT/label-qmark-payload.json" || fail "the payload did not satisfy the board validator"
+  pass "a link label right before a question mark keeps no space before it"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -1753,4 +1777,5 @@ fm_test_run \
   test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer \
   test_a_numbered_recommended_option_line_gets_buttons \
   test_an_abbreviation_never_ends_the_card_question \
-  test_a_sentence_addressed_to_firstmate_never_reaches_the_card
+  test_a_sentence_addressed_to_firstmate_never_reaches_the_card \
+  test_a_link_label_right_before_a_question_mark_keeps_no_space
