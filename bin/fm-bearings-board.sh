@@ -136,7 +136,9 @@
 # from the snapshot and task records wherever known, and uses null or an empty string
 # only as the deliberate genuinely-no-repo marker. In that exceptional case
 # the template may display the routing id. Anything else refuses before the
-# existing board is touched.
+# existing board is touched. The refusal names the first failing item (its
+# section, index, and key or id) with each missing or invalid field, and counts
+# any further failing items.
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
 # when known, otherwise its durable identifier.
@@ -326,12 +328,13 @@ refuse_foreign_template() {
   fail "$msg"
 }
 
-validate_payload() {  # <data.json>
-  jq -e --arg schema "$BOARD_SCHEMA" '
+# Print one line per payload item, or for the payload itself, that breaks
+# fm-bearings-board.v1, naming the item (its section index, and its key or id)
+# and every missing or invalid field; print nothing for a valid payload.
+payload_errors() {  # <data.json>
+  jq -r --arg schema "$BOARD_SCHEMA" '
     def nonempty_string: type == "string" and length > 0;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
-    def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
-    def name_marker: has("name") and (.name | nonempty_string);
     def valid_filed:
       . as $filed
       | type == "string"
@@ -340,142 +343,150 @@ validate_payload() {  # <data.json>
         then try ((fromdateiso8601 | strftime("%Y-%m-%dT%H:%M:%SZ")) == $filed) catch false
         else try (((. + "T00:00:00Z") | fromdateiso8601 | strftime("%Y-%m-%d")) == $filed) catch false
         end);
-    def optional_filed:
-      (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
-    def optional_https_url($name):
-      (has($name) | not)
-      or (.[$name]
-        | type == "string"
-          and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
-    def link_url:
+    def https_url:
       type == "string"
-      and (test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$")
-        or test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#][^[:space:]]*)?$"));
+      and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$");
+    def link_url:
+      https_url or (type == "string"
+        and test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#][^[:space:]]*)?$"));
     def page_id: type == "string" and test("^[a-z0-9][a-z0-9-]{0,63}$");
-    def optional_bool($name): (has($name) | not) or (.[$name] | type == "boolean");
     def opt_str: . == null or type == "string";
-    def optional_context:
-      (has("context") | not)
-      or (.context
-        | type == "object"
-          and optional_string("task") and optional_string("reason") and optional_string("report")
-          and ((has("answers") | not)
-            or (.answers | type == "array"
-              and ([.[] | type == "object" and (.at | opt_str) and (.mode | opt_str)
-                    and (.text | type == "string")] | all)))
-          and ((has("notes") | not) or (.notes | type == "array" and all(.[]; type == "string")))
-          and ((has("page") | not)
-            or (.page | type == "object" and (.id | page_id) and (.title | type == "string"))));
-    def optional_links:
-      (has("links") | not)
-      or (.links
-        | type == "array"
-          and length <= 24
-          and ([.[]
-            | type == "object"
-              and ((((keys - ["url", "label"]) | length == 0) and (.url | link_url))
-                or (((keys - ["page", "label"]) | length == 0) and (.page | page_id))
-                or (((keys - ["path", "label"]) | length == 0)
-                  and (.path | type == "string" and test("^/[^[:space:]]+$"))))
-              and optional_string("label")] | all));
-    def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
-    def optional_subject:
-      (has("subject") | not)
-      or (.subject
-        | type == "object"
-          and (keys | sort) == ["artifact", "version"]
-          and (.artifact | slug(128))
-          and (.version | version));
-    def call_item:
+    def count: type == "number" and . >= 0 and (floor == .);
+    def context:
       type == "object"
-      and (.key | slug(128))
-      and (.type == "decision" or .type == "merge" or .type == "credential")
-      and repo_marker
-      and (.title | nonempty_string)
-      and (.options | type == "array")
-      and ((.options | length) > 0 or .allow_freeform == true or .type == "decision")
-      and ([.options[]
-        | type == "object"
-          and (.value | slug(128))
-          and (.label | nonempty_string)
-          and optional_string("hint")] | all)
-      and (optional_string("about"))
-      and (optional_string("question"))
-      and (optional_string("malformed"))
-      and (optional_string("problem"))
-      and (optional_string("decide"))
-      and (optional_string("detail"))
-      and (optional_https_url("pr_url"))
-      and optional_links
-      and optional_subject
-      and (if has("subject") then .type == "decision" else true end)
-      and (optional_string("freeform_hint"))
-      and optional_bool("free_text") and optional_bool("no_link")
-      and optional_bool("options_inferred") and optional_bool("from_status")
-      and optional_context
-      and ((has("close") | not) or (.close == "done" or .close == "release"))
-      and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
-      and ((has("recommend_value") | not)
-        or ((.recommend_value | slug(128))
-          and (.recommend_value as $recommend
-            | ([.options[].value] | index($recommend) != null))))
-      and ([.options[].value] | index("reconcile") == null)
-      and ((has("off_board") | not)
-        or (.off_board
+        and optional_string("task") and optional_string("reason") and optional_string("report")
+        and ((has("answers") | not)
+          or (.answers | type == "array"
+            and ([.[] | type == "object" and (.at | opt_str) and (.mode | opt_str)
+                  and (.text | type == "string")] | all)))
+        and ((has("notes") | not) or (.notes | type == "array" and all(.[]; type == "string")))
+        and ((has("page") | not)
+          or (.page | type == "object" and (.id | page_id) and (.title | type == "string")));
+    def links:
+      type == "array"
+        and length <= 24
+        and ([.[]
           | type == "object"
-            and ((keys - ["question", "about", "freeform_hint", "malformed", "allow_freeform"]) | length == 0)
-            and optional_string("question") and optional_string("about")
-            and optional_string("freeform_hint") and optional_string("malformed")
-            and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))))
-      and (if .type == "merge" then (.risk | nonempty_string) else true end);
-    def underway_item:
-      type == "object" and repo_marker and name_marker and (.id | nonempty_string)
-      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
-    def landed_item:
-      type == "object" and repo_marker and (.id | nonempty_string)
-      and (.what | nonempty_string) and (.owner | nonempty_string)
-      and optional_https_url("pr_url")
-      and optional_subject;
-    def waiting_item:
-      type == "object" and repo_marker and (.key | slug(128))
-      and (.title | nonempty_string) and (.reason | type == "string")
-      and optional_context;
-    def open_mr_item:
+            and ((((keys - ["url", "label"]) | length == 0) and (.url | link_url))
+              or (((keys - ["page", "label"]) | length == 0) and (.page | page_id))
+              or (((keys - ["path", "label"]) | length == 0)
+                and (.path | type == "string" and test("^/[^[:space:]]+$"))))
+            and optional_string("label")] | all);
+    def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
+    def subject:
       type == "object"
-      and ((keys - ["key", "repo", "title", "url", "state"]) | length == 0)
-      and repo_marker and (.key | slug(128))
-      and (.title | nonempty_string) and (.state | nonempty_string)
-      and has("url") and optional_https_url("url");
+        and (keys | sort) == ["artifact", "version"]
+        and (.artifact | slug(128))
+        and (.version | version);
+    def options:
+      type == "array"
+        and ([.[]
+          | type == "object"
+            and (.value | slug(128))
+            and (.label | nonempty_string)
+            and optional_string("hint")] | all);
+    def off_board:
+      type == "object"
+        and ((keys - ["question", "about", "freeform_hint", "malformed", "allow_freeform"]) | length == 0)
+        and optional_string("question") and optional_string("about")
+        and optional_string("freeform_hint") and optional_string("malformed")
+        and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"));
+    # Each rule is one check that yields its failure message, or nothing.
+    def holds(f): [try (if f then true else false end) catch false] | length > 0 and all;
+    def rule(f; $msg): if holds(f) then empty else $msg end;
+    def req($name; f):
+      if has($name) | not then "missing required field \"\($name)\""
+      else rule(.[$name] | f; "invalid field \"\($name)\"") end;
+    def opt($name; f): if has($name) then req($name; f) else empty end;
+    def repo_marker: req("repo"; . == null or type == "string");
+    def call_item:
+      req("key"; slug(128)),
+      req("type"; . == "decision" or . == "merge" or . == "credential"),
+      repo_marker,
+      req("title"; nonempty_string),
+      req("options"; options),
+
+      (("about", "question", "malformed", "problem", "decide", "detail", "freeform_hint") as $f
+        | opt($f; type == "string")),
+      opt("pr_url"; https_url),
+      opt("links"; links),
+      opt("subject"; subject),
+      (select(holds(.type == "merge" or .type == "credential") and has("subject"))
+        | "field \"subject\" on a card that is not a decision"),
+      (("free_text", "no_link", "options_inferred", "from_status", "allow_freeform") as $f
+        | opt($f; type == "boolean")),
+      opt("context"; context),
+      opt("close"; . == "done" or . == "release"),
+      opt("recommend_value"; slug(128)),
+      # Rules across fields speak only once the fields they read are valid,
+      # since the field rule above already refuses the card.
+      (select(holds(.options | options))
+        | rule((.options | length) > 0 or .allow_freeform == true or .type == "decision";
+            "empty options on a card that is not a decision and does not allow free text"),
+          rule((has("recommend_value") | not)
+            or (.recommend_value as $recommend | [.options[].value] | index($recommend) != null);
+            "field \"recommend_value\" names no option"),
+          rule([.options[].value] | index("reconcile") == null;
+            "option value \"reconcile\" is reserved")),
+      opt("off_board"; off_board),
+      (if .type == "merge" then req("risk"; nonempty_string) else empty end);
+    def underway_item:
+      repo_marker, req("name"; nonempty_string),
+      (("id", "state", "doing", "kind") as $f | req($f; nonempty_string));
+    def landed_item:
+      repo_marker,
+      (("id", "what", "owner") as $f | req($f; nonempty_string)),
+      opt("pr_url"; https_url),
+      opt("subject"; subject);
+    def waiting_item:
+      repo_marker, req("key"; slug(128)),
+      req("title"; nonempty_string), req("reason"; type == "string"),
+      opt("context"; context);
+    def open_mr_item:
+      ((keys - ["key", "repo", "title", "url", "state"])[] | "unexpected field \"\(.)\""),
+      repo_marker, req("key"; slug(128)),
+      req("title"; nonempty_string), req("state"; nonempty_string),
+      req("url"; https_url);
     def charted_item:
-      type == "object" and repo_marker and (.id | slug(128))
-      and (.title | nonempty_string) and (.reason | type == "string")
-      and (.dispatchable | type == "boolean")
-      and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
-      and optional_filed
-      and optional_context
-      and (if .kind == "warning" then .dispatchable == false else true end);
-    type == "object"
-    and (.schema == $schema)
-    and (.home | nonempty_string)
-    and (.generated | nonempty_string)
-    and (.prs_live | type == "boolean")
-    and (.captains_call | type == "array")
-    and (.underway | type == "array")
-    and (.landed | type == "array")
-    and (.charted | type == "array")
-    and ((has("charted_more") | not)
-      or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
-    and ((has("charted_warning_more") | not)
-      or ((.charted_warning_more | type == "number") and (.charted_warning_more >= 0) and (.charted_warning_more | floor == .)))
-    and ([.captains_call[] | call_item] | all)
-    and ([.underway[] | underway_item] | all)
-    and ((has("waiting") | not) or ((.waiting | type == "array") and ([.waiting[] | waiting_item] | all)))
-    and ((has("open_mrs") | not) or ((.open_mrs | type == "array") and ([.open_mrs[] | open_mr_item] | all)))
-    and ([.landed[] | landed_item] | all)
-    and ([.charted[] | charted_item] | all)
-    and (has("pages") | not)
-  ' "$1" >/dev/null
+      repo_marker, req("id"; slug(128)),
+      req("title"; nonempty_string), req("reason"; type == "string"),
+      req("dispatchable"; type == "boolean"),
+      opt("kind"; . == "queued" or . == "warning"),
+      opt("filed"; . == null or valid_filed),
+      opt("context"; context),
+      rule(if .kind == "warning" then .dispatchable == false else true end;
+        "a warning row with \"dispatchable\" not false");
+    def name_of:
+      if type == "object" and (.key | type) == "string" then " (key \"\(.key)\")"
+      elif type == "object" and (.id | type) == "string" then " (id \"\(.id)\")"
+      else "" end;
+    def section($name; item):
+      if (.[$name] | type) == "array" then
+        .[$name] | to_entries[] | .key as $index | .value
+        | [if type == "object" then item else "not an object" end] as $failed
+        | select($failed | length > 0)
+        | "\($name)[\($index)]\(name_of): \($failed | join("; "))"
+      else empty end;
+    if type != "object" then "the payload is not a JSON object"
+    else
+      ([req("schema"; . == $schema),
+        req("home"; nonempty_string),
+        req("generated"; nonempty_string),
+        req("prs_live"; type == "boolean"),
+        (("captains_call", "underway", "landed", "charted") as $f | req($f; type == "array")),
+        (("waiting", "open_mrs") as $f | opt($f; type == "array")),
+        (("charted_more", "charted_warning_more") as $f | opt($f; count)),
+        rule(has("pages") | not; "field \"pages\", which only build may write")]
+        | select(length > 0) | "payload: \(join("; "))"),
+      section("captains_call"; call_item),
+      section("underway"; underway_item),
+      section("waiting"; waiting_item),
+      section("open_mrs"; open_mr_item),
+      section("landed"; landed_item),
+      section("charted"; charted_item)
+    end
+  ' "$1"
 }
 
 # Print one `<key>: <missing fields>` line per Captain's Call card that does
@@ -777,14 +788,23 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data board board_data board_app board_stamp json tmp extracted effective pages code stamp stage undecided reopen=1
+  local data board board_data board_app board_stamp json tmp extracted effective pages code stamp stage undecided errors more reopen=1
   if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   data=$1
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
   jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"
-  validate_payload "$data" || fail "board data does not satisfy $BOARD_SCHEMA: $data"
+  errors=$(payload_errors "$data") || fail "board data does not satisfy $BOARD_SCHEMA: $data"
+  if [ -n "$errors" ]; then
+    more=$(printf '%s\n' "$errors" | sed 1d | wc -l | tr -d ' ')
+    case $more in
+      0) more= ;;
+      1) more=" (and 1 more failing item)" ;;
+      *) more=" (and $more more failing items)" ;;
+    esac
+    fail "board data does not satisfy $BOARD_SCHEMA: $data: $(printf '%s\n' "$errors" | head -n 1)$more"
+  fi
   [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "board template is missing: $TEMPLATE"
   [ "$(grep -cxF "$DATA_SCRIPT" "$TEMPLATE")" -eq 1 ] \
     || fail "board template does not load the board data file exactly once: $TEMPLATE"
