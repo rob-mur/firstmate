@@ -924,6 +924,31 @@ test_a_captain_call_change_tells_board_keeper_once() {
   pass "a rebuild tells board-keeper once when the Captain's Call changes and never when it does not"
 }
 
+# The real case: main held mr870-ali-fixes and aegis-app-4132 with their choices
+# only in the reason text, so build moved both cards into cards to fix; the
+# notice named them as joined although the captain could not answer them.
+test_a_card_held_back_into_cards_to_fix_never_joins() {
+  local home msg
+  home=$(make_notify_home calls-to-fix 1)
+  jq -n '{captains_call_extra: (
+      [{key: "call-a", type: "merge", repo: "widgets", title: "Merge call-a", risk: "low",
+        pr_url: "https://github.com/acme/widgets/pull/7", options: [{value: "merge", label: "Merge"}]}]
+      + [ ("mr870-ali-fixes", "aegis-app-4132") as $k
+          | {key: $k, type: "decision", repo: null, title: ("Decide " + $k),
+             question: "May I discard the old local copy (a) or keep it (b)?",
+             options: [{value: "a", label: "Discard"}, {value: "b", label: "Keep"}],
+             options_inferred: true, no_link: true} ])}' > "$home/calls.json"
+  notify_refresh "$home" || fail "the rebuild failed: $(tail -3 "$home/state/.board-refresh.log")"
+  grep -q $'\tmr870-ali-fixes\t' "$home/state/board-cards-to-fix" \
+    || fail "the setup did not hold mr870-ali-fixes back into cards to fix"
+  grep -q $'\taegis-app-4132\t' "$home/state/board-cards-to-fix" \
+    || fail "the setup did not hold aegis-app-4132 back into cards to fix"
+  assert_equals "1" "$(sends "$home")" "the rebuild did not send exactly one message"
+  msg=$(last_send "$home")
+  grep -qx 'Joined: call-a' <<<"$msg" || fail "the notice counts cards held back into cards to fix: $msg"
+  pass "a card held back into cards to fix never joins Captain's Call in the notice"
+}
+
 test_no_call_change_message_without_a_board_keeper_route() {
   local home
   home=$(make_notify_home calls-none 0)
@@ -978,5 +1003,6 @@ fm_test_run \
   test_no_notice_without_a_board_keeper_route \
   test_a_failing_send_never_changes_the_build_result \
   test_a_captain_call_change_tells_board_keeper_once \
+  test_a_card_held_back_into_cards_to_fix_never_joins \
   test_no_call_change_message_without_a_board_keeper_route \
   test_a_failing_call_change_send_never_fails_the_rebuild
