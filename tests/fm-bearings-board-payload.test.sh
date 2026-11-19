@@ -1792,6 +1792,75 @@ test_a_report_path_in_the_text_is_the_card_report() {
   pass "a report path in the text is the card report"
 }
 
+# The real status lines of the continuous-delivery and BCR cards below.
+CD942_LINE="needs-decision [key=captain-hold-cd-942-identity-scope-1] [at=1795100000]: captain hold cd-942-identity-scope: Should service accounts, keys, Workload Identity and IAM grants stay a human apply, with all other infra applied by each repo's own pipeline? Per issue 942 (https://forgejo.clarob.uk/rob/continuous-delivery/issues/942), each repo gets a deployer bound to its own main branch, its own state prefix, and grants limited to its own resources; those limits hold only if the deployer cannot change IAM, since a deployer that can grant roles can grant itself anything. (a, recommended) yes: identity stays a rare human apply, everything else goes through CI. (b) no: each pipeline also applies its own identity with conditioned IAM admin; simpler, but a merged change can widen that repo's power. https://forgejo.clarob.uk/rob/continuous-delivery/issues/942#issuecomment-34957"
+CD932_LINE="needs-decision [key=captain-hold-cd-932-forge-arm-lab-1] [at=1795100000]: captain hold cd-932-forge-arm-lab: Merge PRs 938 and 939 now that the ForgeArm lab passed locally (16 of 16 shapes, 128 s) and in CI on both runner sizes? PR 938 (https://forgejo.clarob.uk/rob/continuous-delivery/pulls/938) adds the local Forgejo to the dev shell; PR 939 (https://forgejo.clarob.uk/rob/continuous-delivery/pulls/939) adds the lab for issue 932 and rebases onto 938 before merge. (a, recommended) merge both, 938 first. (b) hold them. Local run evidence: https://forgejo.clarob.uk/rob/continuous-delivery/issues/932#issuecomment-34954"
+BCR_WRITES_LINE="needs-decision [key=grill-bcr-writes] [at=1795100000]: When should the BCR import's Confirm start writing data in dev and staging (prod stays read only)? (a, recommended) Right after the payments ticket, because before it a notice's reserve ignores the file's payments and would be booked too high. (b) Right after the first real file check, booking notices only. (c) Last, after every kind of line is built. https://youtrack.prd.descartesunderwriting.fr/issue/APP-5861"
+BCR_MONEY_LINE="needs-decision [key=grill-bcr-money] [at=1795100000]: The BCR file gives amounts in our share but Aegis books 100% amounts, so how should a file amount become a booking? (a, recommended) Compare in our share, book the amount divided by our share, and show both in the preview; our share in Aegis can then be one cent off the file. (b) Ask the claims team first, which holds up the first real file check. https://youtrack.prd.descartesunderwriting.fr/issue/APP-5837"
+BCR_RETEST_LINE="needs-decision [key=grill-bcr-retest] [at=1795100000]: Once a BCR month is confirmed in staging it is locked, so how do testers try the same month again? (a, recommended) They do not; they test a new month or use a fresh preview environment, with nothing to build. (b) Add a \"Forget this import\" action in dev and staging, about half a day, but a second Confirm would then book the same amounts twice. (c) Build undo before testing starts. https://youtrack.prd.descartesunderwriting.fr/issue/APP-5871"
+
+# A decision that links only Forgejo issues and pulls/<n> still names its repo.
+test_a_forgejo_card_takes_its_repo_from_its_links() {
+  local card
+  card=$(real_line_card repo-942 cd "$CD942_LINE")
+  assert_equals "continuous-delivery" "$(jq -r .repo <<<"$card")" "942: repo from its Forgejo issue link"
+  card=$(real_line_card repo-932 cd "$CD932_LINE")
+  assert_equals "continuous-delivery" "$(jq -r .repo <<<"$card")" "932: repo from its Forgejo pulls link"
+  pass "a forgejo card takes its repo from its links"
+}
+
+# "issue 942 (<url>)" and "PR 938 (<url>)" already name the link, so the about
+# shows no "(Issue 942)" or "(PR 938)" after them.
+test_a_link_the_text_already_names_shows_no_label_in_parentheses() {
+  local card
+  card=$(real_line_card named-942 cd "$CD942_LINE")
+  jq -e '.about | contains("Per issue 942, each repo gets a deployer") and (contains("(Issue 942)") | not)' <<<"$card" >/dev/null \
+    || fail "942: the about doubles the issue label: $(jq -r .about <<<"$card")"
+  card=$(real_line_card named-932 cd "$CD932_LINE")
+  jq -e '.about | contains("PR 938 adds the local Forgejo") and contains("PR 939 adds the lab")
+         and (test("[(](PR|Issue) [0-9]+[)]") | not)' <<<"$card" >/dev/null \
+    || fail "932: the about doubles a PR label: $(jq -r .about <<<"$card")"
+  pass "a link the text already names shows no label in parentheses"
+}
+
+# A link to a comment reads as a comment on its issue, never as the bare issue.
+test_a_comment_link_reads_as_a_comment() {
+  local card
+  card=$(real_line_card comment-942 cd "$CD942_LINE")
+  assert_equals "Issue 942|Comment on issue 942" "$(jq -r '[.links[].label] | join("|")' <<<"$card")" "942: link labels"
+  card=$(real_line_card comment-932 cd "$CD932_LINE")
+  jq -e '.about | endswith("Local run evidence: Comment on issue 932")' <<<"$card" >/dev/null \
+    || fail "932: the comment link reads as the bare issue: $(jq -r .about <<<"$card")"
+  assert_equals "Comment on issue 932" "$(jq -r '.links[] | select(.url | endswith("#issuecomment-34954")) | .label' <<<"$card")" "932: comment link label"
+  pass "a comment link reads as a comment"
+}
+
+# An asking sentence too long for the heading is cut at a clause boundary,
+# never mid-clause; the about keeps the sentence whole.
+test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary() {
+  local card
+  card=$(real_line_card cut-942 cd "$CD942_LINE")
+  assert_equals "Should service accounts, keys, Workload Identity and IAM grants stay a human apply?" "$(jq -r .question <<<"$card")" "942: question"
+  jq -e '.about | contains("with all other infra applied by each repo'"'"'s own pipeline?")' <<<"$card" >/dev/null \
+    || fail "942: the about lost the clause the heading cut: $(jq -r .about <<<"$card")"
+  pass "a too long asking sentence is cut at a clause boundary"
+}
+
+# A reason whose only text past its question and options is a YouTrack link
+# keeps that link, labelled by its issue id, as its about.
+test_a_reason_ending_on_a_youtrack_link_keeps_its_about() {
+  local card name line id
+  for name in writes:APP-5861 money:APP-5837 retest:APP-5871; do
+    id=${name#*:} name=${name%%:*}
+    case $name in writes) line=$BCR_WRITES_LINE ;; money) line=$BCR_MONEY_LINE ;; retest) line=$BCR_RETEST_LINE ;; esac
+    card=$(real_line_card "bcr-$name" bcr-dec10-grill "$line")
+    assert_equals "Issue $id" "$(jq -r '.about // ""' <<<"$card")" "bcr $name: about"
+    assert_equals "Issue $id" "$(jq -r '.links[0].label' <<<"$card")" "bcr $name: link label"
+    jq -e '.question | endswith("?")' <<<"$card" >/dev/null || fail "bcr $name: the card lost its question: $card"
+  done
+  pass "a reason ending on a youtrack link keeps its about"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -1934,8 +2003,13 @@ fm_test_run \
   test_a_link_label_right_before_a_question_mark_keeps_no_space \
   test_a_link_label_never_doubles_its_kind_word \
   test_a_long_asking_sentence_is_headed_by_the_clause_that_asks \
-  test_an_a_recommended_colon_option_is_the_recommendation
-  test_the_last_option_ends_at_its_own_words
-  test_both_recommended_marks_reach_the_card
-  test_a_parenthesis_before_the_question_mark_is_never_cut
-  test_a_report_path_in_the_text_is_the_card_report
+  test_an_a_recommended_colon_option_is_the_recommendation \
+  test_the_last_option_ends_at_its_own_words \
+  test_both_recommended_marks_reach_the_card \
+  test_a_parenthesis_before_the_question_mark_is_never_cut \
+  test_a_report_path_in_the_text_is_the_card_report \
+  test_a_forgejo_card_takes_its_repo_from_its_links \
+  test_a_link_the_text_already_names_shows_no_label_in_parentheses \
+  test_a_comment_link_reads_as_a_comment \
+  test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary \
+  test_a_reason_ending_on_a_youtrack_link_keeps_its_about
