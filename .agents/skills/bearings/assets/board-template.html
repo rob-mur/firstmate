@@ -204,6 +204,8 @@ a { color: inherit; text-decoration: none; }
 .bb-decision__link:hover { text-decoration: underline; }
 button.bb-decision__link { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
 .bb-decision__link--note { color: var(--text-faint); font-weight: 400; }
+.bb-decision__link--path { color: var(--text-muted); font-weight: 400; user-select: all; }
+.bb-decision__link--path:hover { text-decoration: none; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
    the card pad, and the foot rides margin-top:auto so every Queue answer button
    sits on the same baseline with identical breathing room. */
@@ -717,7 +719,8 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
      a board page opens that page in place (PAGES SHOWN IN PLACE below); the
      build already turned every Lavish page link into one, or into a note that
      the page is not in the board yet, so only an https link leaves the board
-     and a Lavish url never renders. */
+     and a Lavish url never renders. A file path the card cites shows as
+     text, its label then the path, since the board cannot open it. */
   function cardLinks(item) {
     var out = [], seen = {};
     function add(l) {
@@ -729,6 +732,10 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
         out.push({ page: l.page, label: label || "Page" });
       } else if (l.not_in_board === true) {
         out.push({ note: (label || "Lavish page") + " - not in the board yet" });
+      } else if (typeof l.path === "string" && /^\//.test(l.path)) {
+        if (seen["path:" + l.path]) return;
+        seen["path:" + l.path] = true;
+        out.push({ note: label ? label + " - " + l.path : l.path, path: true });
       } else if (typeof l.url === "string" && !seen[l.url] && /^https:\/\//.test(l.url)) {
         seen[l.url] = true;
         out.push({ url: l.url, label: label });
@@ -742,7 +749,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   function appendLinks(pad, item) {
     cardLinks(item).forEach(function (l) {
       if (l.note) {
-        pad.appendChild(el("span", "bb-decision__link bb-decision__link--note", l.note));
+        pad.appendChild(el("span", "bb-decision__link bb-decision__link--" + (l.path ? "path" : "note"), l.note));
         return;
       }
       if (l.page) {
