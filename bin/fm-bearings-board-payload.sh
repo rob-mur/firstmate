@@ -186,8 +186,9 @@
 #   charted        {"<id>": {title, reason, repo, dispatchable, filed}}
 # An unknown map or field is refused, so the payload shape cannot drift through
 # the overlay. An entry whose key matches no row is reported on stderr and ignored.
-# A card's `links` is an array of up to 8 `{url, label}` pointers (https, or http on
-# the tailnet Lavish origin the board contract names); `bin/fm-bearings-board.sh`
+# A card's `links` is an array of up to 24 `{url, label}` pointers (https, or http on
+# the tailnet Lavish origin the board contract names), `{page, label}` board pages,
+# or `{path, label}` absolute file paths; `bin/fm-bearings-board.sh`
 # owns that rule and refuses a card whose link breaks it, so a link-only item such
 # as a Lavish page needs nothing but a card under captains_call_extra.
 # `dispatchable` is ignored on a warning row, and `reconcile` is never accepted as
@@ -361,6 +362,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       capture("^https://[^/]+/.+/(?<r>[^/]+)/-/").r
     else null end;
   def nz($d): if . == null or . == "" or . == "-" then $d else . end;
+  # The identity a card link is deduplicated by: its url, board page or file path.
+  def link_key: .url // (if has("page") then "page:" + .page else "path:" + (.path // "") end);
   # A bare option value in plain words: a known review-gate value reads as its
   # phrase, any other slug as its words.
   def option_words:
@@ -456,8 +459,12 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # ("(PR <url>)" reads "(PR 133)", not "(PR PR 133)"). A link the text already
   # names by kind and number ("issue 942 (<url>)", "PR 938 (<url>)") drops its
   # parenthesis, and a link to a comment reads "Comment on issue 932". A
-  # YouTrack issue link reads by its id ("Issue APP-5837"), so a reason that
-  # ends on that link keeps it in its about.
+  # YouTrack issue link reads by its bare id ("APP-5837").
+  # The run of bare URLs and absolute file paths (each maybe with a "(note)")
+  # that ends a reason after its last sentence is the card links, not its
+  # prose: trailing_cited cuts it from the text, its URLs become links as any
+  # other, and each path becomes a `{path, label}` link labelled by its file
+  # name and note ("youtrack-changes.md (Round 5)"), after the web links.
   | def card_urls:
       scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") | sub("[.,;:!?]+$"; "");
     def link_label($u; $t):
@@ -469,7 +476,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         elif ($u | test("/-/merge_requests/[0-9]+")) then "MR " + ($u | capture("/-/merge_requests/(?<n>[0-9]+)").n)
         elif ($u | test("/pulls?/[0-9]+")) then "PR " + ($u | capture("/pulls?/(?<n>[0-9]+)").n)
         elif ($u | test("/(-/)?issues/[0-9]+")) then "Issue " + ($u | capture("/issues/(?<n>[0-9]+)").n)
-        elif ($u | test("/issue/[A-Z][A-Z0-9]*-[0-9]+(?:[/?#]|$)")) then "Issue " + ($u | capture("/issue/(?<n>[A-Z][A-Z0-9]*-[0-9]+)").n)
+        elif ($u | test("/issue/[A-Z][A-Z0-9]*-[0-9]+(?:[/?#]|$)")) then ($u | capture("/issue/(?<n>[A-Z][A-Z0-9]*-[0-9]+)").n)
         elif ($u | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387")) then
           (if ($pre | test("understand")) then "Understand page"
            elif ($pre | test("review")) then "Review page"
@@ -493,6 +500,17 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                    elif $all then $l else $u end) as $shown
                   | . + $shown + $part end));
     def labelled_urls: label_urls(true);
+    def cited_item: "(?<url>https?://[^[:space:]<>\"()]+)|(?<path>/[\\w.@~+-]+(?:/[\\w.@~+-]+)+)(?:[[:space:]]+\\((?<note>[^()]*)\\))?";
+    def trailing_cited_at:
+      [ match("(?<=[.?!])(?:[[:space:]]+(?:" + cited_item + "))+[[:space:]]*$") ][0].offset;
+    def trailing_cited: trailing_cited_at as $o | if $o == null then . else .[:$o] end;
+    def cited_paths:
+      trailing_cited_at as $o
+      | if $o == null then []
+        else [ .[$o:] | match(cited_item; "g") | (.captures | map({(.name): .string}) | add)
+               | select(.path != null)
+               | {path, label: ((.path | split("/") | last) + (if (.note // "") != "" then " (" + .note + ")" else "" end))} ]
+        end;
   # A status decision row (source "status") carries the asking task or home as its
   # title; the card title says what the question is instead.
   # A sentence cut short keeps its closing "?", so a long asking sentence still
@@ -704,7 +722,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
             # link label, and a heading that only repeats the title is dropped so
             # the title leads instead.
             + ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
-                | map(nz(null) | select(. != null) | clean_reason | nz(null) | select(. != null) | labelled_urls)
+                | map(nz(null) | select(. != null) | clean_reason | trailing_cited | nz(null) | select(. != null) | labelled_urls)
                 | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end) as $texts
                 | (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key) | tostring) as $title
                 | (($texts | max_by(length)) // null) as $long
@@ -742,7 +760,11 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                     | $t | card_urls | {url: ., label: link_label(.; $t)} ),
                   ( ([($d.reason_full // $d.reason // ""), (($d.twins // [])[] | (.reason_full // .reason // ""))] | map(tostring) | join(" ")) as $t
                     | $t | card_urls | {url: ., label: link_label(.; $t)} ) ]
-                | reduce .[] as $l ([]; if any(.[]; .url == $l.url) then . else . + [$l] end) | .[:8]
+                | reduce .[] as $l ([]; if any(.[]; .url == $l.url) then . else . + [$l] end)
+                | . + ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
+                        | map(nz(null) | select(. != null) | clean_reason | cited_paths[])
+                        | reduce .[] as $l ([]; if any(.[]; .path == $l.path) then . else . + [$l] end) )
+                | .[:24]
                 | reduce .[] as $l ([];
                     ([.[] | select(.label == $l.label or (.label | startswith($l.label + " (")))] | length) as $n
                     | . + [if $n > 0 then $l + {label: ($l.label + " (" + (($n + 1) | tostring) + ")")} else $l end])
@@ -769,9 +791,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                   then {page: $l.target[5:], label: (($l.label // "") | nz("Board page"))}
                   else {url: $l.target, label: (($l.label // "") | nz(link_label($l.target; $l.target)))} end ]
               + (.links // [])
-              | reduce .[] as $l ([]; ($l.url // ("page:" + $l.page)) as $k
-                                      | if any(.[]; (.url // ("page:" + .page)) == $k) then . else . + [$l] end)
-              | .[:8] ) as $ls
+              | reduce .[] as $l ([]; ($l | link_key) as $k
+                                      | if any(.[]; link_key == $k) then . else . + [$l] end)
+              | .[:24] ) as $ls
           | if ($ls | length) > 0 then .links = $ls else . end
           # A recorded option with no label of its own (the snapshot gives it
           # its value) is shown in words: when every recorded option is bare
