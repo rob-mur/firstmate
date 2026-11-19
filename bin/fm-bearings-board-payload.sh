@@ -624,8 +624,18 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                 | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end) as $texts
                 | (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key) | tostring) as $title
                 | (($texts | max_by(length)) // null) as $long
+                # A question whose "?" closes its inline option run ("how should X do
+                # Y: (a) ... (b) ...?") keeps that "?" on the heading cut from its lead.
+                # A lead that ends its own sentence, or options that ask questions of
+                # their own, keep the heading as it is.
+                | (if $long == null then null else ($long | option_parse) end) as $parsed
                 | (if $long == null then null
-                   elif ($long | option_parse) != null then ($long | option_parse | .lead | lead_sentence | short_text_n(120) | nz(null))
+                   elif $parsed != null then ($parsed.lead | lead_sentence | short_text_n(120) | nz(null)
+                     | if . != null
+                          and ($parsed.lead | test("[.?!][[:space:]]*$") | not)
+                          and ([$parsed.options[].label | test("[?]")] | any | not)
+                          and ($long[:(($long | length) - ($parsed.tail | length))] | test("[?][[:space:]]*$"))
+                       then . + "?" else . end)
                    else ($long | ask_sentence | short_text_n(120) | nz(null)) end) as $q0
                 | (if $q0 == null then null else ($q0 | sub(decision_label; ""; "i") | cap) end) as $q
                 | (if ($d.verb // "") == "review-ready" then $texts else [ $texts[] | without_options ] end) as $body
