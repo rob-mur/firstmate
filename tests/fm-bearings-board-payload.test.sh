@@ -1639,6 +1639,44 @@ test_a_link_label_right_before_a_question_mark_keeps_no_space() {
   pass "a link label right before a question mark keeps no space before it"
 }
 
+# The real status lines of these tests, each the reason after its "[at=...]: ".
+DEPLOY_LINE="needs-decision [at=1795094034] [key=deploy-actions-busy]: Forgejo Actions never went idle in the 1 h wait (12:13-13:13Z; new continuous-delivery runs kept starting, 1-5 running and 1-9 waiting each minute; now 1 running ci:acceptance from run 10250 and 1 waiting ci:deploy; the upload queue is 0), so how should I deploy 0237139 (PR https://github.com/rob-mur/immich-config/pull/133)? (a) recommended: deploy at the first minute no job is running, leaving waiting jobs to start after the reboot, and if that does not happen within 30 min deploy anyway; (b) deploy now and accept that the reboot kills the running ci:acceptance job; (c) wait up to 1 more hour for a minute with no running or waiting job."
+PDM_LINE="needs-decision [key=captain-hold-pdm-registry-ns-1] [at=1795093479]: captain hold pdm-registry-ns: Will you read and dismiss the acknowledgement review on https://forgejo.clarob.uk/rob/proton-drive-mount/pulls/135 ? It changes only devenv.nix: build records move to the shared registry prefix with namespace proton-drive-mount, as continuous-delivery #810 requires. CI is green and published to the shared registry. Once you dismiss it, I merge."
+
+# real_line_card <name> <task> <line>: the card the payload makes from one real
+# status line of <task>, after the payload validated.
+real_line_card() {
+  local name=$1 task=$2 line=$3 key reason p
+  key=$(sed -n 's/.*\[key=\([^]]*\)\].*/\1/p' <<<"$line")
+  reason=${line#*]: }
+  fresh_homes "$name"
+  write_snapshot "$TMP_ROOT/$name-base.json"
+  jq --arg r "$reason" --arg t "$task" --arg k "$key" '.decisions_open = [
+        {id: $t, key: ("status." + $t + "." + $k), verb: "needs-decision", source: "status",
+         task: $t, decision_key: $k, owner: $t, reason: $r}]' \
+    "$TMP_ROOT/$name-base.json" > "$TMP_ROOT/$name.json"
+  p=$(FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$TMP_ROOT/$name.json") || fail "the generator failed on $name"
+  printf '%s\n' "$p" > "$TMP_ROOT/$name-payload.json"
+  validates "$TMP_ROOT/$name-payload.json" || fail "the $name payload did not satisfy the board validator"
+  jq -c '.captains_call[0]' <<<"$p"
+}
+
+# A link written after its own kind word ("PR <url>") shows that word once.
+test_a_link_label_never_doubles_its_kind_word() {
+  local card
+  card=$(real_line_card label-deploy immich-runner-dns-bump "$DEPLOY_LINE")
+  jq -e '[.title, .question, .about] | map(. // "") | any(contains("PR PR")) | not' <<<"$card" >/dev/null \
+    || fail "a kind word before a link was doubled: $card"
+  jq -e '.about | contains("deploy 0237139 (PR 133)?")' <<<"$card" >/dev/null \
+    || fail "the about does not name the link as (PR 133)?: $card"
+  card=$(real_line_card label-pdm pdm "$PDM_LINE")
+  jq -e '[.title, .question, .about] | map(. // "") | any(test(" on [?]")) | not' <<<"$card" >/dev/null \
+    || fail "the card dropped the link before its question mark: $card"
+  assert_equals "Will you read and dismiss the acknowledgement review on PR 135?" "$(jq -r .question <<<"$card")" \
+    "the question keeps the link label before its question mark"
+  pass "a link label never doubles its kind word"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -1778,4 +1816,5 @@ fm_test_run \
   test_a_numbered_recommended_option_line_gets_buttons \
   test_an_abbreviation_never_ends_the_card_question \
   test_a_sentence_addressed_to_firstmate_never_reaches_the_card \
-  test_a_link_label_right_before_a_question_mark_keeps_no_space
+  test_a_link_label_right_before_a_question_mark_keeps_no_space \
+  test_a_link_label_never_doubles_its_kind_word

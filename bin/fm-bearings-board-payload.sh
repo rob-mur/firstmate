@@ -441,12 +441,46 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | ($id | round_of) as $r
       | $id != "" and any($known[]; .o == $o and .r.b == $r.b and .r.n > $r.n);
     ( [ $held[] | select(((is_merge_ask(.) and pr_finished(row_urls(.); is_review(.))) or superseded(.)) | not) ] ) as $held
+  # A card link is labelled by what it points at, never by its raw URL: a
+  # PR/MR/issue number from the URL shape, or for a Lavish page the kind the
+  # text just before the URL names (understand, review, report). Question and
+  # about text show that label in place of each URL, with a "?" written after
+  # the URL and a space ("on <url> ?") put against the label ("on PR 135?"),
+  # and a kind word the text already writes before the URL shown once
+  # ("(PR <url>)" reads "(PR 133)", not "(PR PR 133)").
+  | def card_urls:
+      scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") | sub("[.,;:!?]+$"; "");
+    def link_label($u; $t):
+      ((($t | split($u)[0]) // "") | .[-80:] | sub("^.*([.;!?,]|\\([0-9]+\\))[[:space:]]"; "") | ascii_downcase) as $pre
+      | if ($u | test("/-/merge_requests/[0-9]+")) then "MR " + ($u | capture("/-/merge_requests/(?<n>[0-9]+)").n)
+        elif ($u | test("/pulls?/[0-9]+")) then "PR " + ($u | capture("/pulls?/(?<n>[0-9]+)").n)
+        elif ($u | test("/(-/)?issues/[0-9]+")) then "Issue " + ($u | capture("/issues/(?<n>[0-9]+)").n)
+        elif ($u | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387")) then
+          (if ($pre | test("understand")) then "Understand page"
+           elif ($pre | test("review")) then "Review page"
+           elif ($pre | test("report")) then "Report"
+           else "Lavish page" end)
+        else ($u | sub("^https://"; "") | split("/")[0]) end;
+    # label_urls(false) labels only a link its kind word already leads, and
+    # keeps every other URL as written.
+    def label_urls($all):
+      . as $t | reduce ([$t | card_urls] | unique | sort_by(-length))[] as $u
+        ($t; link_label($u; $t) as $l
+          | ($l | capture("^(?<k>PR|MR|Issue) (?<n>[0-9]+)$") // null) as $c
+          | (if $all then split($u + " ?") | join($u + "?") else . end | split($u)) as $parts
+          | reduce $parts[1:][] as $part ($parts[0];
+              (if $c != null and test("(?:^|[^[:alnum:]])" + $c.k + " $"; "i") then $c.n
+               elif $all then $l else $u end) as $shown
+              | . + $shown + $part));
+    def labelled_urls: label_urls(true);
   # A status decision row (source "status") carries the asking task or home as its
   # title; the card title says what the question is instead.
   # A sentence cut short keeps its closing "?", so a long asking sentence still
   # reads as a question and the decision check in build still sees it ask.
-  | def short_text_n($n):
-      tostring | gsub("[[:space:]]+"; " ") | sub("^ "; "")
+  # It drops each URL with the word before it, except a link its own kind word
+  # leads, which shows as its number ("deploy X (PR 133)?").
+    def short_text_n($n):
+      tostring | label_urls(false) | gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | (sentences[0] // .)
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?](?: (?=[?]))?"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
@@ -548,35 +582,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                      | if ($d.note // null) == null then . else $d.note + " - " + . end),
             repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null),
             context: context_of($d) } ] ) as $waiting
-  # A card link is labelled by what it points at, never by its raw URL: a
-  # PR/MR/issue number from the URL shape, or for a Lavish page the kind the
-  # text just before the URL names (understand, review, report). Question and
-  # about text show that label in place of each URL, with a "?" written after
-  # the URL and a space ("on <url> ?") put against the label ("on PR 135?").
-  | def card_urls:
-      scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") | sub("[.,;:!?]+$"; "");
-    def link_label($u; $t):
-      ((($t | split($u)[0]) // "") | .[-80:] | sub("^.*([.;!?,]|\\([0-9]+\\))[[:space:]]"; "") | ascii_downcase) as $pre
-      | if ($u | test("/-/merge_requests/[0-9]+")) then "MR " + ($u | capture("/-/merge_requests/(?<n>[0-9]+)").n)
-        elif ($u | test("/pulls?/[0-9]+")) then "PR " + ($u | capture("/pulls?/(?<n>[0-9]+)").n)
-        elif ($u | test("/(-/)?issues/[0-9]+")) then "Issue " + ($u | capture("/issues/(?<n>[0-9]+)").n)
-        elif ($u | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387")) then
-          (if ($pre | test("understand")) then "Understand page"
-           elif ($pre | test("review")) then "Review page"
-           elif ($pre | test("report")) then "Report"
-           else "Lavish page" end)
-        else ($u | sub("^https://"; "") | split("/")[0]) end;
-    def labelled_urls:
-      . as $t | reduce ([$t | card_urls] | unique | sort_by(-length))[] as $u
-        ($t; split($u + " ?") | join($u + "?") | split($u) | join(link_label($u; $t)));
-    # The heading of a text that lists its own options comes from the text
+  # The heading of a text that lists its own options comes from the text
     # before the options: the sentence that introduces them when it ends in a
     # colon ("Merge PR 13: (1) ..."), else its asking sentence, without a
     # trailing colon or dash. Words that only introduce the options
     # ("... reviewer? Options: (1) ...") are not that sentence.
     # A last sentence led by a decision label ("Captain call: the re-run must
     # either") is the heading; the card question drops that label.
-    def decision_label: "^(?:Captain(?:\u0027s)? (?:call|decision)|Decision(?: needed)?)[[:space:]]*:[[:space:]]*";
+  | def decision_label: "^(?:Captain(?:\u0027s)? (?:call|decision)|Decision(?: needed)?)[[:space:]]*:[[:space:]]*";
     def lead_sentence:
       gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | sub("(?:^|(?<=[.!?]) )(?:the )?(?:options|choices|alternatives)(?: (?:are|would be))?[[:space:]]*:[[:space:]]*$"; ""; "i")
