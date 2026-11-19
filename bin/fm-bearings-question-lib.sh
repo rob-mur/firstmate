@@ -65,7 +65,8 @@
 # "A) ... B) ..." (either case) and "A = ...; B = ..." (capitals only), and a
 # slash list after "Options:", "Choices:" or "Decision:" ("Options: x / y /
 # z."). A parenthesised mark may carry its own recommendation ("(a,
-# recommended) ...", "(2; rec) ..."), and an "A = " mark may follow one
+# recommended) ...", "(2; rec) ..."), or be followed by one ("(a) recommended:
+# ..."), and an "A = " mark may follow one
 # ("rec A = ...", "recommended B = ..."): that option's value is then the
 # parse's `recommend`. Markers must run 1, 2, 3 or a, b, c
 # from the first, at least two; the last option ends at its sentence end; a
@@ -126,7 +127,11 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
     | gsub("(?<![^[:space:]])corr=[0-9a-f]+(?:[[:space:]]+|$)"; "")
     | sub("^[[:space:]]+"; "")
     | sub("^captain hold [^:]+: "; "")
-    | ([ sentences[] | select(test("^Firstmate[:,]")) ]) as $to_firstmate
+    # A note to firstmate written straight after a link or path, with no
+    # sentence end between ("... /887 Firstmate: please ..."), is dropped too.
+    | ([ sentences[] | select(test("^Firstmate[:,]")) ]
+       + [ sentences[] | select(test("^Firstmate[:,]") | not)
+           | match("(?:https?://|/)[^[:space:]]+[[:space:]]+(?<f>Firstmate[:,].*)$") | .captures[0].string ]) as $to_firstmate
     | if ($to_firstmate | length) == 0 or ($to_firstmate | length) == (sentences | length) then .
       else reduce $to_firstmate[] as $x (.; split($x) | join("\u0001"))
            | gsub("[ \t]*\u0001[ \t]*"; " ") | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "") end;
@@ -150,14 +155,22 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
     else . end;
   def option_parse_by($kind):
     . as $q
-    | def cut_last: ([match("[.!?](?=[[:space:]]+[A-Z])").offset][0]) as $o | if $o == null then . else .[:($o + 1)] end;
+    # The last option ends at its sentence end (before a capital, a link or a
+    # path), else before a bare link no "at", "on", "in", "see" or "via" leads.
+    | def cut_last:
+        ([match("[.!?](?=[[:space:]]+(?:[A-Z]|https?://|/))").offset][0]) as $o
+        | if $o != null then .[:($o + 1)]
+          else ([match("(?<w>[^[:space:]]*)(?<s>[[:space:]]+)https?://"; "g")
+              | select(.captures[0].string | test("^(?:at|on|in|see|via)$"; "i") | not)
+              | .offset + (.captures[0].string | length)][0]) as $u
+            | if $u == null then . else .[:$u] end end;
       def run($ms):
         reduce $ms[] as $m ([];
           if (length == 0 and $m.n == 1) or (length > 0 and $m.n == (.[-1].n + 1)) then . + [$m] else . end);
       def marks($re; $kind):
         [ $q | match($re; "g")
           | (.captures | map({(.name): .string}) | add) as $c
-          | {offset, length, k: $c.k, rec: ($c.r != null)}
+          | {offset, length, k: $c.k, rec: ($c.r != null or $c.q != null)}
           | . + {n: (if $kind == "number" then (.k | tonumber) else (.k | ascii_downcase | explode[0] - 96) end),
                  value: ("option-" + (if $kind == "number" then .k else (.k | ascii_downcase) end))} ];
       def from_marks($ms):
@@ -168,10 +181,13 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
               | $r[$i] as $m
               | ($m.offset + $m.length) as $s
               | if $i + 1 < ($r | length) then {value: $m.value, text: $q[$s:$r[$i + 1].offset], end: $r[$i + 1].offset}
-                else ($q[$s:] | cut_last) as $t | {value: $m.value, text: $t, end: ($s + ($t | length))} end ] as $o
+                else ($q[$s:] | cut_last) as $t | {value: $m.value, text: $t, end: ($s + ($t | length))} end
+              # "a) post 1, 2, 3 (recommended) b) ..." marks option a as well.
+              | "[[:space:]]*\\((?:recommended|preferred)\\)[[:space:].;,]*$" as $after
+              | . + {rec: ($m.rec or (.text | test($after; "i"))), text: (.text | sub($after; ""; "i"))} ] as $o
             | {lead: $q[:$r[0].offset], tail: $q[($o[-1].end):],
                options: [ $o[] | {value, label: (.text | choice_label | captain_terms | phrase_cap)} ]}
-            + ([ $r[] | select(.rec) | .value ][0] | if . == null then {} else {recommend: .} end)
+            + ([ $o[] | select(.rec) | .value ][0] | if . == null then {} else {recommend: .} end)
             | if all(.options[]; .label | length > 0) then . else null end
           end;
       def from_list:
@@ -186,11 +202,13 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
               else null end
           end;
       "(?<r>(?:,|;|:|[[:space:]]+-)[[:space:]]*(?:recommended|recommendation|rec|preferred)(?![[:alnum:]])[^()]{0,30})?" as $rec
+      # "(a) recommended: ..." marks its option as "(a, recommended)" does.
+      | "(?:[[:space:]]+(?<q>[Rr]ecommended|[Pp]referred)[[:space:]]*:)?" as $rec_after
       | if $kind == "number" then
-        from_marks(marks("\\((?<k>[0-9]{1,2})" + $rec + "\\)"; "number"))
+        from_marks(marks("\\((?<k>[0-9]{1,2})" + $rec + "\\)" + $rec_after; "number"))
         // from_marks(marks("(?<![^[:space:]:;,])(?<k>[0-9]{1,2})\\)"; "number"))
       elif $kind == "letter" then
-        from_marks(marks("(?<![[:alnum:]])\\((?<k>[A-Za-z])" + $rec + "\\)"; "letter"))
+        from_marks(marks("(?<![[:alnum:]])\\((?<k>[A-Za-z])" + $rec + "\\)" + $rec_after; "letter"))
         // from_marks(marks("(?<![^[:space:]:;,])(?<k>[A-Za-z])\\)"; "letter"))
         // from_marks(marks("(?:(?<![[:alnum:]])(?<r>recommended|rec|preferred)[[:space:]]+)?(?<![^[:space:]:;,(])(?<k>[A-Z])[[:space:]]?=[[:space:]]"; "letter"))
       else from_list end;
