@@ -81,7 +81,7 @@
 #                      saying so, and no button for them (recover_options). And any
 #                      https URLs (and the tailnet review-page origin) in the reason lifted into the card `links`.
 #                      A link is labelled by what it points at - `PR <n>`, `MR <n>`,
-#                      `Issue <n>`, or for a Lavish page `Understand page`, `Review page`,
+#                      `Issue <n>` (a YouTrack issue by its id, `Issue APP-5837`), or for a Lavish page `Understand page`, `Review page`,
 #                      or `Report` from the words just before it (else `Lavish page`) -
 #                      and `question`/`about` show that label in place of the URL, a "?"
 #                      written after the URL and a space against the label ("PR 135?");
@@ -363,8 +363,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   def https_url: type == "string" and test("^https://[^[:space:]]+$");
   def repo_of_url:
     if https_url | not then null
-    elif test("^https://[^/]+/[^/]+/[^/]+/(pull|issues)/") then
-      capture("^https://[^/]+/[^/]+/(?<r>[^/]+)/(pull|issues)/").r
+    elif test("^https://[^/]+/[^/]+/[^/]+/(pulls?|issues)/") then
+      capture("^https://[^/]+/[^/]+/(?<r>[^/]+)/(pulls?|issues)/").r
     elif test("^https://[^/]+/.+/[^/]+/-/") then
       capture("^https://[^/]+/.+/(?<r>[^/]+)/-/").r
     else null end;
@@ -461,14 +461,23 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # about text show that label in place of each URL, with a "?" written after
   # the URL and a space ("on <url> ?") put against the label ("on PR 135?"),
   # and a kind word the text already writes before the URL shown once
-  # ("(PR <url>)" reads "(PR 133)", not "(PR PR 133)").
+  # ("(PR <url>)" reads "(PR 133)", not "(PR PR 133)"). A link the text already
+  # names by kind and number ("issue 942 (<url>)", "PR 938 (<url>)") drops its
+  # parenthesis, and a link to a comment reads "Comment on issue 932". A
+  # YouTrack issue link reads by its id ("Issue APP-5837"), so a reason that
+  # ends on that link keeps it in its about.
   | def card_urls:
       scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") | sub("[.,;:!?]+$"; "");
     def link_label($u; $t):
       ((($t | split($u)[0]) // "") | .[-80:] | sub("^.*([.;!?,]|\\([0-9]+\\))[[:space:]]"; "") | ascii_downcase) as $pre
-      | if ($u | test("/-/merge_requests/[0-9]+")) then "MR " + ($u | capture("/-/merge_requests/(?<n>[0-9]+)").n)
+      | ($u | test("#(issuecomment-|note_|discussion_r)[0-9]+$")) as $comment
+      | if $comment and ($u | test("/(-/merge_requests|pulls?|(-/)?issues)/[0-9]+#"))
+        then "Comment on " + (link_label($u | sub("#.*$"; ""); $t)
+                              | if startswith("Issue ") then "issue " + .[6:] else . end)
+        elif ($u | test("/-/merge_requests/[0-9]+")) then "MR " + ($u | capture("/-/merge_requests/(?<n>[0-9]+)").n)
         elif ($u | test("/pulls?/[0-9]+")) then "PR " + ($u | capture("/pulls?/(?<n>[0-9]+)").n)
         elif ($u | test("/(-/)?issues/[0-9]+")) then "Issue " + ($u | capture("/issues/(?<n>[0-9]+)").n)
+        elif ($u | test("/issue/[A-Z][A-Z0-9]*-[0-9]+(?:[/?#]|$)")) then "Issue " + ($u | capture("/issue/(?<n>[A-Z][A-Z0-9]*-[0-9]+)").n)
         elif ($u | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387")) then
           (if ($pre | test("understand")) then "Understand page"
            elif ($pre | test("review")) then "Review page"
@@ -483,9 +492,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
           | ($l | capture("^(?<k>PR|MR|Issue) (?<n>[0-9]+)$") // null) as $c
           | (if $all then split($u + " ?") | join($u + "?") else . end | split($u)) as $parts
           | reduce $parts[1:][] as $part ($parts[0];
-              (if $c != null and test("(?:^|[^[:alnum:]])" + $c.k + " $"; "i") then $c.n
-               elif $all then $l else $u end) as $shown
-              | . + $shown + $part));
+              ({PR: "PR|pull request", MR: "MR|merge request", Issue: "issue"}[$c.k // ""]) as $kw
+              | if $c != null and ($part | startswith(")"))
+                   and test("(?:^|[^[:alnum:]])(?:" + $kw + ") #?" + $c.n + " [(]$"; "i")
+                then sub(" [(]$"; "") + $part[1:]
+                else
+                  (if $c != null and test("(?:^|[^[:alnum:]])" + $c.k + " $"; "i") then $c.n
+                   elif $all then $l else $u end) as $shown
+                  | . + $shown + $part end));
     def labelled_urls: label_urls(true);
   # A status decision row (source "status") carries the asking task or home as its
   # title; the card title says what the question is instead.
@@ -498,7 +512,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # ends in a parenthesis drops that parenthesis whole ("Which comments should
   # go on MR 887 (verdict: ...)?" reads "... on MR 887?"), and a cut never
   # ends inside a parenthesis that closes right before the "?".
-    def short_text_n($n):
+  # Any other too-long heading (short_text_n($n; true)) first drops its inner parenthetical
+  # asides ("Review PR 894 (#697 ...), now that it is complete?" reads
+  # "Review PR 894, now that it is complete?"), else is cut at its last clause boundary
+  # (", with ...", "; ...", " - ...") that keeps at least half of it
+  # ("Should X stay a human apply, with all other infra applied by Y?" reads
+  # "Should X stay a human apply?"); a heading (short_text_n($n; true)) with
+  # no such boundary is shown whole rather than cut mid-clause.
+    def short_text_n($n; $whole):
       tostring | label_urls(false) | gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | (sentences[0] // .)
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?](?: (?=[?]))?"; "")
@@ -512,12 +533,24 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
           (sub("[[:space:]]*\\([^()]*\\)[?]$"; "") + "?") as $a
           | if ($a | length) <= $n then $a else . end
         else . end
-      | if length <= $n then .
+      | if $whole and length > $n and endswith("?")
+           and (gsub("[[:space:]]+\\([^()]*\\)(?=[,;:]? )"; "") | length <= $n) then
+          gsub("[[:space:]]+\\([^()]*\\)(?=[,;:]? )"; "")
+        else . end
+      | if length > $n and endswith("?") then
+          . as $s
+          | ([ match("(?:, (?=(?:with|while|which|since|because|so|but|then|unless|before|after|given|where|when|if|although|though|as|now that) )|; | - )"; "gi").offset
+               | select(. + 1 <= $n and . >= ($n / 2))
+               | select(($s[:.] | [scan("[(]")] | length) == ($s[:.] | [scan("[)]")] | length)) ] | max) as $o
+          | if $o != null then ($s[:$o] | sub("[[:space:],;:-]+$"; "")) + "?" else . end
+        else . end
+      | if length <= $n or ($whole and endswith("?")) then .
         else endswith("?") as $asks | test("[)][?]$") as $paren_asks
           | (.[:(if $asks then $n - 2 else $n - 1 end)] | sub(" [^ ]*$"; "")
              | if $paren_asks and ([scan("[(]")] | length) > ([scan("[)]")] | length)
                then sub("[[:space:]]*[(][^()]*$"; "") else . end)
           + (if $asks then "…?" else "…" end) end;
+    def short_text_n($n): short_text_n($n; false);
     def short_text: short_text_n(80);
     # The sentence that asks: one led by "Question:" (prefix dropped), else the
     # first ending in "?", else the first sentence.
@@ -641,7 +674,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                 | sub("(?:^|(?<=[.!?])[[:space:]]+)(?:the )?(?:options|choices|alternatives)(?: (?:are|would be))?$"; ""; "i")
                 | if length > 0 and (test("[.?!]$") | not) then . + "." else . end),
                ($p.tail | sub("^[[:space:]]+"; "")
-                | if test("^((PR|MR|Issue) [0-9]+|[A-Z][a-z]+ page|Report)[.]?$") then "" else . end) ]
+                | if test("^((Comment on (PR|MR|issue) [0-9]+)|(PR|MR|Issue) [0-9]+|[A-Z][a-z]+ page|Report)[.]?$") then "" else . end) ]
              | map(select(length > 0)) | join(" ") end;
     # A decision answered on a Lavish page: its text holds a tailnet page link
     # and says the question is on that page.
@@ -661,6 +694,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
               type: "decision",
               repo: ( ($pr | repo_of_url)
                       // ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0])
+                      // ([ ($d.reason_full // $d.reason // ""), (($d.twins // [])[] | (.reason_full // .reason // "")) ]
+                          | map(tostring | card_urls | repo_of_url | strings) | .[0])
                       // null ),
               title: (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key)),
               options: ( [ default_options($d)[], ($d.twins // [])[] as $tw | default_options($tw)[] ]
@@ -687,13 +722,13 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                 # their own, keep the heading as it is.
                 | (if $long == null then null else ($long | option_parse) end) as $parsed
                 | (if $long == null then null
-                   elif $parsed != null then ($parsed.lead | lead_sentence | short_text_n(120) | nz(null)
+                   elif $parsed != null then ($parsed.lead | lead_sentence | short_text_n(120; true) | nz(null)
                      | if . != null
                           and ($parsed.lead | test("[.?!][[:space:]]*$") | not)
                           and ([$parsed.options[].label | test("[?]")] | any | not)
                           and ($long[:(($long | length) - ($parsed.tail | length))] | test("[?][[:space:]]*$"))
                        then . + "?" else . end)
-                   else ($long | ask_sentence | short_text_n(120) | nz(null)) end) as $q0
+                   else ($long | ask_sentence | short_text_n(120; true) | nz(null)) end) as $q0
                 | (if $q0 == null then null else ($q0 | sub(decision_label; ""; "i") | cap) end) as $q
                 | (if ($d.verb // "") == "review-ready" then $texts else [ $texts[] | without_options ] end) as $body
                 | ($q != null and $title != $q and ($title | endswith(": " + $q) | not)) as $asks
