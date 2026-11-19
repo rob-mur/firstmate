@@ -1846,19 +1846,47 @@ test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary() {
   pass "a too long asking sentence is cut at a clause boundary"
 }
 
-# A reason whose only text past its question and options is a YouTrack link
-# keeps that link, labelled by its issue id, as its about.
-test_a_reason_ending_on_a_youtrack_link_keeps_its_about() {
+# A YouTrack link that ends a reason after its options is a card link labelled
+# by its issue id, never about text.
+test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link() {
   local card name line id
   for name in writes:APP-5861 money:APP-5837 retest:APP-5871; do
     id=${name#*:} name=${name%%:*}
     case $name in writes) line=$BCR_WRITES_LINE ;; money) line=$BCR_MONEY_LINE ;; retest) line=$BCR_RETEST_LINE ;; esac
     card=$(real_line_card "bcr-$name" bcr-dec10-grill "$line")
-    assert_equals "Issue $id" "$(jq -r '.about // ""' <<<"$card")" "bcr $name: about"
-    assert_equals "Issue $id" "$(jq -r '.links[0].label' <<<"$card")" "bcr $name: link label"
+    jq -e --arg id "$id" '(.about // "") | contains($id) | not' <<<"$card" >/dev/null \
+      || fail "bcr $name: the about kept its trailing link: $card"
+    assert_equals "$id" "$(jq -r '.links[0].label' <<<"$card")" "bcr $name: link label"
     jq -e '.question | endswith("?")' <<<"$card" >/dev/null || fail "bcr $name: the card lost its question: $card"
   done
-  pass "a reason ending on a youtrack link keeps its about"
+  pass "a reason ending on a youtrack link keeps it as a link"
+}
+
+# The bcr-ticket-texts line: one "(a, recommended)" mark, then "b = " and "c = "
+# marks, then 13 YouTrack links and four file paths after its last sentence.
+BCR_TEXTS_LINE="needs-decision [key=bcr-ticket-texts] [at=1795103927]: Can I post these BCR ticket changes to YouTrack? The change creates two tickets, rewrites APP-5861 to APP-5871, renames APP-5868 and moves the links from APP-5860 to the new Confirm ticket. (a, recommended) post all as written. b = post with edits you write on the page. c = hold. https://youtrack.prd.descartesunderwriting.fr/issue/APP-5860 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5861 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5862 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5863 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5864 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5865 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5866 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5867 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5868 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5869 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5870 https://youtrack.prd.descartesunderwriting.fr/issue/APP-5871 https://youtrack.prd.descartesunderwriting.fr/issue/APP-6000 /home/rob/repos/firstmate/data/bcr-dec10-grill/youtrack-changes.md (Round 5) /home/rob/repos/firstmate/data/bcr-dec10-grill/texts/V1.md /home/rob/repos/firstmate/data/bcr-dec10-grill/texts/V2.md /home/rob/repos/firstmate/data/bcr-dec10-grill/texts/old-tickets.diff"
+
+# Lowercase "b = " options after a parenthesised "(a, recommended)" one are the
+# card choices, and the trailing links and paths go to the card links, web
+# links labelled by issue id first and file paths by file name last.
+test_equals_options_and_trailing_links_and_paths_leave_the_about() {
+  local card
+  card=$(real_line_card bcr-texts bcr-dec10-grill "$BCR_TEXTS_LINE")
+  assert_equals "option-a|option-b|option-c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "texts: option values"
+  assert_equals "Post all as written|Post with edits you write on the page|hold" \
+    "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "texts: option labels"
+  assert_equals "option-a" "$(jq -r .recommend_value <<<"$card")" "texts: recommendation"
+  assert_equals "Can I post these BCR ticket changes to YouTrack? The change creates two tickets, rewrites APP-5861 to APP-5871, renames APP-5868 and moves the links from APP-5860 to the new Confirm ticket." \
+    "$(jq -r '[.question, .about] | map(. // "") | map(select(length > 0)) | join(" ")' <<<"$card")" "texts: about"
+  assert_equals "APP-5860 APP-5861 APP-5862 APP-5863 APP-5864 APP-5865 APP-5866 APP-5867 APP-5868 APP-5869 APP-5870 APP-5871 APP-6000" \
+    "$(jq -r '[.links[] | select(has("url")) | .label] | join(" ")' <<<"$card")" "texts: web links"
+  assert_equals "youtrack-changes.md (Round 5)|V1.md|V2.md|old-tickets.diff" \
+    "$(jq -r '[.links[] | select(has("path")) | .label] | join("|")' <<<"$card")" "texts: path links"
+  jq -e '(.links | map(has("path"))) as $p | $p[13:] | all' <<<"$card" >/dev/null \
+    || fail "texts: a path link came before a web link: $card"
+  assert_equals "/home/rob/repos/firstmate/data/bcr-dec10-grill/texts/old-tickets.diff" \
+    "$(jq -r '.links[-1].path' <<<"$card")" "texts: last path"
+  pass "equals options and trailing links and paths leave the about"
 }
 
 # A secondmate decision is answered from its card: options the reason marks
@@ -2012,4 +2040,5 @@ fm_test_run \
   test_a_link_the_text_already_names_shows_no_label_in_parentheses \
   test_a_comment_link_reads_as_a_comment \
   test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary \
-  test_a_reason_ending_on_a_youtrack_link_keeps_its_about
+  test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
+  test_equals_options_and_trailing_links_and_paths_leave_the_about
