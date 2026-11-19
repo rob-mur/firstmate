@@ -968,9 +968,11 @@ task_json_lines() {
       case "$current_state:$current_source" in
         done:*|failed:*|working:run-step) open_decisions_tsv="" ;;
         working:pane)
-          # The fold names an unkeyed decision "default" (_fm_decision_key).
-          open_decisions_tsv=$(printf '%s\n' "$open_decisions_tsv" \
-            | awk -F '\t' '$1 != "default"') || open_decisions_tsv="" ;;
+          # The fold names an unkeyed decision "default" (_fm_decision_key), the
+          # same name an explicit [key=default] gets; only the unkeyed one drops.
+          status_decision_opened_keyed "$status_log" default \
+            || open_decisions_tsv=$(printf '%s\n' "$open_decisions_tsv" \
+              | awk -F '\t' '$1 != "default"') || open_decisions_tsv="" ;;
       esac
     fi
     # A decision the captain already answered on its captain call is not still
