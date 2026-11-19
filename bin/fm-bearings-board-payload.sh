@@ -448,7 +448,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # reads as a question and the decision check in build still sees it ask.
   | def short_text_n($n):
       tostring | gsub("[[:space:]]+"; " ") | sub("^ "; "")
-      | ([match("^.*?[.?!](?=[[:space:]]|$)").string][0] // .)
+      | (sentences[0] // .)
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?]"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
       | if length <= $n then .
@@ -459,7 +459,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     # first ending in "?", else the first sentence.
     def ask_sentence:
       clean_reason | gsub("[[:space:]]+"; " ") | sub("^ "; "")
-      | [ scan("[^[:space:]].*?(?:[.?!](?=[[:space:]]|$)|$)") ] as $s
+      | sentences as $s
       | ( ([ $s[] | select(test("^Question:[[:space:]]*"; "i")) | sub("^Question:[[:space:]]*"; ""; "i") ][0])
           // ([ $s[] | select(test("[?]$")) ][0])
           // $s[0] // "" )
@@ -567,7 +567,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     def lead_sentence:
       gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | sub("(?:^|(?<=[.!?]) )(?:the )?(?:options|choices|alternatives)(?: (?:are|would be))?[[:space:]]*:[[:space:]]*$"; ""; "i")
-      | ([ scan("[^[:space:]].*?(?:[.?!](?=[[:space:]]|$)|$)") | select(length > 0) ][-1] // "") as $last
+      | ([ sentences[] | select(length > 0) ][-1] // "") as $last
       | if ($last | test(decision_label + "[^[:space:]]"; "i"))
         then $last
         elif test(":[[:space:]]*$") and (test("Question:"; "i") | not)
@@ -593,7 +593,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     def page_subject:
       [match(page_phrase; "i")][0].offset as $o
       | .[:$o] | gsub("[[:space:]]+"; " ") | sub("[[:space:]:;,.-]+$"; "")
-      | (split(". ") | last // "") | sub("^ "; "");
+      | (sentences | last // "");
     ( $question_rows
       | map(
           . as $d
