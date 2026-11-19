@@ -1086,6 +1086,33 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds declare a validation-round pause once, then hold it"
 }
 
+test_ship_and_scout_needs_decision_must_be_a_question() {
+  local home kind id brief
+  home="$TMP_ROOT/needs-decision-question-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-needs-decision-question-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    # shellcheck disable=SC2016  # single quotes are deliberate: backticks and placeholders stay literal
+    assert_grep '   append `needs-decision [at=<epoch>]: {question}` and stop. Firstmate will reply with the decision.' "$brief" \
+      "$kind rule 6 does not ask for a question in its needs-decision line"
+    assert_grep 'A needs-decision must be a question: one question ending in ?, lettered options with the recommended one first, and the full https:// URL for any link.' "$brief" \
+      "$kind rule 6 does not say a needs-decision must be a question"
+    assert_grep 'firstmate steers it back to you to re-raise as a question under the same key' "$brief" \
+      "$kind rule 6 does not say a non-question needs-decision is steered back"
+    assert_no_grep '{summary of options}' "$brief" \
+      "$kind rule 6 still invites a summary instead of a question"
+  done
+  pass "fm-brief.sh: ship and scout rule 6 say a needs-decision must be a question"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1783,6 +1810,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_ship_and_scout_needs_decision_must_be_a_question
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_completion_write_exception_is_task_scoped
 test_scout_and_secondmate_scaffold

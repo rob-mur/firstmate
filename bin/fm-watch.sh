@@ -20,7 +20,9 @@
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
-#                          positive execution evidence, unless afk is active
+#                          positive execution evidence, unless afk is active. A
+#                          needs-decision line the board would hold back is also
+#                          steered back to its worker once (question_bounce_check).
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -295,6 +297,10 @@ WATCH_HOME_EXISTED=0
 # and wake emission (secondmate_liveness_tick below).
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+# The Captain's Call card check the board build holds cards back with; the
+# watcher runs it on a needs-decision line as it lands (question_bounce_check).
+# shellcheck source=bin/fm-bearings-card-check-lib.sh
+. "$SCRIPT_DIR/fm-bearings-card-check-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -3475,6 +3481,56 @@ signal_files_actionable() {  # <status-file> ...
   return "$found"
 }
 
+# Bounce a needs-decision line the captain's board would hold back. For each
+# status file whose new span carries a decision (FM_SIGNAL_NEEDS_DECISION_FILES)
+# and that belongs to a live non-secondmate task of this home (it has a meta),
+# every still-open needs-decision is put through the board's own card check
+# (bin/fm-bearings-card-check-lib.sh), and one that fails is steered back to its
+# worker through fm-send's durable steering inbox with the problem and the
+# re-raise rule. state/.<id>.question-bounced records each checked line as
+# `<key>\t<note-cksum>\t<ok|bounced>`, so a line is checked and steered at most
+# once however many cycles see it, while a re-raise under the same key with new
+# text is checked afresh. A failed send or a check that could not run records
+# nothing, so the next decision span in that file retries it. The status line
+# itself is never touched, the wake to firstmate is queued exactly as before,
+# and the board still holds the card back until the worker re-raises it. A
+# no-mistakes ask-user gate escalation (key `nm-<run>-<step>`, text starting
+# `ask-user `) is exempt: the brief mandates that shape and firstmate answers it
+# under ask-user-authority, so it is never steered back.
+question_bounce_check() {
+  local f task ledger key verb note ident problem rc
+  for f in $FM_SIGNAL_NEEDS_DECISION_FILES; do
+    task=$(basename "$f"); task="${task%.status}"
+    [ -f "$STATE/$task.meta" ] || continue
+    [ "$(fm_meta_get "$STATE/$task.meta" kind 2>/dev/null || true)" != secondmate ] || continue
+    ledger="$STATE/.$task.question-bounced"
+    while IFS=$'\t' read -r key verb note; do
+      [ "$verb" = needs-decision ] || continue
+      case "$key" in nm-?*-?*) case "$note" in "ask-user "*) continue ;; esac ;; esac
+      ident="$key"$'\t'"$(printf '%s' "$note" | cksum | cut -d' ' -f1)"
+      grep -qxF -e "$ident"$'\tok' -e "$ident"$'\tbounced' "$ledger" 2>/dev/null && continue
+      problem=$(fm_bearings_status_decision_problem "$task" "$key" "$note")
+      rc=$?
+      case "$rc" in
+        0) printf '%s\tok\n' "$ident" >> "$ledger" ;;
+        1)
+          if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$task" \
+            "Your needs-decision [key=$key] was held off the captain's board: ${problem//$'\n'/; }; re-raise as needs-decision [key=$key] with one question ending in ?, lettered options, recommended first, full URL" \
+            >/dev/null 2>&1; then
+            printf '%s\tbounced\n' "$ident" >> "$ledger"
+            triage_log "question bounce: $task key=$key steered back ($problem)"
+          else
+            triage_log "question bounce: $task key=$key steer failed; retried on its next decision"
+          fi
+          ;;
+        *) triage_log "question bounce: $task key=$key card check could not run" ;;
+      esac
+    done <<EOF
+$(status_own_open_decisions "$f")
+EOF
+  done
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark each actionable status log through the endpoint captured by the heartbeat
@@ -4488,6 +4544,7 @@ EOF
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
+    question_bounce_check
     # A decision-owned file's queued row payload is marked "needs-decision:"
     # instead of the ordinary "signal:" below (other files in the same batch
     # keep the ordinary payload). The wake reason line itself, and every
