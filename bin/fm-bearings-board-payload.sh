@@ -47,7 +47,10 @@
 #   - a status row that only announces a page or PR is live or ready
 #     (is_announcement in bin/fm-bearings-question-lib.sh) is never a card: its
 #     links fold into the card for the same work (same home and task or decision
-#     key, or a shared PR/MR URL), and it is dropped when no such card exists.
+#     key, or a shared PR/MR URL), and it is dropped when no such card exists;
+#   - an unkeyed status decision whose text names, as a whole word, the task id
+#     of a captain hold in the same home announces that hold, so it is dropped
+#     and the hold card stays the one card for that call.
 #
 # Mapping (snapshot field -> board section):
 #   decisions_open  -> captains_call: one `decision` card per captain-held task id,
@@ -507,8 +510,20 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       and (($s.decision_key // "default") != "default")
       and (($s.owner // "(main)") == ($h.owner // "(main)"))
       and ($h.key == $s.decision_key or (($h.id // "") | split("/") | last) == $s.decision_key);
+    # An unkeyed status decision that names a captain-held task of the same home
+    # by its id announces that hold ("...; card cd-930-identity"): it is dropped,
+    # not a second card, and the hold card stays as it is.
+    def names_hold($s; $h):
+      ($s.source // "") == "status" and ($h.verb // "") == "captain-hold"
+      and (($s.decision_key // "default") == "default")
+      and (($s.owner // "(main)") == ($h.owner // "(main)"))
+      and ((($h.id // "") | split("/") | last) as $id
+           | $id != ""
+           and ([$s.reason_full, $s.reason, $s.question] | map(strings) | join(" ")
+                | test("(^|[^A-Za-z0-9_-])" + ($id | gsub("(?<c>[^A-Za-z0-9_-])"; "\\\(.c)"))
+                       + "($|[^A-Za-z0-9_-])")));
     ( [ $asked[] | select((.verb // "") == "captain-hold") ] ) as $asked_holds
-  | ( [ $held[] | select(. as $r | any($asked_holds[]; same_question($r; .))) | .key ] ) as $folded
+  | ( [ $held[] | select(. as $r | any($asked_holds[]; same_question($r; .) or names_hold($r; .))) | .key ] ) as $folded
   | ( [ $asked[] | . as $r
         | if ($folded | index([$r.key])) then empty
           elif ($r.verb // "") == "captain-hold" then
