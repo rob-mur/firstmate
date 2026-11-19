@@ -82,7 +82,9 @@
 #                      A link is labelled by what it points at - `PR <n>`, `MR <n>`,
 #                      `Issue <n>`, or for a Lavish page `Understand page`, `Review page`,
 #                      or `Report` from the words just before it (else `Lavish page`) -
-#                      and `question`/`about` show that label in place of the URL. `build`
+#                      and `question`/`about` show that label in place of the URL, a "?"
+#                      written after the URL and a space against the label ("PR 135?");
+#                      a title that drops the URL drops that space too. `build`
 #                      turns a Lavish page link into its in-place board page. Every
 #                      open captain hold is a row here (see --all-decisions above).
 #                      A hold whose reason is a wait or park rather than a question moves
@@ -454,7 +456,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   | def short_text_n($n):
       tostring | gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | (sentences[0] // .)
-      | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?]"; "")
+      | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?](?: (?=[?]))?"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
       | if length <= $n then .
         elif endswith("?") then (.[:($n - 2)] | sub(" [^ ]*$"; "")) + "…?"
@@ -557,7 +559,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # A card link is labelled by what it points at, never by its raw URL: a
   # PR/MR/issue number from the URL shape, or for a Lavish page the kind the
   # text just before the URL names (understand, review, report). Question and
-  # about text show that label in place of each URL.
+  # about text show that label in place of each URL, with a "?" written after
+  # the URL and a space ("on <url> ?") put against the label ("on PR 135?").
   | def card_urls:
       scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") | sub("[.,;:!?]+$"; "");
     def link_label($u; $t):
@@ -572,7 +575,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
            else "Lavish page" end)
         else ($u | sub("^https://"; "") | split("/")[0]) end;
     def labelled_urls:
-      . as $t | reduce ([$t | card_urls] | unique | sort_by(-length))[] as $u ($t; split($u) | join(link_label($u; $t)));
+      . as $t | reduce ([$t | card_urls] | unique | sort_by(-length))[] as $u
+        ($t; split($u + " ?") | join($u + "?") | split($u) | join(link_label($u; $t)));
     # The heading of a text that lists its own options comes from the text
     # before the options: the sentence that introduces them when it ends in a
     # colon ("Merge PR 13: (1) ..."), else its asking sentence, without a
