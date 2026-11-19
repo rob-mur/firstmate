@@ -68,7 +68,8 @@
 # recommended) ...", "(2; rec) ..."), or be followed by one ("(a) recommended:
 # ..."), and an "A = " mark may follow one
 # ("rec A = ...", "recommended B = ..."): that option's value is then the
-# parse's `recommend`. Markers must run 1, 2, 3 or a, b, c
+# parse's `recommend`. Lowercase "b = " marks after a sentence end may follow
+# a parenthesised one ("(a, recommended) one. b = two. c = three."). Markers must run 1, 2, 3 or a, b, c
 # from the first, at least two; the last option ends at its sentence end; a
 # reason with no such list parses to null. Values are option-<n> or
 # option-<letter>. A label is the full option text, never shortened, with URLs
@@ -211,6 +212,10 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
         from_marks(marks("(?<![[:alnum:]])\\((?<k>[A-Za-z])" + $rec + "\\)" + $rec_after; "letter"))
         // from_marks(marks("(?<![^[:space:]:;,])(?<k>[A-Za-z])\\)"; "letter"))
         // from_marks(marks("(?:(?<![[:alnum:]])(?<r>recommended|rec|preferred)[[:space:]]+)?(?<![^[:space:]:;,(])(?<k>[A-Z])[[:space:]]?=[[:space:]]"; "letter"))
+        # "(a, recommended) one. b = two. c = three.": a parenthesised mark, then
+        # lowercase "b = " marks each after a sentence end.
+        // from_marks(marks("(?<![[:alnum:]])\\((?<k>[a-z])" + $rec + "\\)" + $rec_after; "letter")
+                      + marks("(?:^|(?<=[.!?;:] ))(?<k>[a-z]) =(?= )"; "letter") | sort_by(.offset))
       else from_list end;
   def option_parse: option_parse_by("number") // option_parse_by("letter") // option_parse_by("list");
   def option_mark_value: "option-" + (if test("^[0-9]") then . else ascii_downcase end);
