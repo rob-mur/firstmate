@@ -49,7 +49,10 @@
 # whatever its links say.
 #
 # clean_reason: reason text as the captain reads it - every `corr=<hex>`
-# correlation token and a leading "captain hold <id>: " label removed.
+# correlation token and a leading "captain hold <id>: " label removed, and
+# every sentence addressed to firstmate (one that opens "Firstmate:" or
+# "Firstmate,") dropped unless it is the whole text. A sentence that only
+# mentions firstmate stays.
 #
 # sentences: a text split into its sentences, each without leading space. A
 # sentence ends at ".", "?" or "!" before a space or the end of the text, but
@@ -116,13 +119,17 @@
 # payload never authors it.
 # shellcheck disable=SC2016  # jq program text, not shell expansion
 FM_BEARINGS_QUESTION_JQ_DEFS='
+  def sentences:
+    [ scan("[^[:space:]].*?(?:(?:[?!]|(?<!\\b[eE]\\.g)(?<!\\b[iI]\\.e)(?<!\\b[eE]tc)(?<!\\b[vV]s)\\.)(?=[[:space:]]|$)|$)") ];
   def clean_reason:
     tostring
     | gsub("(?<![^[:space:]])corr=[0-9a-f]+(?:[[:space:]]+|$)"; "")
     | sub("^[[:space:]]+"; "")
-    | sub("^captain hold [^:]+: "; "");
-  def sentences:
-    [ scan("[^[:space:]].*?(?:(?:[?!]|(?<!\\b[eE]\\.g)(?<!\\b[iI]\\.e)(?<!\\b[eE]tc)(?<!\\b[vV]s)\\.)(?=[[:space:]]|$)|$)") ];
+    | sub("^captain hold [^:]+: "; "")
+    | ([ sentences[] | select(test("^Firstmate[:,]")) ]) as $to_firstmate
+    | if ($to_firstmate | length) == 0 or ($to_firstmate | length) == (sentences | length) then .
+      else reduce $to_firstmate[] as $x (.; split($x) | join("\u0001"))
+           | gsub("[ \t]*\u0001[ \t]*"; " ") | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "") end;
   def choice_label:
     gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?]"; "")
     | gsub("[[:space:]]+"; " ")
