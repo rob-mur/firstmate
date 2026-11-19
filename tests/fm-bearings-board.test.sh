@@ -327,6 +327,39 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   pass "build refuses malformed payloads before touching the board"
 }
 
+test_a_refusal_names_the_first_failing_item_and_its_fields() {
+  local home data rc out
+  home=$(make_home refusal-names)
+  data="$home/payload.json"
+
+  # A card appended through the copy overlay's captains_call_extra without a
+  # type or repo, followed by a charted row with a bad filed date.
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"extra-card","title":"Extra","options":[]}]
+    | .charted[0].filed = "last Tuesday"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a card without a type or repo was accepted"
+  assert_contains "$out" 'captains_call[2] (key "extra-card"): missing required field "type"; missing required field "repo"' \
+    "the refusal did not name the failing card and its missing fields: $out"
+  assert_contains "$out" "(and 1 more failing item)" "the refusal did not count the other failing item: $out"
+  assert_not_contains "$out" "last Tuesday" "the refusal named more than the first failing item: $out"
+
+  write_valid_payload "$data"
+  jq '.charted[0].filed = "last Tuesday"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an invalid filed date was accepted"
+  assert_contains "$out" 'charted[0] (id "sample-queued"): invalid field "filed"' \
+    "the refusal did not name the failing row and field: $out"
+  assert_not_contains "$out" "more failing" "a single failing item was counted as more: $out"
+
+  write_valid_payload "$data"
+  jq 'del(.home)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a payload without a home was accepted"
+  assert_contains "$out" 'payload: missing required field "home"' "the refusal did not name the payload field: $out"
+  pass "a refused build names the first failing item and its missing or invalid fields"
+}
+
 test_build_injects_binds_then_arms() {
   local home data board out sid
   home=$(make_home build)
@@ -1381,6 +1414,7 @@ test_a_card_that_names_a_page_title_links_that_page
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
 test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_a_refusal_names_the_first_failing_item_and_its_fields
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_lists_live_pages_and_refuses_payload_pages
 test_build_injects_binds_then_arms
