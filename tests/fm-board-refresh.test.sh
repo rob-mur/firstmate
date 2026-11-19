@@ -414,6 +414,41 @@ test_a_failed_build_is_logged_and_not_retried_until_state_changes() {
   pass "a failed build is logged and not retried until state changes"
 }
 
+test_a_refused_payload_is_kept_and_its_reason_logged() {
+  local home kept
+  home=$(make_home refused-kept)
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  # The real fleet snapshot plus a card without a type or repo.
+  printf '#!/usr/bin/env bash
+"%s" "$@" | jq -c %s
+' "$ROOT/bin/fm-bearings-board-payload.sh" \
+    "'.captains_call += [{\"key\":\"typeless-card\",\"title\":\"Typeless\",\"options\":[]}]'" \
+    > "$home/broken-payload"
+  chmod +x "$home/broken-payload"
+  add_task "$home" t1
+  FM_BOARD_REFRESH_PAYLOAD="$home/broken-payload" in_home "$home" "$REFRESH" \
+    && fail "a refused build reported success"
+  grep -q 'board build refused: .*captains_call\[[0-9]*\] (key "typeless-card"): missing required field "type"' \
+    "$home/state/.board-refresh.log" || fail "the refusal log did not name the card and field: $(cat "$home/state/.board-refresh.log")"
+  kept="$home/state/.board-refresh.refused.json"
+  [ -f "$kept" ] || fail "the refused payload was not kept"
+  [ "$(stat -c %a "$kept")" = 600 ] || fail "the refused payload is not mode 0600"
+  jq -e '.captains_call[] | select(.key == "typeless-card")' "$kept" >/dev/null \
+    || fail "the kept payload is not the refused one"
+
+  # A later refusal replaces the older payload.
+  add_task "$home" t2
+  FM_BOARD_REFRESH_PAYLOAD="$home/broken-payload" in_home "$home" "$REFRESH" \
+    && fail "a second refused build reported success"
+  jq -e '[.. | strings | select(. == "t2")] | length > 0' "$kept" >/dev/null \
+    || fail "a later refusal did not replace the kept payload"
+  [ "$(stat -c %a "$kept")" = 600 ] || fail "the replaced payload is not mode 0600"
+  [ "$(find "$home/state" -maxdepth 1 -name '.board-refresh.payload.*' | wc -l)" = 0 ] \
+    || fail "a refused payload temp file was left behind"
+  pass "a refused payload is kept privately and its reason logged"
+}
+
 test_the_wake_drain_starts_a_refresh_in_the_background() {
   local home i=0
   home=$(make_home drain)
@@ -978,6 +1013,7 @@ fm_test_run \
   test_a_priority_change_rebuilds_the_board \
   test_the_throttle_defers_a_refresh_and_the_lock_hands_it_on \
   test_a_failed_build_is_logged_and_not_retried_until_state_changes \
+  test_a_refused_payload_is_kept_and_its_reason_logged \
   test_the_wake_drain_starts_a_refresh_in_the_background \
   test_a_kick_without_a_board_does_nothing \
   test_a_burst_of_kicks_coalesces_into_one_rebuild \
