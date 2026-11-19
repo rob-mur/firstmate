@@ -16,6 +16,8 @@
 #      bounce carries.
 #   5. A no-mistakes ask-user gate escalation, whose shape the brief mandates,
 #      is never bounced.
+#   6. A question whose "?" comes after its inline options is a question: the
+#      board does not hold it back and the watcher does not bounce it.
 set -u
 
 # shellcheck source=tests/watch-triage-helpers.sh
@@ -27,6 +29,7 @@ SIGNIN='needs-decision [key=signin]: open https://example.test/signin ... and ap
 RULE='re-raise as needs-decision [key=signin] with one question ending in ?, lettered options, recommended first, full URL'
 VALID_SIGNIN='needs-decision [key=signin]: Approve the sign-in at https://example.test/signin before 09:04 UTC? (a, recommended) approve (b) skip'
 VALID_OTHER='needs-decision [key=other]: Ship the fix now? (a, recommended) ship https://example.test/pr/1 (b) wait'
+TRAILING_ASK='needs-decision [key=stall]: The stall timer fired twice, how should pdm handle the retry: (a, recommended) back off 5m (b) retry now (c) give up?'
 
 # A live ship task t1 in its own home, whose window the fake tmux lists.
 bounce_case() {  # <name> -> case dir
@@ -145,8 +148,26 @@ test_board_and_bounce_agree_on_the_problem() {
   pass "the board holds back the sign-in line with the same problem the bounce sends the worker"
 }
 
+test_question_mark_after_inline_options_is_a_question() {
+  local dir
+  dir=$(bounce_case trailing-ask)
+  printf '%s\n' "$TRAILING_ASK" > "$dir/state/t1.status"
+  bounce_round "$dir"
+  [ "$(steer_count "$dir")" -eq 0 ] \
+    || fail "a question ending in ? after its inline options was bounced: $(record_body "$(steer_records "$dir")")"
+  board_build "$dir"
+  [ "$(jq -r '.captains_call[] | select(.key == "status.t1.stall") | .question' "$dir/payload.json")" \
+    = "The stall timer fired twice, how should pdm handle the retry?" ] \
+    || fail "the board card lost the question mark after the options: $(jq -c '.captains_call' "$dir/payload.json")"
+  if grep -F "status.t1.stall" "$dir/state/board-cards-to-fix" >/dev/null 2>&1; then
+    fail "the board held back a question ending in ? after its inline options: $(cat "$dir/state/board-cards-to-fix")"
+  fi
+  pass "a question whose ? follows its inline options reaches the board and is not bounced"
+}
+
 fm_test_run \
   test_instruction_line_is_bounced_once_with_the_rule \
   test_valid_question_is_never_bounced \
   test_ask_user_gate_line_is_never_bounced \
-  test_board_and_bounce_agree_on_the_problem
+  test_board_and_bounce_agree_on_the_problem \
+  test_question_mark_after_inline_options_is_a_question
