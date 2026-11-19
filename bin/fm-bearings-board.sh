@@ -105,25 +105,11 @@
 #
 # EVERY CARD STATES ITS DECISION. After the hygiene drop above and before the
 # board is touched, build checks that each Captain's Call card says
-# what the captain is deciding: a card needs a prompt that asks - its
-# `question` or `decide` carries a `?`, or its title does (for a `from_status`
-# card only when it has no `question` or `decide`, since its title may come from
-# an option or body sentence that asks) - and a way to answer
-# it, at least one option of its own besides the injected reconcile choice or a
-# free-text answer. A card whose options include `done` and `not-done` asks
-# for an in-person action, so its prompt may be an imperative sentence. A card
-# also needs the decision's own values and something to click: its options must
-# be recorded ones - not empty and not `options_inferred`, the payload mark for
-# a hold that recorded none - unless it carries `free_text: true` (a hold that
-# declared a free-text question) or is a done/not-done action card; and it
-# needs a link (`links` or `pr_url`) unless it carries `no_link: true`. A card
-# with `from_status: true` (a worker status question or a review page the
-# generator raised, which has no hold to record choices on) needs only the
-# prompt; the board always gives it a free-text answer box, so it always has a
-# way to answer. The booleans `free_text`, `no_link`,
-# `options_inferred` and `from_status` are optional. Exempt are a merge card (its type is the
-# question) and a page-backed card, one carrying `off_board` or with no options
-# and a Lavish page link, whose decision is on that page. A card that fails is
+# what the captain is deciding. The rule - a prompt that asks, a way to answer,
+# recorded options and a link unless the card is exempt - and its exemptions
+# are owned by bin/fm-bearings-card-check-lib.sh, the same check the watcher
+# runs on a worker's needs-decision line to bounce it back (bin/fm-watch.sh).
+# A card that fails is
 # held back, never refused and never silently dropped: it is named on stderr as
 # an `undecided-card: <key>: missing <field> (<why>)` line plus one summary
 # line, and it moves out of `captains_call` into the payload's `cards_to_fix`
@@ -263,6 +249,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-bearings-card-check-lib.sh
+. "$SCRIPT_DIR/fm-bearings-card-check-lib.sh"  # the shared card check
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 DATA_SCRIPT='<script src="bearings-board.data.js"></script>'
@@ -486,41 +474,10 @@ validate_payload() {  # <data.json>
 }
 
 # Print one `<key>: <missing fields>` line per Captain's Call card that does
-# not state its decision (see EVERY CARD STATES ITS DECISION above).
+# not state its decision (see EVERY CARD STATES ITS DECISION above;
+# the check is bin/fm-bearings-card-check-lib.sh's, shared with the watcher).
 undecided_cards() {  # <data.json>
-  jq -r '
-    def text: if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end;
-    def asks: text | contains("?");
-    .captains_call[]
-    | select(.type != "merge")
-    | .options |= map(select(.value != "reconcile"))
-    | select(has("off_board") | not)
-    | select(((.options | length) == 0)
-             and any(.links[]?; has("page")
-                     or ((.url // "") | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#]|$)")))
-             | not)
-    | .key as $key
-    | ([.question, .decide] | map(text) | map(select(length > 0))) as $prompts
-    | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $action
-    | (.from_status == true) as $raised
-    | ((.links // [] | length) > 0 or ((.pr_url // "") | length) > 0 or .no_link == true) as $linked
-    | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
-         then "question (no question or decide prompt, and the title is not a question)"
-         elif ($prompts | length) > 0 and (any($prompts[]; asks) | not)
-              and ($raised or (.title | asks | not)) and ($action | not)
-         then "question (\($prompts[0] | if length > 80 then .[:79] + "…" else . end) is not a question)"
-         else empty end),
-        (if (.options | length) == 0 and .allow_freeform != true and ($raised | not)
-         then "options (no options and no free-text answer)"
-         elif ($raised | not) and .free_text != true and ($action | not)
-              and ((.options | length) == 0 or .options_inferred == true)
-         then "options (no recorded choices: re-hold with --option <value>=<label> or --free-text)"
-         else empty end),
-        (if ($raised | not) and ($linked | not)
-         then "link (no link: re-hold with --link <url|page:id> or --no-link)" else empty end) ]
-    | select(length > 0)
-    | "\($key): missing \(join(", "))"
-  ' "$1"
+  fm_bearings_undecided_cards "$1"
 }
 
 # Move each undecided card out of Captain's Call into `cards_to_fix` as

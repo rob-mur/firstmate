@@ -777,6 +777,17 @@ IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
 EOF
 SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
 
+# One shared string keeps the ship and scout needs-decision shape identical; the
+# watcher bounces a needs-decision that is not a question (bin/fm-watch.sh
+# question_bounce_check, card check in bin/fm-bearings-card-check-lib.sh).
+IFS= read -r -d '' NEEDS_DECISION_RULE <<'EOF' || true
+   append `needs-decision [at=<epoch>]: {question}` and stop. Firstmate will reply with the decision.
+   A needs-decision must be a question: one question ending in ?, lettered options with the recommended one first, and the full https:// URL for any link.
+   An instruction or announcement is not a decision; firstmate steers it back to you to re-raise as a question under the same key.
+   A no-mistakes ask-user gate escalation keeps the exact shape its own rule gives.
+EOF
+NEEDS_DECISION_RULE=${NEEDS_DECISION_RULE%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -821,7 +832,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 $CREWMATE_PAUSE_INSTRUCTIONS
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
-   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
+$NEEDS_DECISION_RULE
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
@@ -905,7 +916,7 @@ $RULE1
 $CREWMATE_PAUSE_INSTRUCTIONS
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
-   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
+$NEEDS_DECISION_RULE
 $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
