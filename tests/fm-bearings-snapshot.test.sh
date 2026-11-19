@@ -4013,6 +4013,27 @@ test_busy_keyed_question_stays_on_captains_call() {
   pass "a busy worker's keyed question stays on Captain's Call"
 }
 
+# A question raised with an explicit [key=default] is keyed too, even though
+# the fold gives an unkeyed question the same name. A Firstmate steer that
+# wakes its worker must not take it off Captain's Call.
+test_busy_explicit_default_key_stays_on_captains_call() {
+  local home fakebin json
+  home=$(make_home busy-default-question); write_fixture "$home"
+  record_claude_state "$home/state" ship-task busy
+  printf '%s\n' \
+    'needs-decision: pick the comments on the page' \
+    'resolved [key=default]: carried by its board card' \
+    'needs-decision [key=default]: post these texts now? (a) yes (b) change them' \
+    > "$home/state/ship-task.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .decisions_open | any(.[]; .source == "status" and .task == "ship-task"
+                              and .decision_key == "default" and (.handed_at == null))
+  ' >/dev/null || fail "a busy worker's [key=default] question left Captain's Call: $json"
+  pass "a busy worker's [key=default] question stays on Captain's Call"
+}
+
 test_status_questions_reach_decisions_open_with_routing_fields() {
   local home fakebin json
   home=$(make_home status-questions); write_fixture "$home"
@@ -4507,6 +4528,7 @@ fm_test_run \
   test_projection_and_toon_fail_closed \
   test_status_questions_reach_decisions_open_with_routing_fields \
   test_busy_keyed_question_stays_on_captains_call \
+  test_busy_explicit_default_key_stays_on_captains_call \
   test_secondmate_questions_from_the_parent_log_survive_an_invalid_home \
   test_a_relayed_child_question_is_one_board_card \
   test_a_ready_review_page_is_a_board_row \

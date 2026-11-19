@@ -1091,6 +1091,23 @@ status_decision_opened_epoch() {  # <status-file> <key>
   printf '%s\n' "$epoch"
 }
 
+# 0 when the line that opened decision <key> in the log - the newest
+# needs-decision/blocked line folding to it - carries an explicit [key=...]
+# token. The fold names an unkeyed decision "default", the same name an explicit
+# [key=default] gets, so this is how a reader tells the two apart.
+status_decision_opened_keyed() {  # <status-file> <key>
+  local f=$1 want=$2 line verb key keyed=1
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb "$line" verb
+    case "$verb" in needs-decision|blocked) ;; *) continue ;; esac
+    key=$(_fm_decision_key "$line") || continue
+    [ "$key" = "$want" ] || continue
+    if [ -n "$(_fm_decision_key "$line" '')" ]; then keyed=0; else keyed=1; fi
+  done < "$f"
+  return "$keyed"
+}
+
 # Tag each line of an open-decision set ("<key>\t<verb>\t<note>" on stdin, as
 # status_open_decisions prints) for task <task> with the captain call that
 # already answered it: prints "<answered-task-id>\t<line>", with an empty first
