@@ -98,8 +98,9 @@
 # state/.board-refresh.failure-notified marks the episode as told; the next
 # rebuilt board clears it, so the next failure is news again.
 # Each rebuilt board also tells a routed board-keeper, the same bounded way, when
-# its Captain's Call set (the `key` of each `captains_call` card in the payload)
-# differs from the set saved in state/.board-refresh.calls: one message naming
+# its Captain's Call set (the `key` of each `captains_call` card in the built
+# board data, the `data:` file build prints, so a card build held back into
+# cards to fix or dropped as landed never counts) differs from the set saved in state/.board-refresh.calls: one message naming
 # the keys that joined and left. An unchanged set sends nothing; with no saved
 # set (the first rebuild) every key has joined. The set is saved after the send
 # is attempted, and only while a board-keeper is routed.
@@ -236,11 +237,18 @@ The bearings board build is failing."
 }
 
 # After a rebuild, tell board-keeper which Captain's Call keys joined and left
-# since the last set it was told (see header).
-notify_call_change() {  # <payload file>
-  local keys old joined left
+# since the last set it was told (see header). It reads the built board data,
+# not the payload, because build moves a card that does not state its decision
+# out of Captain's Call into cards to fix, which the captain cannot answer.
+notify_call_change() {  # <built board data file>
+  local keys old joined left data
   board_keeper_routed || return 0
-  keys=$(jq -r '.captains_call[]?.key // empty' "$1" 2>/dev/null | LC_ALL=C sort -u) || return 0
+  [ -f "$1" ] || return 0
+  data=$(cat -- "$1") || return 0
+  data=${data#"window.FM_BEARINGS_BOARD_DATA = "}
+  data=${data%;}
+  keys=$(printf '%s\n' "$data" | jq -r '.captains_call[]?.key // empty' 2>/dev/null | LC_ALL=C sort -u) \
+    || return 0
   if [ -f "$CALLS" ]; then
     old=$(cat "$CALLS" 2>/dev/null) || return 0
     [ "$old" != "$keys" ] || return 0
@@ -385,7 +393,7 @@ refresh_once() {
   if out=$("$SCRIPT_DIR/fm-bearings-board.sh" build --no-reopen "$tmp" 2>&1); then
     rm -f "$NOTIFIED"
     log "rebuilt board"
-    notify_call_change "$tmp"
+    notify_call_change "$(printf '%s\n' "$out" | sed -n 's/^data: //p' | head -n 1)"
     rm -f "$tmp"
     return 0
   fi
