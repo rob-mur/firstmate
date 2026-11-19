@@ -150,9 +150,10 @@
 #
 # CAPTAIN'S CALL SHOWS EVERYTHING WAITING ON THE CAPTAIN, including items
 # firstmate never held. Any card (decision, merge, credential) MAY carry `links`,
-# up to 8 pointers to the page the captain acts on: `{url, label}` or
+# up to 24 pointers to what the captain acts on: `{url, label}`,
 # `{page, label}`, where page is a board page id (the slug bin/fm-board-page.sh
-# registers). A link url is https, or http only on the tailnet Lavish origin
+# registers), or `{path, label}`, an absolute file path the card cites, shown as
+# text because the board cannot open a local file. A link url is https, or http only on the tailnet Lavish origin
 # http://dev-1.tailf848b0.ts.net:4387 (exact host and port, then `/`, `?`, `#`
 # or the end); every other http url refuses. A card whose key is not a captain-
 # held task id is kept, because hygiene only drops a decision card it can
@@ -370,11 +371,13 @@ validate_payload() {  # <data.json>
       (has("links") | not)
       or (.links
         | type == "array"
-          and length <= 8
+          and length <= 24
           and ([.[]
             | type == "object"
               and ((((keys - ["url", "label"]) | length == 0) and (.url | link_url))
-                or (((keys - ["page", "label"]) | length == 0) and (.page | page_id)))
+                or (((keys - ["page", "label"]) | length == 0) and (.page | page_id))
+                or (((keys - ["path", "label"]) | length == 0)
+                  and (.path | type == "string" and test("^/[^[:space:]]+$"))))
               and optional_string("label")] | all));
     def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
     def optional_subject:
@@ -580,9 +583,10 @@ attach_page_links() {  # <pages-json>
       | [ pages_for($c)[] | {page: .id, label: .title} ] as $auto
       | if ($auto | length) == 0 then .
         else .links = ( [ (.links // [])[] | select(has("page")) ] + $auto + [ (.links // [])[] | select(has("page") | not) ]
-                        | reduce .[] as $l ([]; ($l.url // ("page:" + $l.page)) as $k
-                                                | if any(.[]; (.url // ("page:" + .page)) == $k) then . else . + [$l] end)
-                        | .[:8] ) end)
+                        | def link_key: .url // (if has("page") then "page:" + .page else "path:" + (.path // "") end);
+                          reduce .[] as $l ([]; ($l | link_key) as $k
+                                                | if any(.[]; link_key == $k) then . else . + [$l] end)
+                        | .[:24] ) end)
     | def with_page: . as $r | (pages_for($r)[0] // null) as $p
         | if $p != null and has("context") then .context.page = {id: $p.id, title: $p.title} else . end;
       (if has("waiting") then .waiting |= map(with_page) else . end)
