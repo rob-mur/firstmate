@@ -642,6 +642,17 @@ def answered(key: str) -> bool:
     return (SEEN / f"{key}.answered").exists()
 
 
+def reraised(key: str, card: dict) -> bool:
+    """A live call asked again after the captain answered it: a new question or a later raise time
+    than the copy the card was built from."""
+    saved = SEEN / f"{key}.json"
+    if not saved.exists():
+        return False
+    old = json.loads(saved.read_text())
+    return (squash(old.get("question")) != squash(card.get("question"))
+            or (card.get("raised_at") or "") > (old.get("raised_at") or ""))
+
+
 def collect(live: dict, settled: set[str], now: str) -> list[dict]:
     """Record every saved, unrecorded answer and acknowledge it in its card."""
     # Answers are compared with their whitespace squashed: an older run kept a different set of blank
@@ -707,6 +718,11 @@ def build(live: dict, settled: set[str], reports: dict | None = None) \
     notes: dict[str, list[str]] = {}
     checked = True
     for key, card in live.items():
+        if answered(key) and reraised(key, card):
+            # The worker asked again under the same key: the answer settled the old question only.
+            (SEEN / f"{key}.answered").unlink(missing_ok=True)
+            card_path(key).unlink(missing_ok=True)
+            (SEEN / f"{key}.md").unlink(missing_ok=True)
         if answered(key):
             continue  # the captain wrote in it: leave it alone
         content = card_content(card, key in settled)
