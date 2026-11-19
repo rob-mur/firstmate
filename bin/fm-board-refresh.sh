@@ -90,7 +90,10 @@
 #     state or the template changes again or the signature ages out.
 # A failed build is logged to state/.board-refresh.log (last 20 lines kept, a
 # repeated skip logged once) and never changes the caller's exit status beyond
-# this script's own.
+# this script's own. A refused build's log line carries the build's reason,
+# which for a payload that breaks the board contract names the first failing
+# item and its fields, and the refused payload is kept, mode 0600, at
+# state/.board-refresh.refused.json (replacing any older one) to diagnose.
 # When data/secondmates.md routes a board-keeper secondmate, the first failed
 # build of an episode (a payload that failed or a build that was refused) also
 # sends board-keeper that log line through bin/fm-send.sh, bounded to
@@ -123,6 +126,7 @@ LAVISH_DIR="$STATE/.board-refresh.lavish-dir"
 LOG="$STATE/.board-refresh.log"
 NOTIFIED="$STATE/.board-refresh.failure-notified"
 CALLS="$STATE/.board-refresh.calls"
+REFUSED="$STATE/.board-refresh.refused.json"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DEBOUNCE="${FM_BOARD_REFRESH_DEBOUNCE:-3}"
@@ -397,7 +401,9 @@ refresh_once() {
     rm -f "$tmp"
     return 0
   fi
-  rm -f "$tmp"
+  if ! { chmod 600 "$tmp" && mv -f "$tmp" "$REFUSED"; } 2>/dev/null; then
+    rm -f "$tmp"
+  fi
   log_failure "board build refused: $(printf '%s' "$out" | tail -n 1)"
   return 1
 }
