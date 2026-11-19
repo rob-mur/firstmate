@@ -669,6 +669,45 @@ test_a_numbered_option_card_renders_its_buttons() {
   pass "a numbered (1, recommended) option card renders its buttons"
 }
 
+# A worker decision whose reason marks an option "(a, recommended)" renders that
+# option with the recommendation pill and no other option with it, whether its
+# later marks follow a full stop or run inline after words. The cards come from
+# real lines: the aegis-879 review, the runner FUSE apply, and the ForgeArm
+# design hold.
+test_an_a_recommended_option_renders_as_the_recommendation() {
+  local home snap p out mr fuse arm
+  home=$(make_home a-recommended)
+  mr='Review of https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/879 is done and nothing is posted (verdict: request changes, small; low danger, seed-only, prod never mounts the seed router; one blocker: the default 10-claim seed shows 8 of 16 status pairs, and the description claims code for claims 2-4 that the branch lacks). Which held comments do you want posted, numbered in data/aegis-879-review/report.md? (a, recommended) Post 1, 2, 3, 4, 6 with request changes (b) Post 1-4 and 6-10 (adds the test gaps) (c) Post all 12 (d) Post none. Firstmate: the inventory is this one call, please register it and attest completion.'
+  fuse='May the two FUSE cluster changes be applied live now, before the FUSE PR opens? (a, recommended) the worker plans again and applies only if the plans are unchanged: infra/shared = 1 in-place change, adding node-pool label clusterautoscaler-nodetemplate-resources.squat.ai/fuse=10 with no node-pool replacement; infra/cluster = 1 add, the FUSE device-plugin DaemonSet (about 50m CPU and 20Mi). After that it opens the PR, and that PR'"'"'s FUSE job, started with the pool at zero, is the scale-from-zero check. (b) open the PR first and apply later: its FUSE job cannot be scheduled and blocks all cluster dispatch for up to 1 h. (c) apply only the DaemonSet now and hold the node label: FUSE jobs then run only while another job keeps a node up. No new spend in any option. Branch: https://forgejo.clarob.uk/rob/runner-image/src/branch/fm/runner-fuse-ship (via-helper)'
+  arm='captain hold cd-forge-arm-lab: Which ForgeArm acceptance design should we build first? (a, recommended) a test that starts a throwaway Forgejo, runs the real arm on new, existing and already-armed repo shapes, and compares the result with a reviewed golden per shape, plus cheap static checks of the seeded files against the pipeline they call; about 60 s, so you review a diff instead of re-running the arm. (b) the static checks alone now, then decide after measuring what they miss. (c) shapes and goldens on today'"'"'s fake forge only, with no new infrastructure. (d) the full stack with a runner, on main only, with the highest upkeep. https://forgejo.clarob.uk/rob/continuous-delivery/issues/932'
+  snap="$home/snapshot.json"
+  jq -n --arg mr "$mr" --arg fuse "$fuse" --arg arm "$arm" '{schema:"fm-bearings.v1", home:"/fixture/home", generated:"2026-11-19T07:34:00Z",
+    prs:"unchecked", in_flight:[], charted:[], landed:[],
+    decisions_open:[
+      {id:"aegis-879-review", key:"status.aegis-879-review.mr879-comments", verb:"needs-decision", source:"status",
+       task:"aegis-879-review", decision_key:"mr879-comments", owner:"(main)", reason_full:$mr},
+      {id:"runner-fuse", key:"status.runner-fuse.runner-fuse-apply", verb:"needs-decision", source:"status",
+       task:"runner-fuse", decision_key:"runner-fuse-apply", owner:"(main)", reason_full:$fuse},
+      {id:"cd-forge-arm", key:"status.cd-forge-arm.captain-hold-cd-forge-arm-lab-1", verb:"needs-decision", source:"status",
+       task:"cd-forge-arm", decision_key:"captain-hold-cd-forge-arm-lab-1", owner:"(main)", reason_full:$arm}]}' > "$snap"
+  # The lines link a real MR and issue; the live forge check is off so their
+  # later state does not drop the cards.
+  p=$(FM_HOME="$home" FM_BEARINGS_BOARD_PR_CHECK=0 "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot "$snap") || fail "the payload generator failed"
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -c .captains_call <<<"$p")" 2>"$home/build.err")
+  ! grep -q 'undecided-card' "$home/build.err" || fail "the build flagged an (a, recommended) card: $(cat "$home/build.err")"
+  printf '%s' "$out" | jq -e '
+    def card($k): .call[] | select(.key == $k);
+    def recs($k): [card($k).options[] | select(.rec) | .value];
+    .error == ""
+      and recs("status.aegis-879-review.mr879-comments") == ["option-a"]
+      and recs("status.runner-fuse.runner-fuse-apply") == ["option-a"]
+      and recs("status.cd-forge-arm.captain-hold-cd-forge-arm-lab-1") == ["option-a"]
+      and ([card("status.aegis-879-review.mr879-comments").options[] | select(.aside | not) | .label]
+           == ["Post 1, 2, 3, 4, 6 with request changes", "Post 1-4 and 6-10 (adds the test gaps)", "Post all 12", "Post none"])
+  ' >/dev/null || fail "an (a, recommended) option did not render as the recommendation: $out"
+  pass "an (a, recommended) option renders as the card recommendation"
+}
+
 # Clicking a card's page button shows that page inside the board's own tab.
 test_a_card_page_button_shows_the_page_in_place() {
   local home page out
@@ -792,6 +831,7 @@ test_a_page_backed_decision_is_answered_on_the_board_when_its_page_is_not_there
 test_reconcile_renders_apart_from_the_full_options
 test_a_worker_decision_card_always_has_an_answer_box_above_reconcile
 test_a_numbered_option_card_renders_its_buttons
+test_an_a_recommended_option_renders_as_the_recommendation
 test_a_card_page_button_shows_the_page_in_place
 test_full_screen_keeps_the_same_page_frame
 test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent
