@@ -1640,6 +1640,7 @@ test_a_link_label_right_before_a_question_mark_keeps_no_space() {
 }
 
 # The real status lines of these tests, each the reason after its "[at=...]: ".
+MR879_LINE="needs-decision [key=mr879-comments] [at=1795093937]: Blocker withdrawn: the seed reaches all 16 status pairs (60 claims at seed 42; the preview https://aegis-879.dev.descartesunderwriting.fr/ runs head 2ce8982c), so the verdict is now approve with comments. Which comments should go on https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/879? (a) recommended: 1,2,3,4 with Approve; (b) 1,2,3,4 plus test gaps 6-9; (c) another list of numbers; (d) none. Report: /home/rob/repos/firstmate/data/aegis-879-review/report.md"
 DEPLOY_LINE="needs-decision [at=1795094034] [key=deploy-actions-busy]: Forgejo Actions never went idle in the 1 h wait (12:13-13:13Z; new continuous-delivery runs kept starting, 1-5 running and 1-9 waiting each minute; now 1 running ci:acceptance from run 10250 and 1 waiting ci:deploy; the upload queue is 0), so how should I deploy 0237139 (PR https://github.com/rob-mur/immich-config/pull/133)? (a) recommended: deploy at the first minute no job is running, leaving waiting jobs to start after the reboot, and if that does not happen within 30 min deploy anyway; (b) deploy now and accept that the reboot kills the running ci:acceptance job; (c) wait up to 1 more hour for a minute with no running or waiting job."
 PDM_LINE="needs-decision [key=captain-hold-pdm-registry-ns-1] [at=1795093479]: captain hold pdm-registry-ns: Will you read and dismiss the acknowledgement review on https://forgejo.clarob.uk/rob/proton-drive-mount/pulls/135 ? It changes only devenv.nix: build records move to the shared registry prefix with namespace proton-drive-mount, as continuous-delivery #810 requires. CI is green and published to the shared registry. Once you dismiss it, I merge."
 
@@ -1675,6 +1676,23 @@ test_a_link_label_never_doubles_its_kind_word() {
   assert_equals "Will you read and dismiss the acknowledgement review on PR 135?" "$(jq -r .question <<<"$card")" \
     "the question keeps the link label before its question mark"
   pass "a link label never doubles its kind word"
+}
+
+# A long asking sentence that ends in a clause which asks ("..., so how should I
+# deploy X?") is headed by that clause, whole, not by its truncated start.
+test_a_long_asking_sentence_is_headed_by_the_clause_that_asks() {
+  local card
+  card=$(real_line_card ask-deploy immich-runner-dns-bump "$DEPLOY_LINE")
+  assert_equals "immich-runner-dns-bump: How should I deploy 0237139 (PR 133)?" "$(jq -r .title <<<"$card")" \
+    "the title is the clause that asks"
+  jq -e '(.question // null) == null or .question == "How should I deploy 0237139 (PR 133)?"' <<<"$card" >/dev/null \
+    || fail "the question is not the clause that asks: $card"
+  jq -e '.about | startswith("Forgejo Actions never went idle")' <<<"$card" >/dev/null \
+    || fail "the about lost the context before the asking clause: $card"
+  card=$(real_line_card ask-mr879 aegis-879-review "$MR879_LINE")
+  assert_equals "Which comments should go on MR 879?" "$(jq -r .question <<<"$card")" \
+    "a question that is not the first sentence is still the heading"
+  pass "a long asking sentence is headed by the clause that asks"
 }
 
 # A secondmate decision is answered from its card: options the reason marks
@@ -1817,4 +1835,5 @@ fm_test_run \
   test_an_abbreviation_never_ends_the_card_question \
   test_a_sentence_addressed_to_firstmate_never_reaches_the_card \
   test_a_link_label_right_before_a_question_mark_keeps_no_space \
-  test_a_link_label_never_doubles_its_kind_word
+  test_a_link_label_never_doubles_its_kind_word \
+  test_a_long_asking_sentence_is_headed_by_the_clause_that_asks
