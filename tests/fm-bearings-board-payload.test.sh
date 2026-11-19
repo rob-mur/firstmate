@@ -1266,7 +1266,8 @@ test_annotated_decisions_offer_their_own_full_options_in_captain_terms() {
   card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
   opts() { card "$1" | jq -r '[.options[].label] | join("|")'; }
   assert_equals "Merge PR 13" "$(card ci-onboard | jq -r .question)" "a numbered list heading comes from the sentence that introduces it"
-  assert_equals "Add the CD_PIPELINE_TOKEN secret, then merge once all checks pass (recommended)|Merge now and skip the one failing check" "$(opts ci-onboard)" "numbered options are the choices, not approve and decline"
+  assert_equals "Add the CD_PIPELINE_TOKEN secret, then merge once all checks pass|Merge now and skip the one failing check" "$(opts ci-onboard)" "numbered options are the choices, not approve and decline"
+  assert_equals "option-1" "$(card ci-onboard | jq -r .recommend_value)" "a trailing (recommended) marks its option as the recommendation"
   assert_equals "Keep it|Drop it: close PR 89 and #68; if anything needs it, dotfiles wait for the folder to mount" "$(opts ready-signal)" "a long option is kept in full"
   assert_equals "Recommendation: 2, since the mount never needs systemd." "$(card ready-signal | jq -r .about)" "the body does not repeat the heading or the options"
   assert_equals "3" "$(card status.cd.gate-part2 | jq '.options | length')" "the third lettered option is not lost"
@@ -1695,6 +1696,102 @@ test_a_long_asking_sentence_is_headed_by_the_clause_that_asks() {
   pass "a long asking sentence is headed by the clause that asks"
 }
 
+# "(a) recommended: ..." marks option a as the recommendation exactly as
+# "(a, recommended)" does, and the label drops "recommended:".
+test_an_a_recommended_colon_option_is_the_recommendation() {
+  local card
+  card=$(real_line_card rec-mr879 aegis-879-review "$MR879_LINE")
+  assert_equals "option-a" "$(jq -r .recommend_value <<<"$card")" "(a) recommended: is the recommendation"
+  assert_equals "1,2,3,4 with Approve|1,2,3,4 plus test gaps 6-9|Another list of numbers|none" \
+    "$(jq -r '[.options[] | select(.value | startswith("option-")) | .label] | join("|")' <<<"$card")" \
+    "the labels carry no recommended:"
+  card=$(real_line_card rec-deploy immich-runner-dns-bump "$DEPLOY_LINE")
+  assert_equals "option-a" "$(jq -r .recommend_value <<<"$card")" "(a) recommended: is the recommendation"
+  jq -e '[.options[].label] | (.[0] | startswith("Deploy at the first minute")) and (map(test("recommended"; "i")) | any | not)' \
+    <<<"$card" >/dev/null || fail "an option label kept recommended:: $card"
+  pass "an (a) recommended: option is the recommendation"
+}
+
+# The real mr887-comments and mr888-comments lines: a note to firstmate or a
+# report and page pointer after the last option, an "(a, recommended)" or a
+# trailing "(recommended)" mark, a local path in a parenthesis before "?",
+# and a report path the card carries.
+MR887_LINE=$(cat <<'EOF_LINE'
+needs-decision [key=mr887-comments] [at=1795095263]: Which held comments should go on MR 887 (verdict: request changes, small; the fix works but the call sites are untested and the automatic 100 is stored like a user override; numbered in /home/rob/repos/firstmate/data/aegis-887-review/report.md)? (a, recommended) Post 1, 2, 3, 4, 5 with request changes (b) Post 1-5 plus 6 (pre-existing advisory) and 7 (human checks) (c) Post all 9 (d) Post none. https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/887 Firstmate: the inventory is this one call, please register it and attest completion.
+EOF_LINE
+)
+MR887_POINTERS_LINE=$(cat <<'EOF_LINE'
+needs-decision [key=mr887-comments] [at=1795095537]: Which held comments should go on MR 887? Verdict: request changes, small. The fix works, but the recommended comments ask for tests on the two call sites, fix the stored 100 that a null, a policy change or a cleared override gets wrong, and drop the MCP server from the doc. (a, recommended) Post 1, 2, 3, 4, 5 with request changes (b) Post 1-7, adding the pre-existing advisory and the human-checks note (c) Post all 9 (d) Post none. https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/887 Report: /home/rob/repos/firstmate/data/aegis-887-review/report.md Architecture page: board tab 'Architecture: MR 887 net-only claims'.
+EOF_LINE
+)
+MR888_LINE=$(cat <<'EOF_LINE'
+needs-decision [at=1795094938] [key=mr888-comments]: Which held review comments should go on MR 888 (verdict: request changes, small; numbered comments in /home/rob/repos/firstmate/data/aegis-888-review/report.md)? a) post 1, 2, 3 as a request-changes review (recommended) b) post 1, 2, 3 and the pre-existing advisory 5 c) post all six d) post none https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/888
+EOF_LINE
+)
+MR888_POINTERS_LINE=$(cat <<'EOF_LINE'
+needs-decision [at=1795095539] [key=mr888-comments]: Which review comments should go on MR 888? Verdict: request changes, small; the fix is right but the new word "entry" is a glossary term to avoid, the doc row's advice only fits a payment, and the wording check belongs in its own test. (a, recommended) post comments 1, 2 and 3 as a request-changes review (b) post 1, 2, 3 and the advisory 5 about the existing 0.00 EUR deficit display (c) post all six comments (d) post nothing https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/888 — report: /home/rob/repos/firstmate/data/aegis-888-review/report.md; architecture page: board tab "Architecture: MR 888 reserve-floor wording"
+EOF_LINE
+)
+
+# Nothing after the last option's own words reaches that option: not a note to
+# firstmate after the link, and not the report or page pointer after it.
+test_the_last_option_ends_at_its_own_words() {
+  local card
+  card=$(real_line_card last-887 aegis-887-review "$MR887_LINE")
+  assert_equals "Post none" "$(jq -r '.options[] | select(.value == "option-d") | .label' <<<"$card")" "887: option d"
+  jq -e '[.title, .question, .about, .context.reason, (.options[].label)] | map(. // "") | any(test("Firstmate[:,]")) | not' \
+    <<<"$card" >/dev/null || fail "a note to firstmate after a link reached the card: $card"
+  card=$(real_line_card last-887p aegis-887-review "$MR887_POINTERS_LINE")
+  assert_equals "Post none" "$(jq -r '.options[] | select(.value == "option-d") | .label' <<<"$card")" "887 pointers: option d"
+  card=$(real_line_card last-888p aegis-888-review "$MR888_POINTERS_LINE")
+  assert_equals "Post nothing" "$(jq -r '.options[] | select(.value == "option-d") | .label' <<<"$card")" "888 pointers: option d"
+  pass "the last option ends at its own words"
+}
+
+# "(a, recommended) ..." and "a) ... (recommended)" both mark option a, and
+# the label keeps no "(recommended)".
+test_both_recommended_marks_reach_the_card() {
+  local card name line
+  for name in 887 888; do
+    if [ "$name" = 887 ]; then line=$MR887_LINE; else line=$MR888_LINE; fi
+    card=$(real_line_card "rec2-$name" "aegis-$name-review" "$line")
+    assert_equals "option-a" "$(jq -r .recommend_value <<<"$card")" "$name: option a is the recommendation"
+    jq -e '[.options[].label] | map(test("recommended"; "i")) | any | not' <<<"$card" >/dev/null \
+      || fail "$name: an option label kept the recommended mark: $card"
+  done
+  pass "both recommended marks reach the card"
+}
+
+# A question that ends in a long parenthesis before "?" is never cut inside
+# it: the parenthesis is dropped whole and stays in the about.
+test_a_parenthesis_before_the_question_mark_is_never_cut() {
+  local card name line title
+  for name in 887 888; do
+    if [ "$name" = 887 ]; then
+      line=$MR887_LINE title="aegis-887-review: Which held comments should go on MR 887?"
+    else
+      line=$MR888_LINE title="aegis-888-review: Which held review comments should go on MR 888?"
+    fi
+    card=$(real_line_card "paren-$name" "aegis-$name-review" "$line")
+    assert_equals "$title" "$(jq -r .title <<<"$card")" "$name: the title keeps the asking words whole"
+    jq -e '[.title, .question] | map(. // "") | any(test("[(][^)]*$")) | not' <<<"$card" >/dev/null \
+      || fail "$name: the title or question ends inside an open parenthesis: $card"
+    jq -e '.about | test("report[.]md[)][?]")' <<<"$card" >/dev/null \
+      || fail "$name: the about lost the whole parenthesis: $card"
+  done
+  pass "a parenthesis before the question mark is never cut"
+}
+
+# A local report path the reason names is the card's report.
+test_a_report_path_in_the_text_is_the_card_report() {
+  local card
+  card=$(real_line_card report-887 aegis-887-review "$MR887_LINE")
+  assert_equals "/home/rob/repos/firstmate/data/aegis-887-review/report.md" "$(jq -r .context.report <<<"$card")" "887: report"
+  card=$(real_line_card report-888p aegis-888-review "$MR888_POINTERS_LINE")
+  assert_equals "/home/rob/repos/firstmate/data/aegis-888-review/report.md" "$(jq -r .context.report <<<"$card")" "888 pointers: report"
+  pass "a report path in the text is the card report"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -1836,4 +1933,9 @@ fm_test_run \
   test_a_sentence_addressed_to_firstmate_never_reaches_the_card \
   test_a_link_label_right_before_a_question_mark_keeps_no_space \
   test_a_link_label_never_doubles_its_kind_word \
-  test_a_long_asking_sentence_is_headed_by_the_clause_that_asks
+  test_a_long_asking_sentence_is_headed_by_the_clause_that_asks \
+  test_an_a_recommended_colon_option_is_the_recommendation
+  test_the_last_option_ends_at_its_own_words
+  test_both_recommended_marks_reach_the_card
+  test_a_parenthesis_before_the_question_mark_is_never_cut
+  test_a_report_path_in_the_text_is_the_card_report
