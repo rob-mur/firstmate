@@ -51,6 +51,10 @@
 # clean_reason: reason text as the captain reads it - every `corr=<hex>`
 # correlation token and a leading "captain hold <id>: " label removed.
 #
+# sentences: a text split into its sentences, each without leading space. A
+# sentence ends at ".", "?" or "!" before a space or the end of the text, but
+# never at the "." of an abbreviation - e.g., i.e., etc. or vs. (any case).
+#
 # option_parse: a reason that lists its own options, split into {lead, options,
 # tail} - lead is the text before the first option, tail the text after the
 # last, and each option is {value, label}. The forms, tried in order, are
@@ -107,7 +111,7 @@
 #      yes-or-no go-ahead and becomes approve and decline.
 # The done and not-done values are the captain's report, recorded as the
 # answer text; neither sets a close mode, so neither reads as a release.
-# The asking sentence is the last sentence before the first question mark.
+# The asking sentence is the last sentence (sentences) before the first question mark.
 # The board's `build` appends the standard reconcile choice after these, and a
 # payload never authors it.
 # shellcheck disable=SC2016  # jq program text, not shell expansion
@@ -117,6 +121,8 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
     | gsub("(?<![^[:space:]])corr=[0-9a-f]+(?:[[:space:]]+|$)"; "")
     | sub("^[[:space:]]+"; "")
     | sub("^captain hold [^:]+: "; "");
+  def sentences:
+    [ scan("[^[:space:]].*?(?:(?:[?!]|(?<!\\b[eE]\\.g)(?<!\\b[iI]\\.e)(?<!\\b[eE]tc)(?<!\\b[vV]s)\\.)(?=[[:space:]]|$)|$)") ];
   def choice_label:
     gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?]"; "")
     | gsub("[[:space:]]+"; " ")
@@ -271,7 +277,7 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
     action_led("dismiss|merge|run|re-?run|log[[:space:]]?in(to)?|sign[[:space:]]?in(to)?|re-?auth(enticate)?|re-?login");
   def is_merge_ask($d):
     (($d.reason_full // $d.reason // $d.question // "") | clean_reason) as $q
-    | ($q | (split("?")[0] // "") | split(". ") | (last // "")) as $sentence
+    | ($q | (split("?")[0] // "") | sentences | (last // "")) as $sentence
     | is_review($d)
       or (($q | test("\\?")) and ($sentence | test("(^|[^a-z])merge([^a-z-]|$)"; "i")))
       or (($q | test("\\?")) and ($sentence
@@ -282,7 +288,7 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
   def default_options($d):
     (($d.reason_full // $d.reason // $d.question // "") | clean_reason) as $q
     | ($q | option_parse) as $parsed
-    | ($q | (split("?")[0] // "") | split(". ") | (last // "") | split(": ") | (last // "")
+    | ($q | (split("?")[0] // "") | sentences | (last // "") | split(": ") | (last // "")
        | sub("^[[:space:]]+"; "")) as $sentence
     | ($sentence | (split(" ")[0] // "") | ascii_downcase | gsub("[^a-z]"; "")) as $first
     | [ $sentence | split(" or ")[] ] as $alts
