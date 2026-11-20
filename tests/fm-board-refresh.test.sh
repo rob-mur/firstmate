@@ -9,6 +9,9 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The board build reads the live state of each PR/MR a card links; keep it
+# off the network.
+export FM_BEARINGS_BOARD_PR_CHECK=0
 
 REFRESH="$ROOT/bin/fm-board-refresh.sh"
 BOARD="$ROOT/bin/fm-bearings-board.sh"

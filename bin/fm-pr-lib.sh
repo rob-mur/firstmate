@@ -1570,6 +1570,44 @@ fm_pr_viewer_approved() {  # github <host> <owner> <repo> <number> | gitlab|forg
   esac
 }
 
+# One bounded live read of a PR/MR url's state, for a caller that only needs to
+# know whether the change is still open. Prints "<url>\t<state>" with state
+# merged, closed, approved or open, or nothing when the url is not a GitHub,
+# GitLab or Forgejo PR/MR, the forge tool is missing, the read fails, or it
+# outlasts <seconds>; a caller reads nothing as unknown and keeps its card.
+# With <review> 1 an open PR/MR reads "approved" when fm_pr_viewer_approved
+# says the authenticated user approved it. Needs fm_run_timed
+# (bin/fm-timeout-lib.sh), which it sources when the caller has not.
+fm_pr_live_state() {  # <url> <seconds> [<review 0|1>]
+  local url=$1 seconds=$2 review=${3:-0} record state merged approved
+  fm_pr_url_parse "$url" || return 0
+  case "$FM_PR_PROVIDER" in
+    github) set -- github "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" ;;
+    gitlab|forgejo) set -- "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" ;;
+    *) return 0 ;;
+  esac
+  if ! declare -F fm_run_timed >/dev/null; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$_FM_PR_LIB_ROOT/bin/fm-timeout-lib.sh" || return 0
+  fi
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  record=$(fm_run_timed "$seconds" bash -c '
+    . "$1"; review=$2; p=$3; shift 3
+    "fm_pr_${p}_read_record" "$@" || exit 1
+    printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
+    if [ "$review" = 1 ] && fm_pr_viewer_approved "$p" "$@"; then echo approved=true; fi
+  ' _ "$_FM_PR_LIB_ROOT/bin/fm-pr-lib.sh" "$review" "$@" 2>/dev/null) || return 0
+  state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1 | tr '[:upper:]' '[:lower:]')
+  merged=$(printf '%s\n' "$record" | sed -n 's/^merged=//p' | head -1)
+  approved=$(printf '%s\n' "$record" | sed -n 's/^approved=//p' | head -1)
+  if [ "$merged" = true ] || [ "$state" = merged ]; then state=merged
+  elif [ "$state" = closed ]; then state=closed
+  elif [ "$state" = open ] || [ "$state" = opened ]; then
+    if [ "$approved" = true ]; then state=approved; else state=open; fi
+  else return 0; fi
+  printf '%s\t%s\n' "$url" "$state"
+}
+
 fm_pr_gerrit_read_change() {  # <host> <number>
   local host=$1 number=$2 json
   command -v gerrit-axi >/dev/null 2>&1 || return 1

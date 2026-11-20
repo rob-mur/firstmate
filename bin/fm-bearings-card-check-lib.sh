@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Shared "does this Captain's Call card state its decision" check.
 # Usage: . bin/fm-bearings-card-check-lib.sh; then call
-#   fm_bearings_undecided_cards <data.json>
+#   fm_bearings_card_link_states <data.json>
+#   fm_bearings_undecided_cards <data.json> [<link-states.json>]
 #   fm_bearings_status_decision_problem <task> <key> <note>
 #
 # ONE OWNER for the card check. bin/fm-bearings-board.sh `build` holds back
@@ -38,11 +39,29 @@
 # repeated within `links`, name the card. A `pr_url` repeated exactly in
 # `links` is not a duplicate: the board shows it once, and the payload builder
 # emits that shape whenever a reason cites the task's own PR.
+# A card must not ask about a PR/MR that is already over: a `links` url or
+# `pr_url` that the live link states name merged or closed names the card, so
+# a card written after its merge request merged cannot ask for its review.
 #
-# fm_bearings_undecided_cards <data.json>: print one `<key>: <problem>` line
-# per Captain's Call card in an fm-bearings-board.v1 payload that fails the
-# rule, <problem> being `missing <field> (<why>)[, <field> (<why>)]` and/or
-# `duplicate link (<url> ...)`, joined by `; `.
+# fm_bearings_card_link_states <data.json>: read the live state of every
+# GitHub, GitLab or Forgejo PR/MR url the Captain's Call cards (merge cards
+# aside) link, each url once, so one build reads each url once, in parallel,
+# each bounded by FM_BEARINGS_BOARD_PR_TIMEOUT seconds (default 5), at most
+# FM_BEARINGS_BOARD_PR_MAX urls (default 24), through fm_pr_live_state in
+# bin/fm-pr-lib.sh. Prints a JSON object of the urls (trailing slashes and
+# `#fragment` dropped) that read merged or closed, mapped to that state. A url
+# that is not a PR/MR, an unknown host, a missing forge tool, or a failed or
+# slow read records nothing, so the card is left alone.
+# FM_BEARINGS_BOARD_PR_CHECK=0 skips every read and prints `{}`. Only the board
+# build calls this. The watcher checks each needs-decision line as it lands,
+# and a forge read of up to the timeout per url there would stall it, so the
+# bounce check reads no link state and the next build catches a stale link.
+#
+# fm_bearings_undecided_cards <data.json> [<link-states.json>]: print one
+# `<key>: <problem>` line per Captain's Call card in an fm-bearings-board.v1
+# payload that fails the rule, <problem> being `missing <field> (<why>)[, ...]`,
+# `duplicate link (<url> ...)` and/or `names <url>, already merged|closed`
+# (from the link states fm_bearings_card_link_states printed), joined by `; `.
 #
 # fm_bearings_status_decision_problem <task> <key> <note>: check one worker
 # status needs-decision line - <key> its decision key ("default" when the line
@@ -54,14 +73,55 @@
 # forge read off, and applies fm_bearings_undecided_cards to the card it
 # yields. Exit 0 when the card states its decision or the line yields no card
 # (an announcement the board folds away); exit 1 after printing the card's
-# `missing ...` problem text, the same text the board files in cards_to_fix;
+# problem text, the same text the board files in cards_to_fix less any
+# merged or closed link, which only the build reads (fm_bearings_card_link_states);
 # exit 2 when the check itself could not run (jq or the payload builder
 # failed), which a caller must not read as a verdict.
 
 FM_BEARINGS_CARD_CHECK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-fm_bearings_undecided_cards() {  # <data.json>
+# The PR/MR-shaped urls a payload's Captain's Call cards link, merge cards
+# aside, normalised as link_norm does in fm_bearings_undecided_cards.
+fm_bearings_card_pr_urls() {  # <data.json>
   jq -r '
+    [ .captains_call[]? | select(.type != "merge")
+      | (.links[]?.url, .pr_url) | strings
+      | sub("#.*$"; "") | sub("/+$"; "")
+      | select(test("^https://[^[:space:]]+/(pull|pulls|-/merge_requests)/[0-9]+$")) ]
+    | unique[]' "$1"
+}
+
+fm_bearings_card_link_states() {  # <data.json>
+  local urls tmp u i=0 max timeout states
+  if [ "${FM_BEARINGS_BOARD_PR_CHECK:-1}" = 0 ]; then echo '{}'; return 0; fi
+  urls=$(fm_bearings_card_pr_urls "$1" 2>/dev/null) || urls=""
+  if [ -z "$urls" ]; then echo '{}'; return 0; fi
+  max=${FM_BEARINGS_BOARD_PR_MAX:-24}
+  timeout=${FM_BEARINGS_BOARD_PR_TIMEOUT:-5}
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-card-links.XXXXXX") || { echo '{}'; return 0; }
+  while IFS= read -r u; do
+    [ "$i" -lt "$max" ] || break
+    i=$((i + 1))
+    (
+      # shellcheck source=bin/fm-pr-lib.sh
+      . "$FM_BEARINGS_CARD_CHECK_DIR/fm-pr-lib.sh" && fm_pr_live_state "$u" "$timeout" 0
+    ) >"$tmp/$i" 2>/dev/null &
+  done <<EOF
+$urls
+EOF
+  wait
+  states=$(cat "$tmp"/* 2>/dev/null | jq -R -s '
+    split("\n") | map(select(length > 0) | split("\t") | select(.[1] == "merged" or .[1] == "closed")
+                      | {key: .[0], value: .[1]}) | from_entries' 2>/dev/null) || states=""
+  rm -rf -- "$tmp"
+  [ -n "$states" ] || states='{}'
+  printf '%s\n' "$states"
+}
+
+fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
+  local states='{}'
+  if [ -n "${2:-}" ]; then states=$(cat -- "$2") || return 1; fi
+  jq -r --argjson states "$states" '
     def text: if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end;
     def asks: text | contains("?");
     def link_norm: sub("#.*$"; "") | sub("/+$"; "");
@@ -84,6 +144,8 @@ fm_bearings_undecided_cards() {  # <data.json>
     | ( [ ([ $urls[], (.pr_url | strings | select(length > 0)) ] | unique | group_by(link_norm)[]
            | select(length > 1) | .[0] | link_norm),
           ($urls | group_by(.)[] | select(length > 1) | .[0] | link_norm) ] | unique ) as $dups
+    | ( [ $urls[], (.pr_url | strings | select(length > 0)) ] | map(link_norm) | unique
+        | map(select($states[.] != null) | "names \(.), already \($states[.])") ) as $over
     | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
          then "question (no question or decide prompt, and the title is not a question)"
          elif ($prompts | length) > 0 and (any($prompts[]; asks) | not)
@@ -104,7 +166,8 @@ fm_bearings_undecided_cards() {  # <data.json>
         (if ($raised | not) and ($linked | not)
          then "link (no link: re-hold with --link <url|page:id> or --no-link)" else empty end) ] as $missing
     | [ (if ($missing | length) > 0 then "missing \($missing | join(", "))" else empty end),
-        ($dups[] | "duplicate link (\(.) is listed more than once: keep one)") ]
+        ($dups[] | "duplicate link (\(.) is listed more than once: keep one)"),
+        $over[] ]
     | select(length > 0)
     | "\($key): \(join("; "))"
   ' "$1"
