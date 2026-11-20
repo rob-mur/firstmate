@@ -803,6 +803,121 @@ test_fire_and_forget_retry_is_quiet_without_the_flag() {
   pass "inbox: without config/wait-no-turns a fire-and-forget retry mark stays quiet"
 }
 
+# The one-call take (bin/fm-task-inbox-take.sh): every pending record printed
+# in numeric order with its file-name header, each moved into handled/ only
+# after printing, and the watcher ladder then sees an acknowledged inbox.
+TAKE="$ROOT/bin/fm-task-inbox-take.sh"
+
+test_take_prints_in_numeric_order_and_acknowledges() {
+  local state="$TMP_ROOT/take-order" dir out action n
+  dir="$state/t1.inbox"
+  mkdir -p "$dir/handled"
+  for n in 100 2 10; do
+    printf 'schema=fm-task-inbox.v1\nat=x\nbody-terminator=1\n--\nbody %s\n' "$n" > "$dir/$n.msg"
+  done
+  out=$("$TAKE" "$dir") || fail "take exited non-zero on a populated inbox"
+  assert_equals "=== 2.msg ===
+body 2
+=== end 2.msg ===
+=== 10.msg ===
+body 10
+=== end 10.msg ===
+=== 100.msg ===
+body 100
+=== end 100.msg ===" "$out" "take did not print records in numeric order with headers"
+  for n in 2 10 100; do
+    assert_absent "$dir/$n.msg" "take left $n.msg pending"
+    assert_present "$dir/handled/$n.msg" "take did not move $n.msg into handled/"
+  done
+  action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  assert_equals quiet "$action" "the watcher ladder still saw a pending record after take"
+  pass "take: prints 2, 10, 100 in numeric order and the move acknowledges for the watcher"
+}
+
+test_take_returns_exact_written_bodies() {
+  local state="$TMP_ROOT/take-body" out
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 $'first line\nsecond line' >/dev/null
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 $'keeps trailing\n\n' >/dev/null
+  out=$("$TAKE" "$state/t1.inbox"; printf x)
+  assert_equals "=== 001.msg ===
+first line
+second line
+=== end 001.msg ===
+=== 002.msg ===
+keeps trailing
+
+=== end 002.msg ===
+x" "$out" "take did not print format-aware bodies"
+  pass "take: prints each body through the format-aware reader"
+}
+
+test_take_empty_and_absent_inbox() {
+  local dir="$TMP_ROOT/take-empty/t1.inbox" out status=0
+  out=$("$TAKE" "$dir" 2>&1) || status=$?
+  expect_code 0 "$status" "take on an absent inbox"
+  assert_equals "No pending steering messages." "$out" "absent inbox did not print one line"
+  mkdir -p "$dir/handled"
+  out=$("$TAKE" "$dir" 2>&1) || status=$?
+  expect_code 0 "$status" "take on an empty inbox"
+  assert_equals "No pending steering messages." "$out" "empty inbox did not print one line"
+  out=$(FM_TASK_INBOX="$dir" "$TAKE" 2>&1) || status=$?
+  expect_code 0 "$status" "take defaulting to FM_TASK_INBOX"
+  assert_equals "No pending steering messages." "$out" "FM_TASK_INBOX default did not resolve"
+  pass "take: an empty or absent inbox prints one line and exits 0"
+}
+
+test_take_creates_missing_handled_dir() {
+  local dir="$TMP_ROOT/take-nohandled/t1.inbox" out
+  mkdir -p "$dir"
+  printf 'schema=fm-task-inbox.v1\nat=x\n--\nlegacy body' > "$dir/001.msg"
+  out=$("$TAKE" "$dir") || fail "take failed without handled/"
+  assert_contains "$out" "legacy body" "take did not print a legacy unterminated body"
+  assert_present "$dir/handled/001.msg" "take did not create handled/ and move the record"
+  pass "take: a missing handled/ is created before the move"
+}
+
+# A record that lands while take runs is printed in the same call. The arrival
+# is injected deterministically from a wrapper around the first mv.
+test_take_prints_a_message_arriving_mid_run() {
+  local state="$TMP_ROOT/take-midrun" fb real_mv out
+  fb="$TMP_ROOT/take-midrun-bin"
+  mkdir -p "$fb"
+  real_mv=$(command -v mv)
+  cat > "$fb/mv" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$fb/arrived" ]; then
+  : > "$fb/arrived"
+  FM_STATE_OVERRIDE="$state" bash -c '. "\$1"; fm_task_inbox_write "\$2" t1 "late arrival" >/dev/null' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$state"
+fi
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$fb/mv"
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "early" >/dev/null
+  out=$(PATH="$fb:$PATH" "$TAKE" "$state/t1.inbox") || fail "take failed with a mid-run arrival"
+  assert_present "$fb/arrived" "the mid-run arrival was never injected"
+  assert_equals "=== 001.msg ===
+early
+=== end 001.msg ===
+=== 002.msg ===
+late arrival
+=== end 002.msg ===" "$out" "take lost or misordered a mid-run arrival"
+  assert_present "$state/t1.inbox/handled/002.msg" "the mid-run arrival was not acknowledged"
+  assert_absent "$state/t1.inbox/002.msg" "the mid-run arrival stayed pending"
+  pass "take: a message arriving mid-run is printed and acknowledged in the same call"
+}
+
+# Printing comes before the move: when stdout is unwritable nothing is acknowledged.
+test_take_does_not_acknowledge_unprinted() {
+  local dir="$TMP_ROOT/take-unprinted/t1.inbox" status=0
+  mkdir -p "$dir/handled"
+  printf 'schema=fm-task-inbox.v1\nat=x\n--\nkeep me\n' > "$dir/001.msg"
+  "$TAKE" "$dir" > /dev/full 2>/dev/null || status=$?
+  [ "$status" -ne 0 ] || fail "take reported success with an unwritable stdout"
+  assert_present "$dir/001.msg" "take acknowledged a record it could not print"
+  pass "take: a record it could not print stays pending"
+}
+
 test_ring_ladder_policy() {
   local state rec action
   state="$TMP_ROOT/ladder/state"; mkdir -p "$state"
@@ -1390,6 +1505,12 @@ test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
+test_take_prints_in_numeric_order_and_acknowledges
+test_take_returns_exact_written_bodies
+test_take_empty_and_absent_inbox
+test_take_creates_missing_handled_dir
+test_take_prints_a_message_arriving_mid_run
+test_take_does_not_acknowledge_unprinted
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
