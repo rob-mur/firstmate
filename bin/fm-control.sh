@@ -92,6 +92,8 @@
 #              A replacement omp secondmate likewise passes its per-secondmate
 #              omp profile pin (bin/fm-omp-profile-lib.sh) before the old agent
 #              stops.
+#              A replacement secondmate's MCP pin (bin/fm-mcp-lib.sh) passes
+#              the same check before the old agent stops.
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
@@ -205,6 +207,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
+# shellcheck source=bin/fm-mcp-lib.sh
+. "$SCRIPT_DIR/fm-mcp-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
 
@@ -1094,6 +1098,20 @@ resolve_relaunch_profile() {
     "$account_model" "$TARGET_HARNESS" "" "$account_mate" "$TARGET_ACCOUNT" >/dev/null || return 1
   fm_omp_profile_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_mate" >/dev/null || return 1
+  # Likewise a secondmate's MCP pin (bin/fm-mcp-lib.sh), which the launch
+  # owner re-reads: a pin that no longer resolves refuses before the stop.
+  if [ -n "$account_mate" ]; then
+    local mcp_config mcp_pinned mcp_pin
+    local -a mcp_names=()
+    mcp_config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+    mcp_pinned=$(fm_secondmate_mcp_names "$mcp_config" "$account_mate") || return 1
+    if [ -n "$mcp_pinned" ]; then
+      mapfile -t mcp_names <<<"$mcp_pinned"
+      mcp_pin=$(fm_secondmate_mcp_pin_file "$mcp_config" "$account_mate")
+      fm_mcp_launch_check "$TARGET_HARNESS" "" "$BACKEND" "$mcp_pin" || return 1
+      fm_mcp_resolve "$mcp_config" "$mcp_pin" "${mcp_names[@]}" >/dev/null || return 1
+    fi
+  fi
   # Likewise polytoken's launch profile and wiring refusals
   # (bin/fm-polytoken-lib.sh owns them). The launch owner retires the prior
   # incarnation's own generated hook layer, so only one it did not generate
