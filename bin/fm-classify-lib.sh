@@ -645,8 +645,9 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # statement of the status-fold contract that fixes this - a needs-decision/blocked
 # line OPENS a keyed decision, and an explicit resolution or a verified
 # captain-held backlog transfer referencing that key CLOSES it.
-# Ship/scout terminal declarations supersede stale log decisions; a secondmate's
-# terminal event may describe other work and cannot close an unrelated decision.
+# A ship/scout terminal declaration closes only the keyless (default) decision;
+# a keyed decision stays open until a resolution naming that exact key, whatever
+# the terminal note says. A secondmate's terminal event closes nothing.
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
 # at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
 # worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
@@ -953,7 +954,14 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   esac
   status_line_verb "$line" verb
   case "$unstamped" in
-    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) _fm_decision_fold_emit '' "$out"; return 0 ;; esac ;;
+    *:*) case "$verb:$kind" in
+           done:ship|done:scout|failed:ship|failed:scout)
+             _fm_decision_drop "$open" default open
+             [ -n "$open" ] && open="${open}"$'\n'
+             _fm_decision_fold_emit "$open" "$out"
+             return 0
+             ;;
+         esac ;;
   esac
   case "$verb" in
     needs-decision|blocked|"$resolve"|"$held") ;;
@@ -1469,10 +1477,12 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # malformed worker stamp whose colons used to pose as the head/note separator
 # no longer opens or closes anything; cursors folded under that reading are
 # discarded.
+# 10: a ship/scout terminal line closes only the keyless decision, so a cursor
+# folded when it closed every keyed decision is discarded.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=9
+FM_OPEN_DECISIONS_FOLD_VERSION=10
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity

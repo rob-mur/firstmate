@@ -768,10 +768,10 @@ test_malformed_event_time_never_moves_the_decision_fold() {
   printf 'kind=ship\n' > "$dir/state/task.meta"
   for tag in '[at=17:00]' '[at=10:30]' '[at=2026-09-20T14:03:00Z]' '[at=<epoch>]' '[at=bad]'; do
     printf '%s\n%s\n' \
-      'needs-decision [key=api-shape] [at=1700000000]: REST or gRPC?' \
+      'needs-decision [at=1700000000]: REST or gRPC?' \
       "done $tag finished the audit" > "$status"
     case "$(status_open_decisions "$status")" in
-      'api-shape'$'\t''needs-decision'$'\t''REST or gRPC?') : ;;
+      'default'$'\t''needs-decision'$'\t''REST or gRPC?') : ;;
       *) fail "malformed tag $tag closed an open decision: [$(status_open_decisions "$status")]" ;;
     esac
     printf '%s\n' "needs-decision $tag which base branch" > "$status"
@@ -779,9 +779,9 @@ test_malformed_event_time_never_moves_the_decision_fold() {
       || fail "malformed tag $tag opened a phantom decision: [$(status_open_decisions "$status")]"
   done
   # The real separator still closes, so the tolerance above did not disarm the
-  # terminal rule itself.
+  # terminal rule itself; a terminal retires only a keyless decision.
   printf '%s\n%s\n' \
-    'needs-decision [key=api-shape] [at=1700000000]: REST or gRPC?' \
+    'needs-decision [at=1700000000]: REST or gRPC?' \
     'done [at=1700000001]: finished the audit' > "$status"
   [ -z "$(status_open_decisions "$status")" ] \
     || fail "a well-formed terminal event stopped closing the decision"
