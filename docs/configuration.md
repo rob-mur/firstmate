@@ -1972,9 +1972,37 @@ It holds the same JSON `claude --mcp-config` accepts:
 `bin/fm-spawn.sh <id> <project> ... --mcp slack` (repeatable, also `--mcp=slack`) writes only the named entries to `state/<id>.mcp.json` and launches Claude with `--mcp-config <that file>`.
 It does not pass `--strict-mcp-config`: the worker keeps its ordinary MCP configuration and gains the named servers, so the opt-in never removes a server the captain relies on.
 The sorted, comma-joined names are recorded as `mcp=` in `state/<id>.meta` (absent when unused, so ordinary records are unchanged), and every relaunch replays them; `fm-spawn.sh --relaunch` refuses `--mcp` so the record stays the single source.
-A name the file does not define, a missing or malformed file, a malformed name, a non-Claude harness, a raw launch command, a secondmate, or `backend=t3code` refuses before anything is launched.
+A name the file does not define, a missing or malformed file, a malformed name, a non-Claude harness, a raw launch command, or `backend=t3code` refuses before anything is launched.
+`--mcp` on a secondmate refuses, because a secondmate takes its servers from its own pin below.
 The generated file is removed at cleanup.
 OAuth sign-in is not stored in this file; see the task report for where Claude keeps it.
+
+### Per-secondmate MCP servers
+
+To give one local Claude secondmate MCP servers from `config/mcp-servers.json`, create `config/secondmate-accounts/<id>/mcp` in the primary home.
+Use the secondmate's registered identifier for `<id>`.
+The file lists one server name per line, and blank lines are ignored.
+Each name uses letters, digits, `.`, `_` or `-`, and must be defined in the primary home's `config/mcp-servers.json`.
+
+When the file is present, that secondmate launches with `--mcp-config` holding only the named servers, resolved exactly as `--mcp` resolves them for a ship or scout, and never with `--strict-mcp-config`.
+When the file is absent, the launch adds no servers and is unchanged, so no other session pays the context cost.
+There is no home-wide fallback file, and another secondmate's file never applies.
+
+For example, this gives the secondmate named `intake` the Slack server and applies it to the running mate:
+
+```sh
+mkdir -p config/secondmate-accounts/intake
+printf 'slack\n' > config/secondmate-accounts/intake/mcp
+bin/fm-control.sh intake relaunch
+```
+
+Every spawn, control-plane relaunch, automatic relaunch, and session-start recovery reads the file again, so the servers survive every restart, and a relaunch checks it before stopping the current agent.
+The task record's `mcp=` field reports what the last launch applied; a relaunch never replays it in place of the file.
+Removing the file drops the servers at the next relaunch.
+An empty, malformed, or unreadable file, an undefined name, a non-Claude harness, a raw launch command, or `backend=t3code` refuses with its path before any worker endpoint, local copy, or task record exists.
+A remote secondmate refuses a primary-side file; configure its servers in its own home on that host instead.
+The file stays in the primary home and is not inherited or copied into the secondmate's home.
+[`bin/fm-mcp-lib.sh`](../bin/fm-mcp-lib.sh) owns parsing, resolution, and the refusals.
 
 ## Lavish server address (config/lavish-axi-host)
 

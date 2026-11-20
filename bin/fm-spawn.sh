@@ -547,9 +547,12 @@
 #   ordinary MCP configuration). The sorted names are recorded as mcp= in the
 #   task record and replayed by every relaunch; --relaunch refuses --mcp. An
 #   unknown name, a missing or malformed file, a non-claude harness, a raw
-#   launch command, a secondmate, and backend=t3code all refuse before any
-#   endpoint exists. docs/configuration.md "Per-spawn MCP servers" owns the
-#   contract.
+#   launch command, and backend=t3code all refuse before any endpoint exists.
+#   A secondmate refuses --mcp: a local one instead loads the servers its
+#   durable pin config/secondmate-accounts/<id>/mcp names, re-read on every
+#   spawn, relaunch, and recovery (never replayed from mcp=), and a remote one
+#   refuses a primary-side pin. bin/fm-mcp-lib.sh owns resolution and the pin;
+#   docs/configuration.md "Per-spawn MCP servers" owns the contract.
 # Per-secondmate omp profile (config/secondmate-accounts/<id>/omp-profile):
 #   Opt-in, and read only for a local secondmate's own omp agent;
 #   bin/fm-omp-profile-lib.sh owns the file and its refusals. A pinned launch
@@ -1061,6 +1064,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
+# shellcheck source=bin/fm-mcp-lib.sh
+. "$SCRIPT_DIR/fm-mcp-lib.sh"
 # shellcheck source=bin/fm-scout-session-lib.sh
 . "$SCRIPT_DIR/fm-scout-session-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -1322,16 +1327,14 @@ fi
 # form are checked once the harness is resolved.
 if [ "$MCP_SET" -eq 1 ]; then
   [ "$KIND" != secondmate ] || {
-    echo "error: --mcp applies to ships and scouts, never a secondmate" >&2
+    echo "error: --mcp applies to ships and scouts; secondmate ${POS[0]:-} loads the servers its own config/secondmate-accounts/<id>/mcp pin names" >&2
     exit 1
   }
   for mcp_name in "${MCP_NAMES[@]}"; do
-    case "$mcp_name" in
-    '' | *[!A-Za-z0-9_.-]*)
+    fm_mcp_name_valid "$mcp_name" || {
       echo "error: --mcp requires a server name of letters, digits, '.', '_' or '-'; got '$mcp_name'" >&2
       exit 1
-      ;;
-    esac
+    }
   done
 fi
 if [ "$FOLLOW_UP_SET" -eq 1 ]; then
@@ -1477,7 +1480,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_rex_session_id remote_rex_server remote_rex_ok
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
+  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config mcp_pin
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1540,6 +1543,13 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: $account_config/$(fm_worker_account_file "$harness") cannot pin remote secondmate $id from this host; configure config/$(fm_worker_account_file "$harness") in its home $home on $host instead" >&2
+    return 1
+  fi
+  mcp_pin=$(fm_secondmate_mcp_pin_file "$CONFIG" "$id")
+  if [ -e "$mcp_pin" ] || [ -L "$mcp_pin" ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: $mcp_pin cannot load MCP servers into remote secondmate $id from this host; remove it, and configure the servers in its home $home on $host instead" >&2
     return 1
   fi
   model=${MODEL:--}
@@ -3728,33 +3738,26 @@ fi
 # Per-spawn MCP opt-in (header above): resolved before any endpoint, worktree,
 # or record exists, so an unknown name or a launch that cannot carry the flag
 # refuses instead of starting a worker without the server it was promised.
+# A local secondmate's servers come only from its durable pin, re-read on every
+# launch and relaunch (so a relaunch never replays a recorded mcp= the pin no
+# longer names); bin/fm-mcp-lib.sh owns the pin file and its refusals.
+MCP_LABEL=--mcp
+if [ "$KIND" = secondmate ]; then
+  MCP_NAMES=()
+  MCP_SET=0
+  mcp_pinned=$(fm_secondmate_mcp_names "$CONFIG" "$ID") || exit 1
+  if [ -n "$mcp_pinned" ]; then
+    mapfile -t MCP_NAMES <<<"$mcp_pinned"
+    MCP_SET=1
+    MCP_LABEL=$(fm_secondmate_mcp_pin_file "$CONFIG" "$ID")
+  fi
+fi
 MCP_CONFIG_JSON=
+MCP_NAMES_META=
 if [ "$MCP_SET" -eq 1 ]; then
-  if [ "$HARNESS" != claude ] || [ "$RAW_LAUNCH" = 1 ]; then
-    echo "error: --mcp is supported only for a claude harness launch built by firstmate (harness=$HARNESS${RAW_COMMAND:+, raw launch command}); it cannot be applied here" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = t3code ]; then
-    echo "error: backend=t3code starts the agent itself and cannot pass --mcp-config; choose another backend or drop --mcp" >&2
-    exit 1
-  fi
-  MCP_CONFIG_FILE="$CONFIG/mcp-servers.json"
-  if [ ! -f "$MCP_CONFIG_FILE" ] || [ ! -r "$MCP_CONFIG_FILE" ]; then
-    echo "error: --mcp ${MCP_NAMES[*]} needs $MCP_CONFIG_FILE, a readable JSON file of {\"mcpServers\":{\"<name>\":{...}}}" >&2
-    exit 1
-  fi
-  if ! jq -e '(.mcpServers | type) == "object"' "$MCP_CONFIG_FILE" >/dev/null 2>&1; then
-    echo "error: $MCP_CONFIG_FILE must be a JSON object with an mcpServers object" >&2
-    exit 1
-  fi
-  MCP_NAMES_JSON=$(printf '%s\n' "${MCP_NAMES[@]}" | jq -R . | jq -cs 'unique')
-  if ! MCP_CONFIG_JSON=$(jq -c --argjson names "$MCP_NAMES_JSON" \
-      'if ($names - (.mcpServers | keys)) == [] then {mcpServers: (.mcpServers | with_entries(select(.key as $k | $names | index($k))))} else error("missing") end' \
-      "$MCP_CONFIG_FILE" 2>/dev/null); then
-    echo "error: --mcp names a server $MCP_CONFIG_FILE does not define (asked: ${MCP_NAMES[*]}; defined: $(jq -r '.mcpServers | keys | join(", ")' "$MCP_CONFIG_FILE"))" >&2
-    exit 1
-  fi
-  MCP_NAMES_META=$(printf '%s' "$MCP_NAMES_JSON" | jq -r 'join(",")')
+  fm_mcp_launch_check "$HARNESS" "$([ "$RAW_LAUNCH" = 0 ] || printf raw)" "$BACKEND" "$MCP_LABEL" || exit 1
+  MCP_CONFIG_JSON=$(fm_mcp_resolve "$CONFIG" "$MCP_LABEL" "${MCP_NAMES[@]}") || exit 1
+  MCP_NAMES_META=$(printf '%s\n' "${MCP_NAMES[@]}" | LC_ALL=C sort -u | paste -sd, -)
 fi
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
@@ -7617,7 +7620,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode claude_session traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile mcp busy_gen spawn_gen approval_mode claude_session traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7977,9 +7980,11 @@ esac
 # file and passed with --mcp-config, never --strict-mcp-config (header above).
 # Without an opt-in the placeholder is empty and the launch is byte-identical.
 CLAUDE_MCP_FLAG=
+# A launch with no servers leaves no earlier selection behind for a reader.
+[ -n "$MCP_CONFIG_JSON" ] || rm -f "$STATE_REAL/$ID.mcp.json"
 if [ -n "$MCP_CONFIG_JSON" ]; then
   if ! { printf '%s\n' "$MCP_CONFIG_JSON" >"$STATE_REAL/$ID.mcp.json" && chmod 600 "$STATE_REAL/$ID.mcp.json"; }; then
-    echo "error: could not write $STATE_REAL/$ID.mcp.json for --mcp" >&2
+    echo "error: could not write $STATE_REAL/$ID.mcp.json for $MCP_LABEL" >&2
     exit 1
   fi
   CLAUDE_MCP_FLAG="--mcp-config $(shell_quote "$STATE_REAL/$ID.mcp.json") "

@@ -1520,6 +1520,77 @@ test_secondmate_relaunch_with_a_legacy_pin_file_uses_the_first_line() {
   pass "fm-control relaunch: a legacy secondmate pin file still relaunches the mate onto its first line"
 }
 
+# A local secondmate's MCP servers come from its durable per-mate pin
+# (config/secondmate-accounts/<id>/mcp), re-read on every relaunch rather than
+# replayed from the previous record: the pin keeps the servers across a
+# relaunch, removing it drops them, and a pin that no longer resolves refuses
+# before the running agent stops.
+add_mcp_secondmate() {  # <case-dir> <id>
+  local dir=$1 id=$2 home="$1/home"
+  mkdir -p "$home/config/secondmate-accounts/$id" "$home/data/$id"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '%s\n' '{"mcpServers":{"slack":{"type":"http","url":"https://mcp.slack.com/mcp"},"other":{"type":"http","url":"https://example.invalid/mcp"}}}' \
+    > "$home/config/mcp-servers.json"
+  printf '# secondmate brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" "$id-branch"
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf '%s\n' "$id" > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+}
+
+test_secondmate_mcp_pin_follows_relaunch() {
+  local dir home out rc id=smmcp
+  dir=$(new_case smmcp "$id")
+  home="$dir/home"
+  add_mcp_secondmate "$dir" "$id"
+  printf 'slack\n' > "$home/config/secondmate-accounts/$id/mcp"
+  out=$(run_control "$dir" "$id" relaunch); rc=$?
+  expect_code 0 "$rc" "a pinned claude secondmate should relaunch"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "--mcp-config" "the pinned replacement should carry --mcp-config"
+  assert_not_contains "$(cat "$dir/fake/literal")" "--strict-mcp-config" "the pinned replacement must not be strict"
+  jq -e '.mcpServers | keys == ["slack"]' "$home/state/$id.mcp.json" >/dev/null \
+    || fail "the relaunched mate's config should hold only the pinned server"
+  [ "$(meta_field "$dir" "$id" mcp)" = slack ] || fail "the relaunched record should keep mcp=slack"
+
+  : > "$dir/fake/literal"
+  rm -f "$home/config/secondmate-accounts/$id/mcp"
+  out=$(run_control "$dir" "$id" relaunch); rc=$?
+  expect_code 0 "$rc" "an unpinned claude secondmate should relaunch"$'\n'"$out"
+  assert_not_contains "$(cat "$dir/fake/literal")" "--mcp-config" "removing the pin must drop the servers on the next relaunch"
+  [ -z "$(meta_field "$dir" "$id" mcp)" ] || fail "an unpinned relaunch must record no mcp="
+  [ ! -e "$home/state/$id.mcp.json" ] || fail "an unpinned relaunch must not leave the generated MCP config behind"
+  pass "fm-control relaunch: a secondmate's MCP pin is re-read on every relaunch"
+}
+
+test_secondmate_mcp_pin_refuses_before_stop() {
+  local dir home out rc id=smmcpbad
+  dir=$(new_case smmcpbad "$id")
+  home="$dir/home"
+  add_mcp_secondmate "$dir" "$id"
+  printf 'nope\n' > "$home/config/secondmate-accounts/$id/mcp"
+  out=$(run_control "$dir" "$id" relaunch); rc=$?
+  expect_code 1 "$rc" "a pin naming an undefined server must refuse"$'\n'"$out"
+  assert_contains "$out" "does not define" "the refusal should name the unknown server"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the refusal must happen before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "the refusal must send no lifecycle input"
+  pass "fm-control relaunch: a secondmate MCP pin that does not resolve refuses before the agent stops"
+}
+
 test_secondmate_claude_relaunch_keeps_local_settings() {
   local dir home prior settings out rc
   dir=$(new_case smlocal sml)
@@ -3336,6 +3407,8 @@ test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_claude_relaunch_keeps_local_settings
+test_secondmate_mcp_pin_follows_relaunch
+test_secondmate_mcp_pin_refuses_before_stop
 test_secondmate_relaunch_lands_on_the_per_mate_pin
 test_secondmate_relaunch_uses_the_default_for_an_unpinned_mate
 test_secondmate_relaunch_with_a_legacy_pin_file_uses_the_first_line
