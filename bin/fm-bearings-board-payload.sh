@@ -281,34 +281,8 @@ PRIO_JSON=$("$SCRIPT_DIR/fm-board-priority.sh" show 2>/dev/null | jq -R . | jq -
 # PR/MR already merged or closed leaves the board. A PR/MR a review card names
 # (is_review) that is still open is also checked for the captain's own approval
 # (fm_pr_viewer_approved) and reads "approved" when they gave it. Each lookup is
-# one bounded forge read; a failed, slow, or unparseable lookup records nothing,
-# and an unknown state keeps its card.
-pr_state_of() {  # <url> <review 0|1> -> prints "<url>\t<merged|closed|approved|open>" or nothing
-  local url=$1 review=${2:-0} record state merged approved
-  fm_pr_url_parse "$url" || return 0
-  case "$FM_PR_PROVIDER" in
-    github) set -- github "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" ;;
-    gitlab|forgejo) set -- "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" ;;
-    *) return 0 ;;
-  esac
-  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
-  record=$(fm_run_timed "$PR_TIMEOUT" bash -c '
-    . "$1"; review=$2; p=$3; shift 3
-    "fm_pr_${p}_read_record" "$@" || exit 1
-    printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
-    if [ "$review" = 1 ] && fm_pr_viewer_approved "$p" "$@"; then echo approved=true; fi
-  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$review" "$@" 2>/dev/null) || return 0
-  state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1 | tr '[:upper:]' '[:lower:]')
-  merged=$(printf '%s\n' "$record" | sed -n 's/^merged=//p' | head -1)
-  approved=$(printf '%s\n' "$record" | sed -n 's/^approved=//p' | head -1)
-  if [ "$merged" = true ] || [ "$state" = merged ]; then state=merged
-  elif [ "$state" = closed ]; then state=closed
-  elif [ "$state" = open ] || [ "$state" = opened ]; then
-    if [ "$approved" = true ]; then state=approved; else state=open; fi
-  else return 0; fi
-  printf '%s\t%s\n' "$url" "$state"
-}
-
+# one bounded forge read (fm_pr_live_state in bin/fm-pr-lib.sh); a failed, slow,
+# or unparseable lookup records nothing, and an unknown state keeps its card.
 PR_STATES_JSON='{}'
 if [ "${FM_BEARINGS_BOARD_PR_CHECK:-1}" != 0 ]; then
   PR_TIMEOUT=${FM_BEARINGS_BOARD_PR_TIMEOUT:-5}
@@ -336,7 +310,7 @@ if [ "${FM_BEARINGS_BOARD_PR_CHECK:-1}" != 0 ]; then
     i=0
     while IFS="$(printf '\t')" read -r u rv; do
       i=$((i + 1))
-      pr_state_of "$u" "$rv" >"$pr_tmp/$i" 2>/dev/null &
+      fm_pr_live_state "$u" "$PR_TIMEOUT" "$rv" >"$pr_tmp/$i" 2>/dev/null &
     done <<URLS
 $pr_urls
 URLS
