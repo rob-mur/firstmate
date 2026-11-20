@@ -1020,7 +1020,8 @@ test_completed_scout_report_is_pointer_not_pending() {
   ' >/dev/null || fail "a completed scout report must be a pointer, not a pending decision: $out"
 
   # Same terminal-supersession contract across ship/scout/secondmate, both snapshot
-  # modes, and reopen/resolve after cleanup.
+  # modes, and reopen/resolve after cleanup: a ship or scout terminal retires only
+  # the keyless decision, and keyed decisions wait for their exact resolution.
   home=$(make_home terminal-cleanup)
   mkdir -p "$home/projects/task"
   fakebin=$(make_fakebin "$home")
@@ -1031,15 +1032,15 @@ test_completed_scout_report_is_pointer_not_pending() {
         "window=firstmate:fm-$id" "worktree=$home/projects/task" \
         "kind=$kind" "harness=claude"
       record_claude_idle "$home/state" "$id"
-      printf 'blocked [key=access]: waiting\nneeds-decision [key=choice]: choose a route\n%s: final outcome\nnote: cleanup complete\n' \
+      printf 'needs-decision: pick a base\nblocked [key=access]: waiting\nneeds-decision [key=choice]: choose a route\n%s: final outcome\nnote: cleanup complete\n' \
         "$terminal" > "$home/state/$id.status"
     done
   done
   for phase in terminal reopened resolved; do
     case "$phase" in
-      terminal) single='[]'; mate='["access","choice"]'; single_state=unknown; mate_state=parked ;;
-      reopened) single='["access","new-choice"]'; mate='["access","choice","new-choice"]'; single_state=parked; mate_state=parked ;;
-      resolved) single='[]'; mate='["choice"]'; single_state=unknown; mate_state=parked ;;
+      terminal) single='["access","choice"]'; mate='["access","choice","default"]'; single_state=parked; mate_state=parked ;;
+      reopened) single='["access","choice","new-choice"]'; mate='["access","choice","default","new-choice"]'; single_state=parked; mate_state=parked ;;
+      resolved) single='["choice"]'; mate='["choice","default"]'; single_state=parked; mate_state=parked ;;
     esac
     for kind in ship scout secondmate; do
       for terminal in 'done' failed; do
