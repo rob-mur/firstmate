@@ -2250,7 +2250,7 @@ JSON
 }
 
 test_mcp_opt_in_passes_only_the_named_servers() {
-  local rec id out status launch file
+  local rec id out status launch file split
   id=mcp-optin-z1
   rec=$(make_spawn_case mcp-optin claude "$id")
   read_case_record "$rec"
@@ -2264,8 +2264,13 @@ test_mcp_opt_in_passes_only_the_named_servers() {
   jq -e '.mcpServers | keys == ["slack"] and .slack.url == "https://mcp.slack.com/mcp"' "$file" >/dev/null \
     || fail "generated config should hold only the named server: $(cat "$file")"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--mcp-config " "launch should pass --mcp-config"
+  assert_contains "$launch" "--mcp-config=" "launch should pass --mcp-config"
   assert_contains "$launch" "$id.mcp.json" "launch should name the generated file"
+  split=$(fm_test_claude_mcp_split "$launch")
+  assert_equals "config $file" "$(printf '%s\n' "$split" | grep '^config ')" \
+    "claude must load only the generated MCP file, not the launch prompt"
+  assert_contains "$(printf '%s\n' "$split" | tail -n1)" "prompt : Firstmate operational input waiting: " \
+    "the launch prompt must stay positional after --mcp-config"
   assert_not_contains "$launch" "--strict-mcp-config" "launch must not be strict"
   assert_grep "mcp=slack" "$HOME_DIR/state/$id.meta" "meta should record the MCP names"
   pass "--mcp passes only the named server through --mcp-config and records it in meta"

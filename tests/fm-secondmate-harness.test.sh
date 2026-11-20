@@ -1770,7 +1770,7 @@ write_sm_mcp_servers() {  # <world>
 # --mcp-config, never --strict-mcp-config, while a mate without the pin loads
 # nothing extra even when the home defines servers.
 test_spawn_secondmate_mcp_pin_adds_only_the_named_servers() {
-  local w sm launchlog launch out status meta
+  local w sm launchlog launch out status meta split
   w="$TMP_ROOT/spawn-claude-mcp-pin"
   sm="$w/sm"
   launchlog="$w/launch.log"
@@ -1783,8 +1783,15 @@ test_spawn_secondmate_mcp_pin_adds_only_the_named_servers() {
   out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
   expect_code 0 "$status" "a claude secondmate with an MCP pin should spawn"$'\n'"$out"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "--mcp-config " "pinned secondmate launch should pass --mcp-config"
+  assert_contains "$launch" "--mcp-config=" "pinned secondmate launch should pass --mcp-config"
   assert_contains "$launch" "sm.mcp.json" "pinned secondmate launch should name its generated file"
+  # The launch prompt follows the flag directly, and --mcp-config is variadic:
+  # claude must load only the generated file and still receive the prompt.
+  split=$(fm_test_claude_mcp_split "$launch")
+  assert_equals "config $w/home/state/sm.mcp.json" "$(printf '%s\n' "$split" | grep '^config ')" \
+    "claude must load only the generated MCP file, not the launch prompt"
+  assert_contains "$(printf '%s\n' "$split" | tail -n1)" "prompt : Firstmate operational input waiting: " \
+    "the launch prompt must stay positional after --mcp-config"
   assert_not_contains "$launch" "--strict-mcp-config" "pinned secondmate launch must not be strict"
   jq -e '.mcpServers | keys == ["slack"]' "$w/home/state/sm.mcp.json" >/dev/null \
     || fail "generated secondmate config should hold only the pinned server: $(cat "$w/home/state/sm.mcp.json")"

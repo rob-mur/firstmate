@@ -7950,6 +7950,9 @@ case "$LAUNCH" in
 esac
 # Per-spawn MCP servers: the selected definitions are written to a task-owned
 # file and passed with --mcp-config, never --strict-mcp-config (header above).
+# Claude's --mcp-config is variadic, so the separate-word form swallows a
+# following positional launch prompt as a second config file; the joined
+# --mcp-config=<path> form takes exactly one value and leaves the prompt intact.
 # Without an opt-in the placeholder is empty and the launch is byte-identical.
 CLAUDE_MCP_FLAG=
 # A launch with no servers leaves no earlier selection behind for a reader.
@@ -7959,7 +7962,7 @@ if [ -n "$MCP_CONFIG_JSON" ]; then
     echo "error: could not write $STATE_REAL/$ID.mcp.json for $MCP_LABEL" >&2
     exit 1
   fi
-  CLAUDE_MCP_FLAG="--mcp-config $(shell_quote "$STATE_REAL/$ID.mcp.json") "
+  CLAUDE_MCP_FLAG="--mcp-config=$(shell_quote "$STATE_REAL/$ID.mcp.json") "
 fi
 LAUNCH=${LAUNCH//__CLAUDEMCP__/$CLAUDE_MCP_FLAG}
 case "$LAUNCH" in
