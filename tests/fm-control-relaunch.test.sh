@@ -402,6 +402,7 @@ test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll() {
 #!/usr/bin/env bash
 case "$*" in
   *headRefOid*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+  *state,isDraft*) printf '%s\n' MERGED ;;
   *isDraft*) printf '%s\n' '{"isDraft":false}' ;;
   *state*) printf '%s\n' MERGED ;;
   *) exit 2 ;;
