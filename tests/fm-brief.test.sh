@@ -241,6 +241,9 @@ test_forge_selection_renders_correct_cli() {
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'open a PR with `gh-axi`' "$brief" \
     "a direct-PR brief with no --forge must still tell the worker to open the PR with gh-axi"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep "Wait for the PR's CI with one \`$ROOT/bin/fm-ci-wait.sh <PR URL>\` call" "$brief" \
+    "a direct-PR brief must send the CI wait through the one-call helper"
   grep -qx "Delivery contract: mode=direct-PR" "$brief" \
     || fail "a brief with no --forge must keep the bare delivery contract line"
 
@@ -1269,7 +1272,7 @@ test_workers_wait_without_spending_turns() {
     assert_grep "end your turn at once" "$brief" "$id: a decision wait must end the turn"
     assert_grep "with ONE blocking shell command that returns when the state changes" "$brief" \
       "$id: an external wait must sleep in one blocking shell command"
-    assert_grep "gh pr checks <pr> --watch" "$brief" "$id: the CI wait primitive is missing"
+    assert_grep "fm-ci-wait.sh <PR URL>" "$brief" "$id: the CI wait primitive is missing"
     assert_grep "a \`timeout\` of at most 2700 seconds" "$brief" "$id: the Pi ceiling is missing"
     assert_grep "its maximum \`timeout\` of 600000 ms" "$brief" "$id: the Claude Code ceiling is missing"
     assert_grep "empty \`write_stdin\` polls of up to 300000 ms" "$brief" "$id: the Codex ceiling is missing"
