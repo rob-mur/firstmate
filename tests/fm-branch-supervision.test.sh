@@ -123,7 +123,7 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
   # The emitted system prompt is the contract, not the generator's source or
   # proof that a model will obey it. No live agent or endpoint is involved.
   case "$prompt" in
-    *"For a completed scout, follow the scout-completion and captain-hold-lifecycle policies included below in both postures."*"After their completion gate passes, retain the report, claim the task's lease, and run \`bin/fm-teardown.sh <task>\` with no flags."*"Report the findings and cleanup result in that event's outcome; a refusal is reported with its exact reason and never forced, worked around, or repaired by hand."*) ;;
+    *"For a completed scout, follow the scout-completion policy included below and the captain-hold-lifecycle policy named below, in both postures."*"After their completion gate passes, retain the report, claim the task's lease, and run \`bin/fm-teardown.sh <task>\` with no flags."*"Report the findings and cleanup result in that event's outcome; a refusal is reported with its exact reason and never forced, worked around, or repaired by hand."*) ;;
     *) fail "branch prompt omits the completed-scout cleanup sequence or refusal reporting" ;;
   esac
   assert_contains "$prompt" \
@@ -144,12 +144,24 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
     "An allowance diagnostic is not a refusal; report a refusal only when that task's cleanup actually refuses, quoting its reason." \
     "branch prompt does not distinguish cleanup permission from refusal"
 
-  # Verbatim policy inclusion is an owned output contract. These owners must
-  # reach hosts that disable automatic skill loading, without a policy copy.
-  for skill in scout-completion captain-hold-lifecycle; do
-    assert_contains "$prompt" "$(cat "$ROOT/.agents/skills/$skill/SKILL.md")" \
-      "branch prompt does not include the complete $skill policy"
+  # Policy delivery is an owned output contract. These owners must reach hosts
+  # that disable automatic skill loading, without a policy copy: scout
+  # completion verbatim, and the rarely needed hold and ask-user policies as a
+  # read-on-demand pointer to an existing file in the code root.
+  assert_contains "$prompt" "$(cat "$ROOT/.agents/skills/scout-completion/SKILL.md")" \
+    "branch prompt does not include the complete scout-completion policy"
+  local path
+  for skill in captain-hold-lifecycle ask-user-authority; do
+    path="$ROOT/.agents/skills/$skill/SKILL.md"
+    [ -f "$path" ] || fail "the $skill policy file is missing at $path"
+    assert_contains "$prompt" "Read \`$path\` before acting on a captain hold, a captain answer, or an ask-user finding" \
+      "branch prompt does not point the host at the $skill policy file"
+    assert_not_contains "$prompt" "$(sed -n '/^# /,$p' "$path")" \
+      "branch prompt still inlines the $skill policy body"
   done
+  assert_contains "$prompt" \
+    "Under the away posture, answer a finding only when it is unambiguous toward the accepted intent, and report verdict captain for any finding that is ambiguous, would expand the accepted contract, or is destructive, irreversible, or security-sensitive." \
+    "branch prompt lost the always-present away-posture ask-user rule"
   pass "emitted branch prompt routes completed scouts through existing policies and leased cleanup, preserving unfinished work"
 }
 
