@@ -2551,7 +2551,7 @@ test_claude_session_settings_invalid_refuses_before_endpoint_or_metadata() {
     [ ! -s "$LAUNCH_LOG" ] || fail "invalid session settings must launch nothing (got: $(cat "$LAUNCH_LOG"))"
     assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
   done
-  id=session-settings-unreadable-z29
+  id='session-settings-unreadable-z29'
   rec=$(make_spawn_case session-settings-unreadable claude "$id")
   read_case_record "$rec"
   mkdir "$HOME_DIR/config/claude-session-settings.json"
@@ -2667,6 +2667,101 @@ test_claude_crew_settings_invalid_refuses_before_endpoint_or_metadata() {
     assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
   done
   pass "an invalid config/claude-crew-settings.json refuses before any endpoint or metadata"
+}
+
+# config/claude-secondmate-settings.json joins only a secondmate launch,
+# deep-merged over config/claude-session-settings.json: the secondmate file
+# wins a conflicting key, object members keep the session file's other
+# entries, and an array value is replaced.
+CLAUDE_SECONDMATE_SETTINGS='{"skillOverrides":{"caveman":"user-invocable-only","ahoy":"name-only"},"permissions":{"deny":["ScheduleWakeup"]},"smnote":"mate'\''s"}'
+
+test_claude_secondmate_settings_merge_into_secondmate_launch() {
+  local rec id sm out status launch settings
+  id=profile-secondmate-sm-settings-z50
+  rec=$(make_spawn_case profile-secondmate-sm-settings claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" | jq -c '. + {"permissions":{"deny":["Bash(rm:*)"],"allow":["Bash(ls:*)"]}}' \
+    > "$HOME_DIR/config/claude-session-settings.json"
+  printf '%s\n' "$CLAUDE_SECONDMATE_SETTINGS" > "$HOME_DIR/config/claude-secondmate-settings.json"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn with secondmate settings should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '.skillOverrides == {"anthropic-skills:pdf":"user-invocable-only","caveman":"user-invocable-only","ahoy":"name-only"}
+    and .modelSettings == {"claude-opus-5-5":{"autoCompactWindow":100000}}
+    and .permissions == {"deny":["ScheduleWakeup"],"allow":["Bash(ls:*)"]}
+    and .smnote == "mate'\''s" and .note == "it'\''s"
+    and .feedbackDrafts == "off" and .attribution.commit == ""
+    and .hooks.UserPromptSubmit and .hooks.SessionEnd' >/dev/null \
+    || fail "secondmate launch settings do not carry the secondmate file merged over the session file: $settings"
+  [ ! -e "$sm/config/claude-secondmate-settings.json" ] \
+    || fail "config/claude-secondmate-settings.json must not be inherited by the secondmate home"
+  pass "config/claude-secondmate-settings.json deep-merges over the session settings in a claude secondmate launch"
+}
+
+test_claude_secondmate_settings_stay_out_of_crewmate_and_scout_launches() {
+  local rec id out status settings kind
+  for kind in ship scout; do
+    id=profile-sm-settings-$kind-z51
+    rec=$(make_spawn_case "profile-sm-settings-$kind" claude "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+    printf '%s\n' "$CLAUDE_SECONDMATE_SETTINGS" > "$HOME_DIR/config/claude-secondmate-settings.json"
+    if [ "$kind" = ship ]; then
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness claude)
+    fi
+    status=$?
+    expect_code 0 "$status" "claude $kind spawn with a secondmate file present should succeed"$'\n'"$out"
+    assert_session_settings_overlay "$(cat "$LAUNCH_LOG")" "claude $kind"
+    settings=$(claude_settings_json_arg "$(cat "$LAUNCH_LOG")")
+    printf '%s' "$settings" | jq -e '(has("permissions") | not) and (has("smnote") | not)
+      and (.skillOverrides | has("ahoy") | not)' >/dev/null \
+      || fail "config/claude-secondmate-settings.json leaked into a claude $kind launch: $settings"
+
+    # A malformed secondmate file is never read, so it cannot refuse the launch.
+    id=profile-sm-settings-$kind-bad-z52
+    rec=$(make_spawn_case "profile-sm-settings-$kind-bad" claude "$id")
+    read_case_record "$rec"
+    printf 'not json\n' > "$HOME_DIR/config/claude-secondmate-settings.json"
+    if [ "$kind" = ship ]; then
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness claude)
+    fi
+    status=$?
+    expect_code 0 "$status" "a malformed secondmate file must not touch a claude $kind spawn"$'\n'"$out"
+  done
+  pass "config/claude-secondmate-settings.json stays out of claude crewmate and scout launches"
+}
+
+test_claude_secondmate_settings_invalid_refuses_secondmate_launch() {
+  local rec id sm out status content n=0
+  for content in '{"hooks":{}}' '{"attribution":{}}' '["skillOverrides"]' 'not json' ''; do
+    n=$((n + 1))
+    id=sm-settings-invalid-z6$n
+    rec=$(make_spawn_case "sm-settings-invalid-$n" claude "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$content" > "$HOME_DIR/config/claude-secondmate-settings.json"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+
+    out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+    status=$?
+    expect_code 1 "$status" "config/claude-secondmate-settings.json holding $content must refuse the secondmate spawn"
+    assert_contains "$out" "config/claude-secondmate-settings.json must be a readable file holding one JSON object" \
+      "refusal must name the secondmate file and the accepted shape"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid secondmate settings must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+    assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  done
+  pass "an invalid config/claude-secondmate-settings.json refuses the secondmate launch before any endpoint or metadata"
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
@@ -3512,6 +3607,9 @@ test_claude_crew_settings_merge_into_crewmate_launch
 test_claude_crew_settings_merge_into_scout_launch
 test_claude_crew_settings_reach_secondmate_home_not_its_launch
 test_claude_crew_settings_invalid_refuses_before_endpoint_or_metadata
+test_claude_secondmate_settings_merge_into_secondmate_launch
+test_claude_secondmate_settings_stay_out_of_crewmate_and_scout_launches
+test_claude_secondmate_settings_invalid_refuses_secondmate_launch
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
