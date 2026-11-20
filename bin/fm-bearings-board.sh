@@ -1031,8 +1031,46 @@ command_ended() {
   ' "$state" >/dev/null 2>&1
 }
 
+# Whether a failed build attempt failed because a binary was missing: exit 127,
+# or its stderr names a command not found, a path bash could not execute, or
+# the jq build requires.
+missing_binary_failure() {  # <rc> <stderr-file>
+  [ "$1" -ne 127 ] || return 0
+  grep -Eq ': command not found$|bad interpreter: No such file or directory|^.*: line [0-9]+: [^:]+: No such file or directory$|^fm-bearings-board: jq is required$' "$2" 2>/dev/null
+}
+
+# A BUILD SURVIVES A BINARY THAT BRIEFLY VANISHES. A profile switch can take a
+# binary such as jq off PATH for a fraction of a second. build runs as a child
+# attempt; when that attempt fails because a binary was missing
+# (missing_binary_failure), it waits about a second and runs one more attempt,
+# whose result is final. Any other failure is final at once. Each attempt's
+# stderr reaches the caller, plus one line saying the build is retrying.
+# bin/fm-board-refresh.sh rebuilds through build, so it gets the same retry.
+build_retrying_once() {  # <build args...>
+  local err rc=0
+  if ! err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-board.err.XXXXXX" 2>/dev/null); then
+    command_build "$@"
+    return
+  fi
+  FM_BEARINGS_BOARD_BUILD_ATTEMPT=1 "${BASH_SOURCE[0]}" build "$@" 2>"$err" || rc=$?
+  [ ! -s "$err" ] || printf '%s\n' "$(<"$err")" >&2
+  if [ "$rc" -ne 0 ] && missing_binary_failure "$rc" "$err"; then
+    rm -f -- "$err"
+    printf 'fm-bearings-board: a binary was missing during the build; retrying once\n' >&2
+    sleep 1 2>/dev/null || :
+    rc=0
+    FM_BEARINGS_BOARD_BUILD_ATTEMPT=1 "${BASH_SOURCE[0]}" build "$@" || rc=$?
+    return "$rc"
+  fi
+  rm -f -- "$err"
+  return "$rc"
+}
+
 case "${1-}" in
-  build) shift; command_build "$@" ;;
+  build)
+    shift
+    if [ "${FM_BEARINGS_BOARD_BUILD_ATTEMPT:-}" = 1 ]; then unset FM_BEARINGS_BOARD_BUILD_ATTEMPT; command_build "$@"
+    else build_retrying_once "$@"; fi ;;
   path) board_path ;;
   url) shift; command_url "$@" ;;
   ended) shift; command_ended "$@" ;;
