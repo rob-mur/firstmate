@@ -323,11 +323,16 @@ test_routine_steer_never_closes() {
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=schema]' >/dev/null \
     || fail "a routine steer or later working line cleared an unanswered captain decision: $out"
+  # A terminal line retires only a keyless decision, so the keyed one stays answerable.
   printf 'done: task complete\nnote: cleanup complete\n' >> "$home/state/t3.status"
-  run_send "$fb" "$home" "$log" t3 --resolve-key schema "answer to a stale decision" > "$dir/terminal.out" 2> "$dir/terminal.err"; rc=$?
-  expect_code 1 "$rc" "an answer to a terminally superseded decision must refuse"
-  [ ! -e "$home/state/t3.inbox/002.msg" ] || fail "a stale decision answer was delivered"
-  pass "fm-send preserves decisions through routine work and refuses superseded terminal decisions"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$DRAIN" --open-decisions 2>/dev/null)
+  printf '%s' "$out" | grep -F '[key=schema]' >/dev/null \
+    || fail "a terminal line closed an unanswered keyed decision: $out"
+  run_send "$fb" "$home" "$log" t3 --resolve-key schema "answer after the terminal line" > "$dir/terminal.out" 2> "$dir/terminal.err"; rc=$?
+  expect_code 0 "$rc" "an answer to a keyed decision that outlived a terminal line must deliver"
+  grep -F 'resolved [key=schema]' "$home/state/t3.status" >/dev/null \
+    || fail "the answer did not close the keyed decision: $(cat "$home/state/t3.status")"
+  pass "fm-send preserves keyed decisions through routine work and terminal lines until answered"
 }
 
 test_not_open_key_refuses_before_send() {
