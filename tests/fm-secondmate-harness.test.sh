@@ -1764,6 +1764,90 @@ test_spawn_secondmate_claude_grants_parent_inbox_dir() {
   pass "claude secondmate launches cover the parent-home steering inbox in auto and bypass modes"
 }
 
+write_sm_mcp_servers() {  # <world>
+  printf '%s\n' '{"mcpServers":{"slack":{"type":"http","url":"https://mcp.slack.com/mcp"},"other":{"type":"http","url":"https://example.invalid/mcp"}}}' \
+    > "$1/home/config/mcp-servers.json"
+}
+
+# A per-secondmate MCP pin (config/secondmate-accounts/<id>/mcp in the primary
+# home) gives that mate's Claude agent only the named servers through
+# --mcp-config, never --strict-mcp-config, while a mate without the pin loads
+# nothing extra even when the home defines servers.
+test_spawn_secondmate_mcp_pin_adds_only_the_named_servers() {
+  local w sm launchlog launch out status meta
+  w="$TMP_ROOT/spawn-claude-mcp-pin"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config/secondmate-accounts/sm"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  write_sm_mcp_servers "$w"
+  printf 'slack\n' > "$w/home/config/secondmate-accounts/sm/mcp"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "a claude secondmate with an MCP pin should spawn"$'\n'"$out"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "--mcp-config " "pinned secondmate launch should pass --mcp-config"
+  assert_contains "$launch" "sm.mcp.json" "pinned secondmate launch should name its generated file"
+  assert_not_contains "$launch" "--strict-mcp-config" "pinned secondmate launch must not be strict"
+  jq -e '.mcpServers | keys == ["slack"]' "$w/home/state/sm.mcp.json" >/dev/null \
+    || fail "generated secondmate config should hold only the pinned server: $(cat "$w/home/state/sm.mcp.json")"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" mcp)" = slack ] || fail "secondmate meta should record mcp=slack"
+
+  w="$TMP_ROOT/spawn-claude-mcp-none"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config/secondmate-accounts/other"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  write_sm_mcp_servers "$w"
+  printf 'slack\n' > "$w/home/config/secondmate-accounts/other/mcp"
+  make_seeded_home "$sm" sm
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "a claude secondmate without an MCP pin should spawn"$'\n'"$out"
+  launch=$(cat "$launchlog")
+  assert_not_contains "$launch" "--mcp-config" "an unpinned secondmate must load no extra MCP server"
+  [ -z "$(meta_field "$w/home/state/sm.meta" mcp)" ] || fail "an unpinned secondmate must record no mcp="
+  [ ! -e "$w/home/state/sm.mcp.json" ] || fail "an unpinned secondmate must get no generated MCP config"
+  pass "C2c spawn: a per-secondmate MCP pin adds only its servers, and another mate's pin never applies"
+}
+
+test_spawn_secondmate_mcp_pin_refusals_launch_nothing() {
+  local w sm launchlog out status pin
+  for variant in unknown malformed codex flag; do
+    w="$TMP_ROOT/spawn-mcp-pin-refuse-$variant"
+    sm="$w/sm"
+    launchlog="$w/launch.log"
+    mkdir -p "$w/home/config/secondmate-accounts/sm"
+    printf 'claude\n' > "$w/home/config/secondmate-harness"
+    write_sm_mcp_servers "$w"
+    pin="$w/home/config/secondmate-accounts/sm/mcp"
+    printf 'slack\n' > "$pin"
+    make_seeded_home "$sm" sm
+    case "$variant" in
+      unknown) printf 'nope\n' > "$pin" ;;
+      malformed) printf 'bad name\n' > "$pin" ;;
+      codex) printf 'codex\n' > "$w/home/config/secondmate-harness" ;;
+    esac
+    if [ "$variant" = flag ]; then
+      rm -f "$pin"
+      out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --mcp slack 2>&1); status=$?
+    else
+      out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+    fi
+    expect_code 1 "$status" "the $variant MCP pin case must refuse"$'\n'"$out"
+    case "$variant" in
+      unknown) assert_contains "$out" "does not define" "unknown pinned server should be named" ;;
+      malformed) assert_contains "$out" "$pin" "malformed pin refusal should name the file" ;;
+      codex) assert_contains "$out" "only for a claude harness" "non-claude pinned mate should refuse" ;;
+      flag) assert_contains "$out" "secondmate-accounts/<id>/mcp" "--mcp on a secondmate should point at the pin file" ;;
+    esac
+    [ ! -s "$launchlog" ] || fail "the $variant MCP pin refusal must launch nothing"
+    [ ! -e "$w/home/state/sm.meta" ] || fail "the $variant MCP pin refusal must write no task record"
+  done
+  pass "C2d spawn: a per-secondmate MCP pin refuses an unknown or malformed name, a non-claude mate, and --mcp"
+}
+
 test_approval_mode_inheritance_present_and_absent() {
   local w head out err status setting fallback
   w=$(new_world permmode-inherit)
@@ -2999,6 +3083,8 @@ test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
 test_spawn_secondmate_claude_grants_parent_inbox_dir
+test_spawn_secondmate_mcp_pin_adds_only_the_named_servers
+test_spawn_secondmate_mcp_pin_refusals_launch_nothing
 test_approval_mode_inheritance_present_and_absent
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
