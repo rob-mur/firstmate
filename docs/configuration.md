@@ -2001,7 +2001,7 @@ It holds the same JSON `claude --mcp-config` accepts:
 {"mcpServers": {"slack": {"type": "http", "url": "https://mcp.slack.com/mcp"}}}
 ```
 
-`bin/fm-spawn.sh <id> <project> ... --mcp slack` (repeatable, also `--mcp=slack`) writes only the named entries to `state/<id>.mcp.json` and launches Claude with `--mcp-config <that file>`.
+`bin/fm-spawn.sh <id> <project> ... --mcp slack` (repeatable, also `--mcp=slack`) writes only the named entries to `state/<id>.mcp.json` and launches Claude with `--mcp-config=<that file>` (the joined form, because the option is variadic and would otherwise take the launch prompt as a second file).
 It does not pass `--strict-mcp-config`: the worker keeps its ordinary MCP configuration and gains the named servers, so the opt-in never removes a server the captain relies on.
 The sorted, comma-joined names are recorded as `mcp=` in `state/<id>.meta` (absent when unused, so ordinary records are unchanged), and every relaunch replays them; `fm-spawn.sh --relaunch` refuses `--mcp` so the record stays the single source.
 A name the file does not define, a missing or malformed file, a malformed name, a non-Claude harness, a raw launch command, or `backend=t3code` refuses before anything is launched.
