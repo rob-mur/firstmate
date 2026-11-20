@@ -1953,6 +1953,36 @@ test_option_x_colon_marks_are_the_card_options() {
   pass "option x colon marks are the card options"
 }
 
+# The bcr-dec10-grill grill-bcr-r6 line ("Option a (recommended): ...") and the
+# aegis-release-mrs line ("Option A (recommended): ..."): a parenthesised
+# recommendation between the mark and its colon.
+BCR_R6_LINE='needs-decision [key=grill-bcr-r6] [at=1795169168]: Shall APP-5861 be built with the recommended answer (a) to all five questions on page bcr-5861? Option a (recommended): yes, one ticket of about 3 days; a payment a handler already booked by hand is not booked again; a payment line with Code opération avis 50 goes to manual review. Option b: yes, with the changes you choose per question on page bcr-5861. Option c: as a, but book every payment, even ones a handler already booked by hand. Assumptions A1-A9 are in the round file; object by number. https://youtrack.prd.descartesunderwriting.fr/issue/APP-5861 /home/rob/repos/firstmate/data/bcr-dec10-grill/round-6.md'
+AEGIS_REL_LINE='needs-decision [key=default] [at=1795169167]: Ship today'"'"'s release as 2.64.0 (on staging since 08:41 UTC today; holds !870, !876 and 9 tagged tickets) without the unready tickets? Option A (recommended): after the staging UAT go-ahead, promote 2.64.0 to prod; move the claim-status set (APP-5485/5486/5487, epic MR !895 is a draft 16 behind main) to a later release tag; !878 and !898 change nothing in prod, so they can merge today without a new staging round. Option B: merge !878 and !898 first, cut a new version and redo staging and UAT today (no prod gain). Option C: hold today'"'"'s release for the claim-status set (not achievable today). Report: /home/rob/repos/firstmate/data/aegis-release-mrs/report.md MRs: https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/878'
+
+# "Option a (recommended):" and "Option A (recommended):" marks, and the
+# "(preferred)" and "(my recommendation)" spellings in any case, are the card
+# options with the parenthesised one recommended.
+test_option_x_parenthesised_recommendation_marks_are_the_card_options() {
+  local card
+  card=$(real_line_card bcr-r6 bcr-dec10-grill "$BCR_R6_LINE")
+  assert_equals "option-a|option-b|option-c|option-a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "bcr r6: options and recommendation"
+  jq -e '(.options[0].label | contains("one ticket of about 3 days")) and (.options[1].label | contains("the changes you choose per question"))
+         and (.options[2].label == "As a, but book every payment, even ones a handler already booked by hand")
+         and (.question == "Shall APP-5861 be built with the recommended answer (a) to all five questions on page bcr-5861?")' <<<"$card" >/dev/null \
+    || fail "bcr r6: the labels or the question are not the reason's: $card"
+  card=$(real_line_card aegis-rel aegis-release-mrs "$AEGIS_REL_LINE")
+  assert_equals "option-a|option-b|option-c|option-a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: options and recommendation"
+  assert_equals "Merge !878 and !898 first, cut a new version and redo staging and UAT today (no prod gain)|Hold today's release for the claim-status set (not achievable today)" \
+    "$(jq -r '[.options[1:][].label] | join("|")' <<<"$card")" "aegis release: option labels"
+  jq -e '.options[0].label | startswith("After the staging UAT go-ahead, promote 2.64.0 to prod;")' <<<"$card" >/dev/null \
+    || fail "aegis release: the recommended label lost its text or kept its mark: $card"
+  card=$(real_line_card aegis-rel-pref aegis-release-mrs "$(sed 's/Option A (recommended):/Option A:/; s/Option B:/option b (PREFERRED):/' <<<"$AEGIS_REL_LINE")")
+  assert_equals "option-a|option-b|option-c|option-b" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: (preferred)"
+  card=$(real_line_card aegis-rel-mine aegis-release-mrs "$(sed 's/Option A (recommended):/Option A:/; s/Option C:/Option C (My Recommendation):/' <<<"$AEGIS_REL_LINE")")
+  assert_equals "option-a|option-b|option-c|option-c" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: (my recommendation)"
+  pass "option x parenthesised recommendation marks are the card options"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -2107,4 +2137,5 @@ fm_test_run \
   test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
   test_equals_options_and_trailing_links_and_paths_leave_the_about \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \
-  test_option_x_colon_marks_are_the_card_options
+  test_option_x_colon_marks_are_the_card_options \
+  test_option_x_parenthesised_recommendation_marks_are_the_card_options
