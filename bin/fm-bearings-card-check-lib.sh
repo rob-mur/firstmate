@@ -28,7 +28,11 @@
 # `free_text`, `no_link`, `options_inferred` and `from_status` are optional.
 # Exempt are a merge card (its type is the question) and a page-backed card,
 # one carrying `off_board` or with no options and a Lavish page link, whose
-# decision is on that page.
+# decision is on that page. Any card whose reason (its `context.reason`, else
+# its `about`) carries two or more "Option x ...:" marks must offer options
+# other than none or a default yes/no (yes, no, approve, decline): those marks
+# list choices the option reader could not turn into options, so the card is
+# named until the reader learns the form or the reason is rewritten.
 #
 # fm_bearings_undecided_cards <data.json>: print one `<key>: missing <field>
 # (<why>)[, <field> (<why>)]` line per Captain's Call card in an
@@ -66,6 +70,8 @@ fm_bearings_undecided_cards() {  # <data.json>
     | ([.question, .decide] | map(text) | map(select(length > 0))) as $prompts
     | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $action
     | (.from_status == true) as $raised
+    | ([ (.context.reason // .about // "") | strings
+         | match("(?<![[:alnum:]])[Oo][Pp][Tt][Ii][Oo][Nn] [A-Za-z0-9](?![[:alnum:]])[^.:?!]{0,40}:"; "g") ] | length) as $marks
     | ((.links // [] | length) > 0 or ((.pr_url // "") | length) > 0 or .no_link == true) as $linked
     | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
          then "question (no question or decide prompt, and the title is not a question)"
@@ -78,6 +84,11 @@ fm_bearings_undecided_cards() {  # <data.json>
          elif ($raised | not) and .free_text != true and ($action | not)
               and ((.options | length) == 0 or .options_inferred == true)
          then "options (no recorded choices: re-hold with --option <value>=<label> or --free-text)"
+         else empty end),
+        (if ($marks >= 2)
+              and ((.options | length) == 0
+                   or all(.options[]; .value | IN("yes", "no", "approve", "decline")))
+         then "options (the reason lists \($marks) Option marks but the card offers \(if (.options | length) == 0 then "no options" else "only a default yes/no" end): write each as \"Option a: ...\")"
          else empty end),
         (if ($raised | not) and ($linked | not)
          then "link (no link: re-hold with --link <url|page:id> or --no-link)" else empty end) ]
