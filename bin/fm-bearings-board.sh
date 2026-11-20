@@ -174,6 +174,9 @@
 # session the listing no longer shows (an ended standalone page) resolves only
 # when a live page record names it in `replaces` (bin/fm-board-page.sh open
 # --replaces), which maps that old session URL to the registered page.
+# A card that links a live page does not also show its raw `page:<id>` token:
+# the token in its question or about reads "the linked page", or the "<label>"
+# page when the card links more than one.
 # A live page also links itself to the work it is about: before the decision
 # check, a card whose key or `context.task` the page record names in `task`
 # (bin/fm-board-page.sh open --task), whose key is the page id, or whose text
@@ -627,7 +630,14 @@ resolve_page_links() {  # <pages-json> <sessions-json>
         (if has("links") then .links |= map(resolve) else . end)
         | if has("off_board") then
             (if any((.links // [])[]; has("page")) then . else . + .off_board end) | del(.off_board)
-          else . end)'
+          else . end
+        | [ (.links // [])[] | select(has("page")) ] as $pl
+        | reduce $pl[] as $l (.;
+            (if ($pl | length) == 1 then "the linked page" else "the \"" + $l.label + "\" page" end) as $say
+            | reduce ("question", "about") as $f (.;
+                if (.[$f] | type) == "string"
+                then .[$f] |= gsub("(?<![[:alnum:]-])page:" + $l.page + "(?![[:alnum:]-])"; $say)
+                else . end)))'
 }
 
 # --- Lavish session liveness -------------------------------------------------
