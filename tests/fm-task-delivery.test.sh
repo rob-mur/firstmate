@@ -641,7 +641,7 @@ test_pr_manual_brief_hands_the_pr_text_to_the_worker() {
   assert_grep 'gh-axi pr create' "$brief" "the worker was not told to open the PR itself"
   assert_grep 'Never post a comment or review' "$brief" "the worker was not kept from posting comments"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'gh-axi pr checks <number> --watch' "$brief" "the worker was not told how to wait for the PR's checks"
+  assert_grep 'bin/fm-ci-wait.sh <PR URL>` call' "$brief" "the worker was not told how to wait for the PR's checks"
   assert_grep 'done [at=<epoch>]: PR {url} checks green' "$brief" "the CI-green ready report was lost"
   assert_grep 'is one the /no-mistakes run pushed' "$brief" "the named-head rule was lost"
   assert_grep 'ask-user findings are never yours to answer' "$brief" "the ask-user escalation rule was lost"
