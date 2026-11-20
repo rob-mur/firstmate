@@ -27,6 +27,9 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The board build reads the live state of each PR/MR a card links; keep it
+# off the network.
+export FM_BEARINGS_BOARD_PR_CHECK=0
 
 CHROME=${FM_TEST_CHROME:-}
 if [ -z "$CHROME" ]; then
