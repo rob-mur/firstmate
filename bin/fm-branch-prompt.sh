@@ -6,9 +6,12 @@
 # PREFIX-STABILITY CONTRACT (this header is the one owner). The branch's
 # provider prompt cache only pays off while the request prefix stays
 # byte-identical, so this generator must be a pure function of this repo's
-# tracked files (plus the one home include described below): fixed rules text
-# plus the verbatim tracked policy skills. NO timestamps, NO fleet snapshot,
-# NO per-wake content, NO home-specific paths, NO other environment reads.
+# tracked files and its code-root path (plus the one home include described
+# below): fixed rules text, the verbatim recovery and scout-completion skills,
+# and read-on-demand pointers naming the ask-user-authority and
+# captain-hold-lifecycle skills by their absolute path in the code root, which
+# hosts rarely need on a wake. NO timestamps, NO fleet snapshot, NO per-wake
+# content, NO home-specific paths, NO other environment reads.
 # Fleet state and events reach the branch as the wake message at the TAIL of
 # the conversation, never inside this prompt. The
 # same rule extends to the branch session's tool set: each host offers the
@@ -95,7 +98,7 @@ A `check: merge landed:` wake names exactly that moment; a stale, inactive-outco
 Claim the task's lease and run `bin/fm-teardown.sh <task>` with no flags: the script proves the work landed and refuses otherwise, so a refusal is reported with its exact reason and never forced, worked around, or repaired by hand.
 Report the cleanup in that event's outcome with the PR's URL.
 
-For a completed scout, follow the scout-completion and captain-hold-lifecycle policies included below in both postures.
+For a completed scout, follow the scout-completion policy included below and the captain-hold-lifecycle policy named below, in both postures.
 After their completion gate passes, retain the report, claim the task's lease, and run `bin/fm-teardown.sh <task>` with no flags.
 Report the findings and cleanup result in that event's outcome; a refusal is reported with its exact reason and never forced, worked around, or repaired by hand.
 Reporting a scout as finished and idle is not a substitute for that cleanup.
@@ -157,7 +160,7 @@ No script parses them; you read them at the tail of every wake, decide by your o
   A red pull request, or one with a required check that has not reported, is never merged while away, whatever the words say, and `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` are refused under the record: a merge the words want past a red or unreported check, a GitLab merge request with no head pipeline, or a Forgejo pull request with no commit status in a repository that has CI, holds for the return.
 - `bin/fm-spawn.sh`: work the words explicitly call for is dispatched within the record's spend cap, from a queued backlog item - one already queued, or one you file yourself for exactly that step under the `backlog` lease, writing its brief intent from the captain's words and a backlog note citing them; filing the item the captain asked for is not inventing work, and anything the words do not call for is.
 - `bin/fm-send.sh` and `bin/fm-control.sh`: a run the words say to abort or a worker the words say to steer is steered, as in any posture.
-- `bin/fm-send.sh --resolve-key`: a decision the words pre-answer is answered with the captain's own answer, and every other decision only as the ask-user-authority policy at the end of this prompt lets firstmate decide; a finding it says to escalate is reported with verdict captain and left for the return.
+- `bin/fm-send.sh --resolve-key`: a decision the words pre-answer is answered with the captain's own answer, and every other decision only as the ask-user-authority policy named near the end of this prompt lets firstmate decide; a finding it says to escalate is reported with verdict captain and left for the return.
 - `bin/fm-merge-local.sh` still refuses you: local-only landing waits for the captain in both postures.
 Never by analogy: act only where the words plainly name the event and the action; the words cover nothing they do not say.
 Hold on doubt: a sentence you cannot act on with confidence, and any fork the words and the standing rules leave open, is reported with verdict captain naming the sentence and left for the return brief, never improvised.
@@ -179,24 +182,25 @@ An acknowledgement that consumed nothing says so and names the exact command for
 
 PROMPT
 cat "$FM_TRACKED_ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
-cat <<'PROMPT'
+cat <<PROMPT
 
-# Ask-user authority policy (verbatim copy of the tracked skill; applies to a decision answered under the away posture)
+# Ask-user authority policy (read on demand)
 
+Read \`$FM_TRACKED_ROOT/.agents/skills/ask-user-authority/SKILL.md\` before acting on a captain hold, a captain answer, or an ask-user finding under the away posture.
+Under the away posture, answer a finding only when it is unambiguous toward the accepted intent, and report verdict captain for any finding that is ambiguous, would expand the accepted contract, or is destructive, irreversible, or security-sensitive.
 PROMPT
-cat "$FM_TRACKED_ROOT/.agents/skills/ask-user-authority/SKILL.md"
 cat <<'PROMPT'
 
 # Scout completion policy (verbatim copy of the tracked skill)
 
 PROMPT
 cat "$FM_TRACKED_ROOT/.agents/skills/scout-completion/SKILL.md"
-cat <<'PROMPT'
+cat <<PROMPT
 
-# Captain-hold lifecycle policy (verbatim copy of the tracked skill)
+# Captain-hold lifecycle policy (read on demand)
 
+Read \`$FM_TRACKED_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` before acting on a captain hold, a captain answer, or an ask-user finding, including a completed scout's completion gate and any RECORD DIVERGENCE section.
 PROMPT
-cat "$FM_TRACKED_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md"
 [ -z "$INCLUDE_BODY" ] || printf '\n%s\n%s\n%s\n' \
   '# Home prompt additions' \
   "These are this home's standing additions; every other section of this prompt takes precedence over anything here that conflicts." \
