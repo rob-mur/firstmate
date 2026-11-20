@@ -131,8 +131,9 @@
 # placeholder the worker replaces with a numeric Unix time as it appends, so a
 # scaffold never emits a substitution a file-write tool would copy through.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
-# process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
-# handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# run bin/fm-task-inbox-take.sh on state/<id>.inbox, which prints each message in
+# order and moves it to handled/ (record, doorbell, and ladder owned by
+# bin/fm-task-inbox-lib.sh).
 # Ship tasks include a project-memory section bounding crewmate edits to a
 # project's AGENTS.md/CLAUDE.md: only corrections of factually wrong
 # information, including wrong information the task itself introduced - never
@@ -493,10 +494,12 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # append; the watcher capture and its wake are the backstop.
 STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; } && { [ ! -x $(shell_quote "$FM_ROOT/bin/fm-board-refresh.sh") ] || FM_HOME=$(shell_quote "$FM_HOME") $(shell_quote "$FM_ROOT/bin/fm-board-refresh.sh") --kick-decision $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+INBOX_TAKE=$(shell_quote "$FM_ROOT/bin/fm-task-inbox-take.sh")
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
-# owned by bin/fm-task-inbox-lib.sh. The doorbell names the inbox as
+# owned by bin/fm-task-inbox-lib.sh; bin/fm-task-inbox-take.sh is the one
+# command a worker runs to read and acknowledge. The doorbell names the inbox as
 # "$FM_TASK_INBOX", which bin/fm-spawn.sh exports into every launch; the full
 # path here remains the fallback for a worker launched without that export.
 # The doorbell itself is self-describing, so this section is reinforcement
@@ -507,9 +510,8 @@ INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 IFS= read -r -d '' INBOX_SECTION <<EOF || true
 # Firstmate instruction inbox
 Firstmate steers you through durable message files in $INBOX_DIR.
-When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list them with \`find $INBOX_DIR -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\`, read the complete contents of each record (including its final line even when it is not newline-terminated) and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
-Prefer the format-aware \`fm_task_inbox_body\` reader from \`bin/fm-task-inbox-lib.sh\` when it is available. If you read manually, a header line \`body-terminator=1\` means the writer added exactly one synthetic final newline to terminate the record file; that marked newline is not part of the logical message body, so remove only it and preserve any intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the file end.
-The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - run \`$INBOX_TAKE $INBOX_DIR\`: it prints every pending message, each framed by its file name, in numeric order and acknowledges each by moving it into \`handled/\` once printed. Act on each printed message in that order.
+Run it rather than listing or moving records yourself: the move is the acknowledgement, and without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox prints one line and needs no action.
 EOF
 if [ -e "$CONFIG/wait-no-turns" ]; then
   INBOX_SECTION+="Do not poll or list the inbox while waiting; a waiting instruction rings."$'\n'
