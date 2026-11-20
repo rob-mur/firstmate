@@ -1474,6 +1474,48 @@ test_build_flags_a_card_naming_a_merged_or_closed_mr() {
   pass "build holds back a card naming a merged or closed MR and leaves an open or unreadable one"
 }
 
+# The real case: a profile switch took jq off PATH for a fraction of a second
+# about every 20 minutes, and the board build failed. Here jq vanishes after its
+# first use in the first attempt - the attempt's shell still holds the old path,
+# as it did on the real profile switch - so that attempt fails on a missing
+# binary and the one retry, which finds jq again, builds the board.
+test_build_retries_once_when_a_binary_vanishes() {
+  local home data rc out real
+  home=$(make_home vanishing-jq)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  real=$(command -v jq)
+  cat > "$home/fakebin/jq" <<SH
+#!/usr/bin/env bash
+rm -f -- "\$0"
+exec "$real" "\$@"
+SH
+  chmod +x "$home/fakebin/jq"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ ! -e "$home/fakebin/jq" ] || fail "the vanishing jq was never run"
+  [ "$rc" -eq 0 ] || fail "the build did not survive jq vanishing once: $out"
+  assert_contains "$out" "fakebin/jq: No such file or directory" "the first attempt did not fail on the missing jq: $out"
+  assert_contains "$out" "a binary was missing during the build; retrying once" "the build did not say it was retrying: $out"
+  [ -f "$home/.lavish/bearings-board.html" ] || fail "the retried build wrote no board"
+  pass "build retries once, after a pause, when a binary vanishes during the first attempt"
+}
+
+# An ordinary failure is final at once: a payload that is not JSON is refused
+# by one attempt, with no retry.
+test_build_does_not_retry_an_ordinary_failure() {
+  local home data rc out
+  home=$(make_home no-retry)
+  data="$home/payload.json"
+  printf 'not json\n' > "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a payload that is not JSON built"
+  assert_contains "$out" "board data is not valid JSON" "the refusal did not name the payload: $out"
+  assert_not_contains "$out" "retrying once" "an ordinary failure was retried: $out"
+  [ "$(printf '%s\n' "$out" | grep -c 'board data is not valid JSON')" -eq 1 ] \
+    || fail "an ordinary failure ran more than one attempt: $out"
+  pass "build does not retry a failure that is not a missing binary"
+}
+
 # A live page about a task links that task's card in place, whether its record
 # names the task (fm-board-page.sh open --task) or the card names the page id;
 # a Waiting or Charted row about it gains the page in its expandable context.
@@ -1584,6 +1626,8 @@ test_path_is_stable_and_home_scoped
 test_build_flags_a_card_without_recorded_choices_or_a_link
 test_build_flags_a_card_listing_a_link_twice
 test_build_flags_a_card_naming_a_merged_or_closed_mr
+test_build_retries_once_when_a_binary_vanishes
+test_build_does_not_retry_an_ordinary_failure
 test_build_flags_a_card_whose_option_marks_were_not_read
 test_a_page_about_a_task_links_its_card_and_context_in_place
 test_a_linked_page_token_leaves_the_card_text
