@@ -1252,6 +1252,57 @@ EOF
   pass "a secondmate hold carries its recorded options and link to its board card"
 }
 
+# A secondmate running older code publishes captain holds without choices,
+# question, or reason_full, and with a reason cut short. Its own backlog row
+# still records the options and "no link" (the token-economy shape: option lines,
+# a no-link line, then a body paragraph). The card must read those from the
+# backlog row, so it carries both options, no_link, and the full question.
+test_an_old_shape_secondmate_hold_reads_its_choices_from_the_backlog() {
+  local home mate fakebin json card summary reason
+  reason='Report: /tmp/x/report.md. H1 trims the branch prompt in bin/fm-branch-prompt.sh, about +27M WU per 30 days for second-mate hosts and +14M for main. Ship it as a separate PR?'
+  home=$(make_home mate-hold-old-shape); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  cat > "$mate/data/backlog.md" <<EOF
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] mate-h1-decide - Decide H1 branch-prompt trim (repo: firstmate) (kind: captain) (since 2026-07-11) (hold: $reason) (hold-kind: captain)
+  Captain hold set: 2026-07-11T10:27:21Z
+  Captain hold origin: secondmate-prefix
+  Captain hold option: yes=Ship H1 as a separate PR
+  Captain hold option: no=Do not ship H1
+  Captain hold no link: yes
+
+  Origin: secondmate-prefix
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$home"
+  summary="$mate/state/home-summary.json"
+  jq '(.decisions_open, .queued) |= map(
+        if .id == "mate-h1-decide"
+        then del(.choices, .question, .reason_full, .title_full, .hold_reason_full,
+                 .origin, .answers, .notes, .hold_set, .hold_reconciled, .report_path)
+        else . end)' "$summary" > "$summary.tmp" && mv "$summary.tmp" "$summary"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    NET_LOG="$home/net.log" "$BEARINGS" --json)
+  printf '%s' "$json" | jq -e --arg q "Decide H1 branch-prompt trim: $reason" '
+    [.decisions_open[] | select(.id == "mate/mate-h1-decide")] | length == 1
+      and (.[0].choices.options | map(.value) == ["yes","no"])
+      and .[0].choices.no_link == true
+      and .[0].question == $q
+  ' >/dev/null || fail "an old-shape secondmate hold lost its backlog options, no-link, or question: $json"
+  card=$(printf '%s' "$json" | "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot -)
+  printf '%s' "$card" | jq -e '
+    ([.captains_call[] | select(.key == "mate-h1-decide")] | length == 1
+      and (.[0].options | map(.value) == ["yes","no"]))
+    and ([(.cards_to_fix // [])[] | tostring | select(test("mate-h1-decide"))] | length == 0)
+  ' >/dev/null || fail "an old-shape secondmate hold card still needs fixing: $card"
+  pass "an old-shape secondmate hold reads its options and no-link from its backlog"
+}
+
 test_report_pointers_surface() {
   local home fakebin json
   home=$(make_home reports); write_fixture "$home"
@@ -4501,6 +4552,7 @@ fm_test_run \
   test_completed_scout_report_not_pending \
   test_open_decision_surfaces_end_to_end \
   test_a_secondmate_hold_carries_its_options_and_link_to_the_board \
+  test_an_old_shape_secondmate_hold_reads_its_choices_from_the_backlog \
   test_report_pointers_surface \
   test_queued_item_prose_never_hides_it \
   test_include_prs_is_the_only_fetch_path \

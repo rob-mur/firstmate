@@ -118,6 +118,10 @@
 #     answers (each recorded resolution's at, mode, and first paragraph of
 #     words), notes (the task body's other paragraphs, machine lines removed),
 #     and report_path.
+#     When a local home's summary predates those fields (a captain-hold row with
+#     no choices), the reader fills only the absent fields from that home's own
+#     backlog row, read-only and within the summary byte bound; remote homes are
+#     never read beyond their summary.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
@@ -1551,6 +1555,55 @@ summary_file_read() {  # <file> <expected-home> <output-file>
 }
 
 
+# A local secondmate whose code root predates the hold choices publishes captain
+# holds without choices, question, or the uncut reason, so its board card would
+# show no options and a cut-short question. Fill only those absent fields from the
+# home's own backlog row, read-only and within the summary byte bound, into the
+# private selected copy; rows the summary already carries stay as published.
+summary_backfill_local_holds() {  # <summary-file> <home>
+  local summary=$1 backlog="$2/data/backlog.md" records filled
+  [ -f "$backlog" ] && [ ! -L "$backlog" ] && [ -r "$backlog" ] || return 0
+  jq -e 'any((.decisions_open // [])[], (.queued // [])[];
+           (.verb == "captain-hold" or .hold_kind == "captain") and (has("choices") | not))' \
+    "$summary" >/dev/null 2>&1 || return 0
+  summary_file_oversized "$backlog" && return 0
+  records=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/.backfill-records.XXXXXX") || return 0
+  filled=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/.backfill-summary.XXXXXX") || { rm -f -- "$records"; return 0; }
+  if backlog_json "$backlog" > "$records" 2>/dev/null \
+    && jq -c --slurpfile b "$records" '
+      ([$b[0].records[]? | select(.structured and .hold_kind == "captain" and .id != null)
+        | {key:.id,value:.}] | from_entries) as $rows
+      | def empty_choices: {options:[],links:[],free_text:false,no_link:false};
+        def question($r): if $r.hold_reason == null then null else $r.title + ": " + $r.hold_reason end;
+        def common($r):
+          (if has("choices") then . else .choices = ($r.hold_choices // empty_choices) end)
+          | (if has("question") then . else .question = question($r) end)
+          | (if has("title_full") then . else .title_full = $r.title end)
+          | (if has("answers") then . else .answers = ($r.hold_answers // []) end)
+          | (if has("notes") then . else .notes = ($r.body_notes // []) end)
+          | (if has("report_path") then . else .report_path = ($r.report_path // null) end);
+      .decisions_open |= (if type == "array" then map(
+          if .verb == "captain-hold" and (has("choices") | not) and $rows[.id] != null
+          then $rows[.id] as $r | common($r)
+            | (if has("reason_full") then . else .reason_full = $r.hold_reason end)
+            | (if has("hold_set") then . else .hold_set = ($r.hold_set // null) end)
+            | (if has("origin") then . else .origin = ([($r.body_lines // [])[]
+                | capture("^Captain hold origin:[[:space:]]*(?<v>[^[:space:]]+)")? | .v][0] // null) end)
+          else . end) else . end)
+      | .queued |= (if type == "array" then map(
+          if .hold_kind == "captain" and (has("choices") | not) and $rows[.id] != null
+          then $rows[.id] as $r | common($r)
+            | (if has("hold_reason_full") then . else .hold_reason_full = $r.hold_reason end)
+          else . end) else . end)
+    ' "$summary" > "$filled" 2>/dev/null && [ -s "$filled" ]; then
+    mv -f -- "$filled" "$summary" || rm -f -- "$filled"
+  else
+    rm -f -- "$filled"
+  fi
+  rm -f -- "$records"
+  return 0
+}
+
 summary_file_oversized() {  # <file>
   local bytes
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
@@ -2126,6 +2179,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     fi
 
     if [ -z "$reason" ]; then
+      [ "$remote" = true ] || summary_backfill_local_holds "$summary_file" "$home"
       state=$(jq -r '.state' "$summary_file")
       reconciliation=$(parent_evidence_reconciliation_json "$summary_file" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
