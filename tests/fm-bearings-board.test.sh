@@ -1375,6 +1375,45 @@ test_build_flags_a_card_without_recorded_choices_or_a_link() {
   pass "build holds back a card with no recorded choices or no link by what to add, and passes the opt-outs and generator cards"
 }
 
+# A card lists each link once. Two spellings of one url across `links` and
+# `pr_url` that differ only by a trailing slash or a #fragment, or one url
+# repeated in `links`, hold the card back naming that link; a `pr_url` repeated
+# exactly in `links`, which the board shows once, does not.
+test_build_flags_a_card_listing_a_link_twice() {
+  local home data rc out
+  home=$(make_home duplicate-links)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [
+    {"key":"slash-and-fragment","type":"decision","repo":"cd","title":"Apply the merge?",
+     "question":"Apply cd-948 now?","options":[{"value":"apply","label":"Apply"},{"value":"wait","label":"Wait"}],
+     "pr_url":"https://gitlab.com/example/cd/-/merge_requests/948",
+     "links":[{"url":"https://gitlab.com/example/cd/-/merge_requests/948/","label":"MR 948"},
+              {"url":"https://gitlab.com/example/cd/-/merge_requests/948#note_1","label":"MR 948 (2)"}]},
+    {"key":"repeated-in-links","type":"decision","repo":"cd","title":"Keep the job?",
+     "question":"Keep the nightly job?","options":[{"value":"keep","label":"Keep"},{"value":"drop","label":"Drop"}],
+     "links":[{"url":"https://example.org/runbook","label":"Runbook"},
+              {"url":"https://example.org/runbook","label":"Runbook (2)"}]},
+    {"key":"pr-url-echoed","type":"decision","repo":"cd","title":"Ship it?",
+     "question":"Ship the image today?","options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}],
+     "pr_url":"https://gitlab.com/example/cd/-/merge_requests/950",
+     "links":[{"url":"https://gitlab.com/example/cd/-/merge_requests/950","label":"MR 950"},
+              {"url":"https://gitlab.com/example/cd/-/merge_requests/951","label":"MR 951"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -eq 0 ] || fail "cards listing a link twice stopped the whole board: $out"
+  assert_contains "$out" "undecided-card: slash-and-fragment: duplicate link (https://gitlab.com/example/cd/-/merge_requests/948 is listed more than once: keep one)" \
+    "spellings differing by a trailing slash or fragment were not named as one duplicate link: $out"
+  assert_contains "$out" "undecided-card: repeated-in-links: duplicate link (https://example.org/runbook is listed more than once: keep one)" \
+    "a url repeated in links was not named: $out"
+  assert_not_contains "$out" "pr-url-echoed" "a pr_url echoed exactly in links was flagged: $out"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    ([.cards_to_fix[].key] | sort) == ["repeated-in-links", "slash-and-fragment"]
+    and ([.captains_call[] | select(.key == "pr-url-echoed")] | length) == 1
+  ' >/dev/null || fail "the board did not hold back exactly the duplicate-link cards: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '{call: [.captains_call[].key], fix: .cards_to_fix}')"
+  pass "build holds back a card listing one link more than once, after normalising trailing slashes and fragments"
+}
+
 # A live page about a task links that task's card in place, whether its record
 # names the task (fm-board-page.sh open --task) or the card names the page id;
 # a Waiting or Charted row about it gains the page in its expandable context.
@@ -1483,6 +1522,7 @@ test_a_card_that_names_a_page_title_links_that_page() {
 
 test_path_is_stable_and_home_scoped
 test_build_flags_a_card_without_recorded_choices_or_a_link
+test_build_flags_a_card_listing_a_link_twice
 test_build_flags_a_card_whose_option_marks_were_not_read
 test_a_page_about_a_task_links_its_card_and_context_in_place
 test_a_linked_page_token_leaves_the_card_text
