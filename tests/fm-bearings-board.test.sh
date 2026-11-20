@@ -1339,6 +1339,41 @@ test_build_flags_a_card_without_recorded_choices_or_a_link() {
 # A live page about a task links that task's card in place, whether its record
 # names the task (fm-board-page.sh open --task) or the card names the page id;
 # a Waiting or Charted row about it gains the page in its expandable context.
+# A card that links a live page does not also show its raw page:<id> token: the
+# token reads "the linked page", or the "<title>" page when the card links more.
+test_a_linked_page_token_leaves_the_card_text() {
+  local home data dir out id
+  home=$(make_home page-token)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null 2>&1 || fail "the first build failed"
+  for id in understand-mr821 mr821-diff; do
+    dir=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-board-page.sh" dir "$id") \
+      || fail "the page folder was not given"
+    printf '<html></html>\n' > "$dir/page.html"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_BOARD_PAGE_REFRESH=true \
+      "$ROOT/bin/fm-board-page.sh" open "$id" --title "Page $id" >/dev/null \
+      || fail "the page $id did not open"
+  done
+  jq '.captains_call += [
+    {"key":"mr821","type":"decision","repo":"aegis","title":"Which held !821 review comments do you want me to post?",
+     "about":"Read page:understand-mr821 first, and answer its 8 why-questions in place if you want them checked.",
+     "options":[{"value":"a","label":"Post all"},{"value":"b","label":"Post none"}]},
+    {"key":"mr821-two","type":"decision","repo":"aegis","title":"Post the !821 comments?",
+     "about":"Read page:understand-mr821 and page:mr821-diff first.",
+     "options":[{"value":"a","label":"Post all"},{"value":"b","label":"Post none"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the cards about live pages were refused: $out"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    ([.captains_call[] | select(.key == "mr821") | .about]
+       == ["Read the linked page first, and answer its 8 why-questions in place if you want them checked."])
+    and ([.captains_call[] | select(.key == "mr821") | .links[].page] == ["understand-mr821"])
+    and ([.captains_call[] | select(.key == "mr821-two") | .about]
+       == ["Read the \"Page understand-mr821\" page and the \"Page mr821-diff\" page first."])
+  ' >/dev/null || fail "a raw page token stayed on a card that links the page: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '[.captains_call[] | select(.key | startswith("mr821")) | {key, about, links}]')"
+  pass "a linked page token leaves the card text"
+}
+
 test_a_page_about_a_task_links_its_card_and_context_in_place() {
   local home data dir out
   home=$(make_home page-links)
@@ -1410,6 +1445,7 @@ test_a_card_that_names_a_page_title_links_that_page() {
 test_path_is_stable_and_home_scoped
 test_build_flags_a_card_without_recorded_choices_or_a_link
 test_a_page_about_a_task_links_its_card_and_context_in_place
+test_a_linked_page_token_leaves_the_card_text
 test_a_card_that_names_a_page_title_links_that_page
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
 test_build_accepts_explicit_decisions_and_in_person_actions
