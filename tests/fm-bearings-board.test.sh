@@ -1286,6 +1286,45 @@ test_build_accepts_explicit_decisions_and_in_person_actions() {
   pass "build accepts an explicit question card, an open question answered in free text, and an in-person action card"
 }
 
+# A card whose reason lists two or more "Option x:" marks but which offers no
+# options, or only a default yes/no, is a reason the option reader could not
+# read: it is held back naming the marks, even as a worker status card, so the
+# next such miss surfaces; once its options are the marked ones it builds.
+test_build_flags_a_card_whose_option_marks_were_not_read() {
+  local home data reason out
+  home=$(make_home unread-option-marks)
+  data="$home/payload.json"
+  reason='Shall APP-5861 be built as recommended? Option a (recommended): yes, one ticket. Option b: yes, with your changes. Option c: as a, but book every payment.'
+  write_valid_payload "$data"
+  jq --arg r "$reason" '.captains_call += [{"key":"status.bcr.grill-bcr-r6","type":"decision","repo":null,
+    "title":"bcr-dec10-grill","question":"Shall APP-5861 be built as recommended?","from_status":true,
+    "allow_freeform":true,"context":{"task":"bcr-dec10-grill","reason":$r},
+    "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" status.bcr.grill-bcr-r6 "options (the reason lists 3 Option marks but the card offers only a default yes/no" \
+    "a status card whose Option marks became yes/no"
+
+  write_valid_payload "$data"
+  jq --arg r "$reason" '.captains_call += [{"key":"status.aegis.default","type":"decision","repo":null,
+    "title":"aegis-release-mrs","question":"Ship today'"'"'s release?","from_status":true,
+    "allow_freeform":true,"context":{"task":"aegis-release-mrs","reason":($r | gsub("Option (?<l>[abc])"; "Option \(.l | ascii_upcase)"))},
+    "options":[]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" status.aegis.default "options (the reason lists 3 Option marks but the card offers no options" \
+    "a status card whose Option marks became no options"
+
+  write_valid_payload "$data"
+  jq --arg r "$reason" '.captains_call += [{"key":"status.bcr.grill-bcr-r6","type":"decision","repo":null,
+    "title":"bcr-dec10-grill","question":"Shall APP-5861 be built as recommended?","from_status":true,
+    "allow_freeform":true,"context":{"task":"bcr-dec10-grill","reason":$r},
+    "options":[{"value":"option-a","label":"Yes, one ticket"},{"value":"option-b","label":"Yes, with your changes"},
+               {"value":"option-c","label":"As a, but book every payment"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "a card whose Option marks were read did not build: $out"
+  assert_not_contains "$out" "undecided-card: status.bcr.grill-bcr-r6" "a card whose Option marks were read was held back: $out"
+  pass "the board holds back a card whose Option marks were not read and builds it once they are"
+}
+
 # A decision card offers the decision's own recorded values and something to
 # click. A card whose hold recorded no choices, or that has no link, is flagged
 # naming exactly what to re-hold with; a declared free-text question and a
@@ -1444,6 +1483,7 @@ test_a_card_that_names_a_page_title_links_that_page() {
 
 test_path_is_stable_and_home_scoped
 test_build_flags_a_card_without_recorded_choices_or_a_link
+test_build_flags_a_card_whose_option_marks_were_not_read
 test_a_page_about_a_task_links_its_card_and_context_in_place
 test_a_linked_page_token_leaves_the_card_text
 test_a_card_that_names_a_page_title_links_that_page
