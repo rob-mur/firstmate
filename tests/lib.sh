@@ -202,6 +202,32 @@ fm_test_launch_command() {  # <launch>
   printf '%s' "$command"
 }
 
+# Reads a captured claude launch the way claude's own parser reads
+# --mcp-config: the option is variadic, so a separate-word value keeps taking
+# every following word up to the next option, while the joined
+# --mcp-config=<path> form takes exactly one. Prints one `config <path>` line
+# per file claude would load and a final `prompt <word>` line for the last
+# argument, so a suite can prove the launch prompt stays positional.
+fm_test_claude_mcp_split() {  # <launch>
+  local line words=() i=0 n word
+  line=$(printf '%s\n' "$1" | grep -m1 -E '(^| )claude ') || fail "launch has no claude command: $1"
+  eval "words=(${line#*claude })"
+  n=${#words[@]}
+  while [ "$i" -lt "$n" ]; do
+    word=${words[$i]}
+    case "$word" in
+    --mcp-config=*) printf 'config %s\n' "${word#--mcp-config=}" ;;
+    --mcp-config)
+      while [ $((i + 1)) -lt "$n" ] && [[ "${words[$((i + 1))]}" != -* ]]; do
+        i=$((i + 1))
+        printf 'config %s\n' "${words[$i]}"
+      done ;;
+    esac
+    i=$((i + 1))
+  done
+  [ "$n" -eq 0 ] || printf 'prompt %s\n' "${words[$((n - 1))]}"
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
