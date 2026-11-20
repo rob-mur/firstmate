@@ -33,10 +33,16 @@
 # other than none or a default yes/no (yes, no, approve, decline): those marks
 # list choices the option reader could not turn into options, so the card is
 # named until the reader learns the form or the reason is rewritten.
+# A card also lists each link once: two spellings of its `links` urls and
+# `pr_url` that differ only by trailing slashes or a `#fragment`, or one url
+# repeated within `links`, name the card. A `pr_url` repeated exactly in
+# `links` is not a duplicate: the board shows it once, and the payload builder
+# emits that shape whenever a reason cites the task's own PR.
 #
-# fm_bearings_undecided_cards <data.json>: print one `<key>: missing <field>
-# (<why>)[, <field> (<why>)]` line per Captain's Call card in an
-# fm-bearings-board.v1 payload that fails the rule.
+# fm_bearings_undecided_cards <data.json>: print one `<key>: <problem>` line
+# per Captain's Call card in an fm-bearings-board.v1 payload that fails the
+# rule, <problem> being `missing <field> (<why>)[, <field> (<why>)]` and/or
+# `duplicate link (<url> ...)`, joined by `; `.
 #
 # fm_bearings_status_decision_problem <task> <key> <note>: check one worker
 # status needs-decision line - <key> its decision key ("default" when the line
@@ -58,6 +64,7 @@ fm_bearings_undecided_cards() {  # <data.json>
   jq -r '
     def text: if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end;
     def asks: text | contains("?");
+    def link_norm: sub("#.*$"; "") | sub("/+$"; "");
     .captains_call[]
     | select(.type != "merge")
     | .options |= map(select(.value != "reconcile"))
@@ -73,6 +80,10 @@ fm_bearings_undecided_cards() {  # <data.json>
     | ([ (.context.reason // .about // "") | strings
          | match("(?<![[:alnum:]])[Oo][Pp][Tt][Ii][Oo][Nn] [A-Za-z0-9](?![[:alnum:]])[^.:?!]{0,40}:"; "g") ] | length) as $marks
     | ((.links // [] | length) > 0 or ((.pr_url // "") | length) > 0 or .no_link == true) as $linked
+    | [ .links[]?.url | strings | select(length > 0) ] as $urls
+    | ( [ ([ $urls[], (.pr_url | strings | select(length > 0)) ] | unique | group_by(link_norm)[]
+           | select(length > 1) | .[0] | link_norm),
+          ($urls | group_by(.)[] | select(length > 1) | .[0] | link_norm) ] | unique ) as $dups
     | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
          then "question (no question or decide prompt, and the title is not a question)"
          elif ($prompts | length) > 0 and (any($prompts[]; asks) | not)
@@ -91,9 +102,11 @@ fm_bearings_undecided_cards() {  # <data.json>
          then "options (the reason lists \($marks) Option marks but the card offers \(if (.options | length) == 0 then "no options" else "only a default yes/no" end): write each as \"Option a: ...\")"
          else empty end),
         (if ($raised | not) and ($linked | not)
-         then "link (no link: re-hold with --link <url|page:id> or --no-link)" else empty end) ]
+         then "link (no link: re-hold with --link <url|page:id> or --no-link)" else empty end) ] as $missing
+    | [ (if ($missing | length) > 0 then "missing \($missing | join(", "))" else empty end),
+        ($dups[] | "duplicate link (\(.) is listed more than once: keep one)") ]
     | select(length > 0)
-    | "\($key): missing \(join(", "))"
+    | "\($key): \(join("; "))"
   ' "$1"
 }
 
@@ -121,7 +134,7 @@ fm_bearings_status_decision_problem() {  # <task> <key> <note>
   rm -f -- "$payload"
   while IFS= read -r line; do
     case "$line" in
-      "$slug: missing "*) printf '%s\n' "${line#"$slug: "}"; rc=1 ;;
+      "$slug: "?*) printf '%s\n' "${line#"$slug: "}"; rc=1 ;;
     esac
   done <<EOF
 $undecided
