@@ -111,9 +111,9 @@
 # runs on a worker's needs-decision line to bounce it back (bin/fm-watch.sh).
 # A card that fails is
 # held back, never refused and never silently dropped: it is named on stderr as
-# an `undecided-card: <key>: missing <field> (<why>)` line plus one summary
+# an `undecided-card: <key>: <problem>` line plus one summary
 # line, and it moves out of `captains_call` into the payload's `cards_to_fix`
-# as {key, task, title, problem}, `problem` being that `missing ...` text
+# as {key, task, title, problem}, `problem` being that <problem> text
 # (the key is absent when no card was held back), so
 # no consumer counts or shows it as the captain's while every other card still
 # builds. The page does not render `cards_to_fix`. The build also publishes
@@ -489,7 +489,7 @@ payload_errors() {  # <data.json>
   ' "$1"
 }
 
-# Print one `<key>: <missing fields>` line per Captain's Call card that does
+# Print one `<key>: <problem>` line per Captain's Call card that does
 # not state its decision (see EVERY CARD STATES ITS DECISION above;
 # the check is bin/fm-bearings-card-check-lib.sh's, shared with the watcher).
 undecided_cards() {  # <data.json>
@@ -497,7 +497,7 @@ undecided_cards() {  # <data.json>
 }
 
 # Move each undecided card out of Captain's Call into `cards_to_fix` as
-# {key, task, title, problem}, its `problem` the card's `missing ...` text and
+# {key, task, title, problem}, its `problem` the card's problem text and
 # its task the card's owning task, and leave `cards_to_fix` out when none was.
 # Any other `problem` and any authored `cards_to_fix` are cleared: both are the
 # build's own, never authored.
