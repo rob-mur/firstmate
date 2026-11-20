@@ -1889,6 +1889,70 @@ test_equals_options_and_trailing_links_and_paths_leave_the_about() {
   pass "equals options and trailing links and paths leave the about"
 }
 
+# The cd-930-members-key-2 line: an apply guard sentence follows a shell command
+# whose quoted argument ends on a sentence end.
+CD930_LINE=$(cat <<'EOF'
+needs-decision [key=captain-hold-cd-930-members-key-2] [at=1795107988]: captain hold cd-930-members-key: Will you merge PR 945 (https://forgejo.clarob.uk/rob/continuous-delivery/pulls/945) and then run its infrastructure apply? It is green (7 of 7 checks) at 10127ad and is part 3 of issue 930 (https://forgejo.clarob.uk/rob/continuous-delivery/issues/930): it removes the shared registry key's write access to the container-members image registry, now that the image pushes use the new push-only key. It changes access rights, so it is your call. Nothing applies on merge. Run from devenv shell on main: cd infra && tofu init -backend-config="bucket=ai-ci-pipeline-tofu-state" && tofu apply -var="project_id=ai-ci-pipeline". The plan must read 0 to add, 0 to change, 1 to destroy (the container-members writer grant); anything else is drift, so stop and tell me. (a, recommended) yes, merge and apply; I then close issue 930. (b) hold it for now. https://forgejo.clarob.uk/rob/continuous-delivery/pulls/945
+EOF
+)
+
+# An about keeps a quoted shell command whole and never drops the guard sentence
+# after it, on a worker's status line and on a secondmate's hold alike; a
+# sentence end inside a quoted argument or a code span is no cut point either.
+test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about() {
+  local card snap p cmd guard
+  cmd='cd infra && tofu init -backend-config="bucket=ai-ci-pipeline-tofu-state" && tofu apply -var="project_id=ai-ci-pipeline".'
+  guard='The plan must read 0 to add, 0 to change, 1 to destroy (the container-members writer grant); anything else is drift, so stop and tell me.'
+  card=$(real_line_card cd930-status cd-930-members-key "$CD930_LINE")
+  jq -e --arg c "$cmd" --arg g "$guard" '.about | contains($c) and contains($g)' <<<"$card" >/dev/null \
+    || fail "status: the about lost the apply command or its guard: $card"
+  assert_equals "option-a|option-b|option-a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "status: options"
+  fresh_homes cd930-hold
+  write_snapshot "$TMP_ROOT/cd930-hold-base.json"
+  snap="$TMP_ROOT/cd930-hold.json"
+  jq --arg r "${CD930_LINE#*captain hold cd-930-members-key: }" '.decisions_open = [
+        {id: "cd/cd-930-members-key", key: "cd-930-members-key", verb: "captain-hold", owner: "cd",
+         title_full: "#930: second container-members credential via forge-ops, then cut container-members writer off the shared key; human tofu apply after merge",
+         reason_full: $r,
+         choices: {options: [{label: "a", value: "a"}, {label: "b", value: "b"}],
+                   links: [{label: "PR 945", target: "https://forgejo.clarob.uk/rob/continuous-delivery/pulls/945"},
+                           {label: "issue 930", target: "https://forgejo.clarob.uk/rob/continuous-delivery/issues/930"}],
+                   free_text: false, no_link: false}}]' "$TMP_ROOT/cd930-hold-base.json" > "$snap"
+  p=$(FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$snap") || fail "the generator failed on the cd-930 hold"
+  card=$(jq -c '.captains_call[] | select(.key == "cd-930-members-key")' <<<"$p")
+  jq -e --arg c "$cmd" --arg g "$guard" '.about | contains($c) and contains($g)' <<<"$card" >/dev/null \
+    || fail "hold: the about lost the apply command or its guard: $card"
+  assert_equals "a|b|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "hold: options"
+  # shellcheck disable=SC2016 # The backticks are a code span in the text, not a command.
+  card=$(real_line_card quoted-cut apply-x 'needs-decision [key=apply] [at=1795107988]: Will you run `tofu apply -var="note=one. two"` on main? The plan must read 0 to add, 0 to change, 1 to destroy; anything else is drift, so stop and tell me.')
+  jq -e '(.title | endswith("Will you run `tofu apply -var=\"note=one. two\"` on main?"))
+         and (.about | contains("`tofu apply -var=\"note=one. two\"`"))
+         and (.about | endswith("anything else is drift, so stop and tell me."))' <<<"$card" >/dev/null \
+    || fail "quoted: a sentence end inside a code span was a cut point: $card"
+  pass "an apply guard after a quoted shell command stays in the about"
+}
+
+# The aegis-821-review line: "Option a is my recommendation: ... Option b: ..."
+# marks, a prose sentence after the last option, and a raw page:<id> token.
+MR821_LINE='needs-decision [at=1795104252] [key=default]: Which held !821 review comments do you want me to post? Read page:understand-mr821 first, and answer its 8 why-questions in place if you want them checked. Option a is my recommendation: post a Comment with #3, #4 and #6 to #14, and drop #1, #2 and #5. Option b: post all 14. Option c: post the numbers you list. Option d: post none. I post nothing until you answer. https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/821'
+
+# "Option x:" and "Option x is my recommendation:" marks, any case, are the
+# card options with the recommended one, and the prose after the last option
+# stays in the about.
+test_option_x_colon_marks_are_the_card_options() {
+  local card
+  card=$(real_line_card mr821 aegis-821-review "$MR821_LINE")
+  assert_equals "option-a|option-b|option-c|option-d" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "821: option values"
+  assert_equals "Post a Comment with #3, #4 and #6 to #14, and drop #1, #2 and #5|Post all 14|Post the numbers you list|Post none" \
+    "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "821: option labels"
+  assert_equals "option-a" "$(jq -r '.recommend_value // "none"' <<<"$card")" "821: recommendation"
+  jq -e '(.about | endswith("in place if you want them checked. I post nothing until you answer.")) and (.about | test("Option [a-d]") | not)' <<<"$card" >/dev/null \
+    || fail "821: the about lost its last sentence or kept an option: $card"
+  card=$(real_line_card mr821-caps aegis-821-review "$(sed 's/Option a is my recommendation:/OPTION A IS MY RECOMMENDATION:/; s/Option b:/option B:/' <<<"$MR821_LINE")")
+  assert_equals "option-a|option-b|option-c|option-d|option-a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "821: any case"
+  pass "option x colon marks are the card options"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -2041,4 +2105,6 @@ fm_test_run \
   test_a_comment_link_reads_as_a_comment \
   test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary \
   test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
-  test_equals_options_and_trailing_links_and_paths_leave_the_about
+  test_equals_options_and_trailing_links_and_paths_leave_the_about \
+  test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \
+  test_option_x_colon_marks_are_the_card_options
