@@ -56,7 +56,9 @@
 #
 # sentences: a text split into its sentences, each without leading space. A
 # sentence ends at ".", "?" or "!" before a space or the end of the text, but
-# never at the "." of an abbreviation - e.g., i.e., etc. or vs. (any case).
+# never at the "." of an abbreviation - e.g., i.e., etc. or vs. (any case) -
+# nor inside a quoted string (straight or curly quotes) or a backtick code span, so a
+# shell argument such as -var="a. b" stays in its sentence.
 #
 # option_parse: a reason that lists its own options, split into {lead, options,
 # tail} - lead is the text before the first option, tail the text after the
@@ -69,7 +71,10 @@
 # ..."), and an "A = " mark may follow one
 # ("rec A = ...", "recommended B = ..."): that option's value is then the
 # parse's `recommend`. Lowercase "b = " marks after a sentence end may follow
-# a parenthesised one ("(a, recommended) one. b = two. c = three."). Markers must run 1, 2, 3 or a, b, c
+# a parenthesised one ("(a, recommended) one. b = two. c = three."). Last,
+# "Option a: ... Option b: ..." marks (any case) may carry their own
+# recommendation ("Option a is my recommendation: ...", also "is the
+# recommended option" or "is the preferred one"). Markers must run 1, 2, 3 or a, b, c
 # from the first, at least two; the last option ends at its sentence end; a
 # reason with no such list parses to null. Values are option-<n> or
 # option-<letter>. A label is the full option text, never shortened, with URLs
@@ -122,7 +127,10 @@
 # shellcheck disable=SC2016  # jq program text, not shell expansion
 FM_BEARINGS_QUESTION_JQ_DEFS='
   def sentences:
-    [ scan("[^[:space:]].*?(?:(?:[?!]|(?<!\\b[eE]\\.g)(?<!\\b[iI]\\.e)(?<!\\b[eE]tc)(?<!\\b[vV]s)\\.)(?=[[:space:]]|$)|$)") ];
+    # A quoted string or a backtick code span is one piece: a ".", "?" or "!"
+    # inside it never ends the sentence (-var="a. b", `x. y`).
+    "\"[^\"\n]*\"|\u201c[^\u201d\n]*\u201d|`[^`\n]*`" as $span
+    | [ scan("(?:" + $span + "|[^[:space:]])(?:" + $span + "|.)*?(?:(?:[?!]|(?<!\\b[eE]\\.g)(?<!\\b[iI]\\.e)(?<!\\b[eE]tc)(?<!\\b[vV]s)\\.)(?=[[:space:]]|$)|$)") ];
   def clean_reason:
     tostring
     | gsub("(?<![^[:space:]])corr=[0-9a-f]+(?:[[:space:]]+|$)"; "")
@@ -216,6 +224,9 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
         # lowercase "b = " marks each after a sentence end.
         // from_marks(marks("(?<![[:alnum:]])\\((?<k>[a-z])" + $rec + "\\)" + $rec_after; "letter")
                       + marks("(?:^|(?<=[.!?;:] ))(?<k>[a-z]) =(?= )"; "letter") | sort_by(.offset))
+        # "Option a is my recommendation: one. Option b: two.": each mark is a
+        # word "option", its letter and a colon, any case.
+        // from_marks(marks("(?<![[:alnum:]])[Oo][Pp][Tt][Ii][Oo][Nn] (?<k>[A-Za-z])(?<r> (?i:is (?:my|the) (?:recommendation|recommended (?:one|option)|preferred (?:one|option))))?[[:space:]]*:(?=[[:space:]])"; "letter"))
       else from_list end;
   def option_parse: option_parse_by("number") // option_parse_by("letter") // option_parse_by("list");
   def option_mark_value: "option-" + (if test("^[0-9]") then . else ascii_downcase end);

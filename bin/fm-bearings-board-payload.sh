@@ -97,8 +97,11 @@
 #                      "Decision needed:" label); else the sentence led by "Question:", else
 #                      its first sentence ending in "?", else its first sentence; dropped
 #                      when it only repeats the title. `about` holds the rest of the
-#                      text without the options and without any sentence that only
-#                      repeats the question. An option the reason marks recommended
+#                      text without the options and without any whole sentence that
+#                      only repeats the question. A sentence that guards an action
+#                      ("must", "never", "anything else is", or a plan count such as
+#                      "0 to add") is never cut: if the cut would lose one, `about`
+#                      keeps the whole text. An option the reason marks recommended
 #                      ("(a, recommended) ...") is the card's `recommend_value`.
 #                      A review-page row whose question and title do not ask gets the
 #                      question "Have you reviewed this page?", because the generator
@@ -362,6 +365,12 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       capture("^https://[^/]+/.+/(?<r>[^/]+)/-/").r
     else null end;
   def nz($d): if . == null or . == "" or . == "-" then $d else . end;
+  # A text matched literally inside a regex.
+  def re_escape: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}])"; "\\\(.c)");
+  # A sentence that guards an action: it says what must or must never happen,
+  # what anything else means, or the plan count to expect ("0 to add").
+  def guard_sentence:
+    test("(?<![[:alnum:]])(?:[Mm]ust|MUST|[Nn]ever|NEVER|[Aa]nything else is|[0-9]+ to (?:add|change|destroy|import))(?![[:alnum:]])");
   # The identity a card link is deduplicated by: its url, board page or file path.
   def link_key: .url // (if has("page") then "page:" + .page else "path:" + (.path // "") end);
   # A bare option value in plain words: a known review-gate value reads as its
@@ -742,15 +751,26 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                 | (if $q0 == null then null else ($q0 | sub(decision_label; ""; "i") | cap) end) as $q
                 | (if ($d.verb // "") == "review-ready" then $texts else [ $texts[] | without_options ] end) as $body
                 | ($q != null and $title != $q and ($title | endswith(": " + $q) | not)) as $asks
-                # The body drops each whole sentence that only repeats the heading.
-                | ($body | join("\n\n")
+                # The body drops each whole sentence that only repeats the heading:
+                # one that starts the text or follows a sentence end, never the
+                # end of a longer sentence.
+                | ($body | join("\n\n")) as $whole
+                | ($whole
                    | ($q0 // "" | sub("[.?!]+$"; "")) as $qs
                    | if $asks and length > ($qs | length) then
-                       reduce (". ", "? ", "! ", ".\n", "?\n", "!\n") as $e (.; split($qs + $e) | join(""))
-                       | if endswith($qs + ".") or endswith($qs + "?") or endswith($qs + "!")
-                         then .[:(length - ($qs | length) - 1)] else . end
+                       gsub("(?:^|(?<=[.?!][[:space:]]))" + ($qs | re_escape) + "[.?!](?:[ \t]+|\n|$)"; "")
                        | sub("[[:space:]]+$"; "")
-                     else . end) as $about
+                     else . end
+                   # A sentence that carries a guard ("must", "never", "anything
+                   # else is", an expected plan count) is never cut from the
+                   # body: when any is missing, the whole body stays. The
+                   # heading shown whole is not missing.
+                   | . as $cut
+                   | (if $asks then $q0 // "" | sub("[[:space:]?.!:]+$"; "") else null end) as $shown
+                   | if all($whole | sentences[] | select(guard_sentence)
+                            | select(sub("[[:space:]?.!:]+$"; "") != $shown);
+                            . as $g | $cut | contains($g))
+                     then $cut else $whole end) as $about
                 | (if $asks then {question: $q} else {} end)
                   + (if ($about | length) > 0 and $about != $q0
                         and ($about | sub("[[:space:]?.!:]+$"; "")) != ($q0 // "" | sub("[[:space:]?.!:]+$"; ""))
