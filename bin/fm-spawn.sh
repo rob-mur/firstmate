@@ -564,7 +564,8 @@
 #                  JSON object for a crewmate or scout, or a quoted path to
 #                  state/<task-id>.claude-settings.json for a secondmate; both
 #                  also carry config/claude-session-settings.json's members,
-#                  and the inline object also config/claude-crew-settings.json's
+#                  the inline object also config/claude-crew-settings.json's,
+#                  and the secondmate file also config/claude-secondmate-settings.json's
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -899,6 +900,8 @@ esac
 # did not write. CLAUDE_SETTINGS_OVERLAY_MEMBERS holds the session object's
 # members with a leading comma, or nothing for an absent file or an empty
 # object; CLAUDE_CREW_SETTINGS_OVERLAY_MEMBERS holds the merged object's.
+# A secondmate launch merges config/claude-secondmate-settings.json into
+# CLAUDE_SETTINGS_OVERLAY_MEMBERS once its kind is known, below.
 claude_settings_config_object() {
   local name=$1 present
   present=$(fm_config_source_present "$CONFIG/$name") || return 1
@@ -2841,6 +2844,19 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+# config/claude-secondmate-settings.json (docs/configuration.md): a secondmate
+# launch, and only a secondmate launch, also carries this file deep-merged over
+# the session file in its state/<id>.claude-settings.json. KIND is final here
+# for both a spawn and a relaunch, and nothing is mutated yet, so a malformed
+# file refuses the secondmate launch; a crewmate or scout never reads it.
+if [ "$KIND" = secondmate ]; then
+  CLAUDE_SECONDMATE_SETTINGS=$(claude_settings_config_object claude-secondmate-settings.json) || exit 1
+  if [ -n "$CLAUDE_SECONDMATE_SETTINGS" ]; then
+    claude_secondmate_settings_merged=$(jq -cn --argjson session "${CLAUDE_SESSION_SETTINGS:-null}" \
+      --argjson secondmate "$CLAUDE_SECONDMATE_SETTINGS" '($session // {}) * $secondmate') || exit 1
+    CLAUDE_SETTINGS_OVERLAY_MEMBERS=$(claude_settings_overlay_members "$claude_secondmate_settings_merged")
+  fi
+fi
 
 shell_quote() {
   printf "'"
