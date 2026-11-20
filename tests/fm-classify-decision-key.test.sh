@@ -415,13 +415,14 @@ test_closing_verb_filter_preserves_terminal_chronology() {
         printf 'note: cleanup complete\n' >> "$f"
         expected=$terminal
         [ "$kind" != secondmate ] || expected=blocked
+        [ "$want" = default ] || expected=blocked
         [ "$(status_key_closing_verb "$f" "$want")" = "$expected" ] || fail "$kind/$want lost $terminal chronology"
         printf 'needs-decision: [key=%s] reopened\nnote: more cleanup\n' "$want" >> "$f"
         [ "$(status_key_closing_verb "$f" "$want")" = needs-decision ] || fail "$kind/$want lost a post-terminal reopening"
       done
     done
   done
-  pass "per-key filtering retains ship/scout terminals, reopenings, and secondmate blockers"
+  pass "per-key filtering retains ship/scout terminals for the keyless decision, reopenings, and keyed blockers"
 }
 
 test_closing_verb_filters_unrelated_history_without_subshell_growth
@@ -443,10 +444,10 @@ test_bare_prose_cannot_impersonate_a_terminal_declaration() {
         || fail "$kind: bare '$word' prose closed a still-open key"
       f="$dir/$kind-$word-real.status"
       printf 'kind=%s\n' "$kind" > "$dir/$kind-$word-real.meta"
-      printf 'needs-decision [key=route]: A or B?\n%s: real outcome\n' "$word" > "$f"
+      printf 'needs-decision: A or B?\n%s: real outcome\n' "$word" > "$f"
       assert_fold "$f" '' "$kind: genuine $word supersedes"
-      [ "$(status_key_closing_verb "$f" route)" = "$word" ] \
-        || fail "$kind: genuine $word no longer supersedes the open key"
+      [ "$(status_key_closing_verb "$f" default)" = "$word" ] \
+        || fail "$kind: genuine $word no longer supersedes the keyless decision"
     done
   done
   pass "prose without a colon cannot impersonate a ship or scout terminal declaration"
@@ -604,3 +605,33 @@ test_recorded_line_stays_recorded_across_a_resolve() {
 }
 
 test_recorded_line_stays_recorded_across_a_resolve
+
+# A ship or scout's terminal done or failed line ends the task, not its keyed
+# decisions: the captain may still owe an answer the note says is open. Only a
+# resolution naming that exact key closes a keyed decision. A keyless (default)
+# decision still ends with the task's terminal declaration.
+test_a_terminal_line_never_closes_a_keyed_decision() {
+  local dir f kind word open
+  dir=$(case_dir terminal-keeps-keyed)
+  open=$(printf 'merge-call\tneeds-decision\tmerge the PR or hold it?\n')
+  for kind in ship scout; do
+    for word in 'done' failed; do
+      f="$dir/$kind-$word.status"
+      printf 'kind=%s\n' "$kind" > "$dir/$kind-$word.meta"
+      printf 'needs-decision [key=merge-call]: merge the PR or hold it?\nblocked: need the token\n%s: PR ready; merge-call still open\n' \
+        "$word" > "$f"
+      assert_fold "$f" "$open" "$kind: terminal $word kept the keyed decision"
+      [ "$(status_key_closing_verb "$f" merge-call)" = needs-decision ] \
+        || fail "$kind: terminal $word reads as closing the keyed decision"
+      printf 'resolved [key=other]: unrelated answer\n' >> "$f"
+      assert_fold "$f" "$open" "$kind: another key's resolution after $word"
+      printf 'resolved [key=merge-call]: answered: merge\n' >> "$f"
+      assert_fold "$f" '' "$kind: the exact key's resolution after $word"
+      [ "$(status_key_closing_verb "$f" merge-call)" = resolved ] \
+        || fail "$kind: the exact key's resolution did not read as the close"
+    done
+  done
+  pass "a ship or scout terminal line leaves keyed decisions open until their own resolution"
+}
+
+test_a_terminal_line_never_closes_a_keyed_decision

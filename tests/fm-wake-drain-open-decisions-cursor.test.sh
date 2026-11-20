@@ -351,15 +351,18 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
 }
 
 test_terminal_supersession_reaches_cached_drains() {
-  local dir state status cursor out kind terminal expected closing ident size span pass_number
+  local dir state status cursor out kind terminal expected closing ident size span pass_number key opening
   for kind in scout ship secondmate; do
     for terminal in 'done' failed; do
       dir=$(make_case "terminal-$kind-$terminal")
       state="$dir/state"; status="$state/task.status"; cursor="$state/.task.open-decisions-cursor"; out="$dir/drain.out"
       printf 'kind=%s\n' "$kind" > "$state/task.meta"
-      printf 'blocked [key=access]: waiting\n' > "$status"
+      # A ship or scout terminal retires only its keyless decision; a keyed one waits for its exact resolution.
+      key=default; opening='blocked: waiting'
+      if [ "$kind" = secondmate ]; then key=access; opening='blocked [key=access]: waiting'; fi
+      printf '%s\n' "$opening" > "$status"
       FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "initial blocked drain failed"
-      assert_contains "$(cat "$out")" 'task [key=access] blocked: waiting' "initial blocker must surface"
+      assert_contains "$(cat "$out")" "task [key=$key] blocked: waiting" "initial blocker must surface"
       printf '%s: report saved\nnote: cleanup complete\n' "$terminal" >> "$status"
       expected=''; closing=$terminal
       if [ "$kind" = secondmate ]; then expected=$'access\tblocked\twaiting'; closing=blocked; fi
@@ -367,7 +370,7 @@ test_terminal_supersession_reaches_cached_drains() {
         if [ "$pass_number" = 2 ]; then
           ident=$(sed -n 's/^ident=//p' "$cursor")
           size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
-          printf 'version=5\noffset=%s\nident=%s\naccess\tblocked\twaiting' "$size" "$ident" > "$cursor"
+          printf 'version=5\noffset=%s\nident=%s\n%s\tblocked\twaiting' "$size" "$ident" "$key" > "$cursor"
         fi
         FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "$kind terminal drain failed"
         if [ "$kind" = secondmate ]; then
@@ -375,8 +378,8 @@ test_terminal_supersession_reaches_cached_drains() {
         else
           assert_not_contains "$(cat "$out")" 'OPEN DECISIONS' "$kind pre-terminal blocker resurfaced after $terminal or cache migration"
         fi
-        bash -c '. "$1"; [ "$(status_open_decisions "$2")" = "$3" ] && [ "$(status_open_decisions_incremental "$2")" = "$3" ] && [ "$(status_key_closing_verb "$2" access)" = "$4" ]' \
-          _ "$ROOT/bin/fm-classify-lib.sh" "$status" "$expected" "$closing" \
+        bash -c '. "$1"; [ "$(status_open_decisions "$2")" = "$3" ] && [ "$(status_open_decisions_incremental "$2")" = "$3" ] && [ "$(status_key_closing_verb "$2" "$5")" = "$4" ]' \
+          _ "$ROOT/bin/fm-classify-lib.sh" "$status" "$expected" "$closing" "$key" \
           || fail "$kind whole-file, incremental, and key-history reads disagree with terminal supersession"
       done
       span=$(bash -c '. "$1"; status_span_first_actionable "$2" 0' _ "$ROOT/bin/fm-classify-lib.sh" "$status")
@@ -400,10 +403,10 @@ test_terminal_supersession_reaches_cached_drains() {
 test_kind_changes_invalidate_folded_decisions() {
   local dir state status kind expected
   dir=$(make_case cursor-kind-change); state="$dir/state"; status="$state/task.status"
-  printf 'blocked [key=access]: waiting\ndone: report saved\nnote: cleanup complete\n' > "$status"
+  printf 'blocked: waiting\ndone: report saved\nnote: cleanup complete\n' > "$status"
   for kind in unknown ship secondmate scout; do
     [ "$kind" = unknown ] || printf 'kind=%s\n' "$kind" >> "$state/task.meta"
-    case "$kind" in unknown|secondmate) expected=$'access\tblocked\twaiting' ;; *) expected='' ;; esac
+    case "$kind" in unknown|secondmate) expected=$'default\tblocked\twaiting' ;; *) expected='' ;; esac
     bash -c '. "$1"; [ "$(status_open_decisions_incremental "$2")" = "$3" ] && [ "$(status_open_decisions "$2")" = "$3" ]' \
       _ "$ROOT/bin/fm-classify-lib.sh" "$status" "$expected" \
       || fail "cached decisions did not follow the current $kind metadata without a status append"
