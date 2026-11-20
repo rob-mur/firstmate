@@ -106,7 +106,8 @@
 # EVERY CARD STATES ITS DECISION. After the hygiene drop above and before the
 # board is touched, build checks that each Captain's Call card says
 # what the captain is deciding. The rule - a prompt that asks, a way to answer,
-# recorded options and a link unless the card is exempt - and its exemptions
+# recorded options, a link unless the card is exempt, each link listed once,
+# and no link to a PR/MR already merged or closed - and its exemptions
 # are owned by bin/fm-bearings-card-check-lib.sh, the same check the watcher
 # runs on a worker's needs-decision line to bounce it back (bin/fm-watch.sh).
 # A card that fails is
@@ -492,8 +493,15 @@ payload_errors() {  # <data.json>
 # Print one `<key>: <problem>` line per Captain's Call card that does
 # not state its decision (see EVERY CARD STATES ITS DECISION above;
 # the check is bin/fm-bearings-card-check-lib.sh's, shared with the watcher).
+# Only the build reads its cards' PR/MR links live, so a card naming one that
+# already merged or closed is held back here and not by the watcher.
 undecided_cards() {  # <data.json>
-  fm_bearings_undecided_cards "$1"
+  local states rc=0
+  states=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-links.XXXXXX") || return 1
+  fm_bearings_card_link_states "$1" > "$states" || echo '{}' > "$states"
+  fm_bearings_undecided_cards "$1" "$states" || rc=$?
+  rm -f -- "$states"
+  return "$rc"
 }
 
 # Move each undecided card out of Captain's Call into `cards_to_fix` as

@@ -101,6 +101,23 @@ emit "$real" opened
 exit 0
 SH
   chmod +x "$fakebin/lavish-axi"
+  # Forge tools that never reach the network: glab answers an MR read from
+  # $home/forge/gitlab-<host_path with / as _>-<number> and every other read
+  # fails, so a build's live link read finds nothing unless a test writes it.
+  mkdir -p "$home/forge"
+  cat > "$fakebin/glab" <<SH
+#!/usr/bin/env bash
+[ "\${1-} \${2-}" = "mr view" ] || exit 1
+number=\$3 project=''
+while [ "\$#" -gt 0 ]; do [ "\$1" = -R ] && project=\$2; shift; done
+f="$home/forge/gitlab-\$(printf '%s' "\${project#https://}" | tr '/' '_')-\$number"
+[ -f "\$f" ] || exit 1
+cat "\$f"
+SH
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/gh"
+  cp "$fakebin/gh" "$fakebin/gh-axi"
+  cp "$fakebin/gh" "$fakebin/tea"
+  chmod +x "$fakebin/glab" "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/tea"
   printf '%s\n' "$home"
 }
 
@@ -1414,6 +1431,49 @@ test_build_flags_a_card_listing_a_link_twice() {
   pass "build holds back a card listing one link more than once, after normalising trailing slashes and fragments"
 }
 
+# The real case: helm-charts !772 merged at 14:41Z and a card asking for its
+# review was written at 14:47Z. A card naming a PR/MR the forge reads merged or
+# closed is held back; an open one, or one whose read fails, stays.
+test_build_flags_a_card_naming_a_merged_or_closed_mr() {
+  local home data rc out
+  home=$(make_home merged-link)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  printf '{"state":"merged"}\n' > "$home/forge/gitlab-gitlab.com_example_helm-charts-772"
+  printf '{"state":"closed"}\n' > "$home/forge/gitlab-gitlab.com_example_helm-charts-773"
+  printf '{"state":"opened"}\n' > "$home/forge/gitlab-gitlab.com_example_helm-charts-774"
+  jq '.captains_call += [
+    {"key":"review-772","type":"decision","repo":"helm-charts","title":"Review !772?",
+     "question":"Review helm-charts !772?","options":[{"value":"ok","label":"Approve"},{"value":"no","label":"Reject"}],
+     "links":[{"url":"https://gitlab.com/example/helm-charts/-/merge_requests/772#note_9","label":"MR 772"}]},
+    {"key":"review-773","type":"decision","repo":"helm-charts","title":"Review !773?",
+     "question":"Review helm-charts !773?","options":[{"value":"ok","label":"Approve"},{"value":"no","label":"Reject"}],
+     "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/773"},
+    {"key":"review-774","type":"decision","repo":"helm-charts","title":"Review !774?",
+     "question":"Review helm-charts !774?","options":[{"value":"ok","label":"Approve"},{"value":"no","label":"Reject"}],
+     "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/774"},
+    {"key":"review-775","type":"decision","repo":"helm-charts","title":"Review !775?",
+     "question":"Review helm-charts !775?","options":[{"value":"ok","label":"Approve"},{"value":"no","label":"Reject"}],
+     "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/775"}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(FM_BEARINGS_BOARD_PR_TIMEOUT=5 run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -eq 0 ] || fail "a card naming a merged MR stopped the whole board: $out"
+  assert_contains "$out" "undecided-card: review-772: names https://gitlab.com/example/helm-charts/-/merge_requests/772, already merged" \
+    "a card linking a merged MR was not named: $out"
+  assert_contains "$out" "undecided-card: review-773: names https://gitlab.com/example/helm-charts/-/merge_requests/773, already closed" \
+    "a card whose pr_url is a closed MR was not named: $out"
+  assert_not_contains "$out" "review-774" "a card linking an open MR was flagged: $out"
+  assert_not_contains "$out" "review-775" "a card whose MR read failed was flagged: $out"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    ([.cards_to_fix[].key] | sort) == ["review-772", "review-773"]
+    and ([.captains_call[] | select(.key == "review-774" or .key == "review-775")] | length) == 2
+  ' >/dev/null || fail "the board did not hold back exactly the merged and closed cards: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '{call: [.captains_call[].key], fix: .cards_to_fix}')"
+  set +e; out=$(FM_BEARINGS_BOARD_PR_CHECK=0 run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -eq 0 ] || fail "the build failed with the PR check off: $out"
+  assert_not_contains "$out" "already merged" "the PR check ran although it was switched off: $out"
+  pass "build holds back a card naming a merged or closed MR and leaves an open or unreadable one"
+}
+
 # A live page about a task links that task's card in place, whether its record
 # names the task (fm-board-page.sh open --task) or the card names the page id;
 # a Waiting or Charted row about it gains the page in its expandable context.
@@ -1523,6 +1583,7 @@ test_a_card_that_names_a_page_title_links_that_page() {
 test_path_is_stable_and_home_scoped
 test_build_flags_a_card_without_recorded_choices_or_a_link
 test_build_flags_a_card_listing_a_link_twice
+test_build_flags_a_card_naming_a_merged_or_closed_mr
 test_build_flags_a_card_whose_option_marks_were_not_read
 test_a_page_about_a_task_links_its_card_and_context_in_place
 test_a_linked_page_token_leaves_the_card_text
