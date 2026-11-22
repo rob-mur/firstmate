@@ -39,13 +39,16 @@
 # repeated within `links`, name the card. A `pr_url` repeated exactly in
 # `links` is not a duplicate: the board shows it once, and the payload builder
 # emits that shape whenever a reason cites the task's own PR.
-# A card must not ask about a PR/MR that is already over: a `links` url or
-# `pr_url` that the live link states name merged or closed names the card, so
-# a card written after its merge request merged cannot ask for its review.
+# A card must not ask about a PR/MR that is already over: a `links` url that
+# the live link states name merged or closed names the card, so a card written
+# after its merge request merged cannot ask for its review. Only `links` is
+# judged: it carries what the hold itself names (its --link values and the
+# urls in its reason), while `pr_url` is only the PR the task recorded, which
+# may be an earlier, merged round of a question that is still live.
 #
 # fm_bearings_card_link_states <data.json>: read the live state of every
-# GitHub, GitLab or Forgejo PR/MR url the Captain's Call cards (merge cards
-# aside) link, each url once, so one build reads each url once, in parallel,
+# GitHub, GitLab or Forgejo PR/MR url in the Captain's Call cards' (merge cards
+# aside) `links`, each url once, so one build reads each url once, in parallel,
 # each bounded by FM_BEARINGS_BOARD_PR_TIMEOUT seconds (default 5), at most
 # FM_BEARINGS_BOARD_PR_MAX urls (default 24), through fm_pr_live_state in
 # bin/fm-pr-lib.sh. Prints a JSON object of the urls (trailing slashes and
@@ -80,12 +83,12 @@
 
 FM_BEARINGS_CARD_CHECK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# The PR/MR-shaped urls a payload's Captain's Call cards link, merge cards
-# aside, normalised as link_norm does in fm_bearings_undecided_cards.
+# The PR/MR-shaped urls in a payload's Captain's Call cards' `links`, merge
+# cards aside, normalised as link_norm does in fm_bearings_undecided_cards.
 fm_bearings_card_pr_urls() {  # <data.json>
   jq -r '
     [ .captains_call[]? | select(.type != "merge")
-      | (.links[]?.url, .pr_url) | strings
+      | .links[]?.url | strings
       | sub("#.*$"; "") | sub("/+$"; "")
       | select(test("^https://[^[:space:]]+/(pull|pulls|-/merge_requests)/[0-9]+$")) ]
     | unique[]' "$1"
@@ -144,7 +147,7 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
     | ( [ ([ $urls[], (.pr_url | strings | select(length > 0)) ] | unique | group_by(link_norm)[]
            | select(length > 1) | .[0] | link_norm),
           ($urls | group_by(.)[] | select(length > 1) | .[0] | link_norm) ] | unique ) as $dups
-    | ( [ $urls[], (.pr_url | strings | select(length > 0)) ] | map(link_norm) | unique
+    | ( $urls | map(link_norm) | unique
         | map(select($states[.] != null) | "names \(.), already \($states[.])") ) as $over
     | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
          then "question (no question or decide prompt, and the title is not a question)"

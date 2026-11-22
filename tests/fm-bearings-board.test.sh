@@ -1433,7 +1433,10 @@ test_build_flags_a_card_listing_a_link_twice() {
 
 # The real case: helm-charts !772 merged at 14:41Z and a card asking for its
 # review was written at 14:47Z. A card naming a PR/MR the forge reads merged or
-# closed is held back; an open one, or one whose read fails, stays.
+# closed is held back; an open one, or one whose read fails, stays. The second
+# real case: workload-pruner's next-round hold was held back for its task's
+# recorded pr= (an earlier, merged round) that the hold never named, so only
+# `links` is judged and a card's `pr_url` alone never names it.
 test_build_flags_a_card_naming_a_merged_or_closed_mr() {
   local home data rc out
   home=$(make_home merged-link)
@@ -1448,30 +1451,36 @@ test_build_flags_a_card_naming_a_merged_or_closed_mr() {
      "links":[{"url":"https://gitlab.com/example/helm-charts/-/merge_requests/772#note_9","label":"MR 772"}]},
     {"key":"review-773","type":"decision","repo":"helm-charts","title":"Review !773?",
      "question":"Review helm-charts !773?","options":[{"value":"ok","label":"Approve"},{"value":"no","label":"Reject"}],
-     "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/773"},
+     "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/774",
+     "links":[{"url":"https://gitlab.com/example/helm-charts/-/merge_requests/773","label":"MR 773"}]},
     {"key":"review-774","type":"decision","repo":"helm-charts","title":"Review !774?",
      "question":"Review helm-charts !774?","options":[{"value":"ok","label":"Approve"},{"value":"no","label":"Reject"}],
      "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/774"},
     {"key":"review-775","type":"decision","repo":"helm-charts","title":"Review !775?",
      "question":"Review helm-charts !775?","options":[{"value":"ok","label":"Approve"},{"value":"no","label":"Reject"}],
-     "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/775"}]' \
+     "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/775"},
+    {"key":"next-round","type":"decision","repo":"helm-charts","title":"Which bound next?",
+     "question":"Measure with the tighter bound?","options":[{"value":"ok","label":"Yes"},{"value":"no","label":"No"}],
+     "pr_url":"https://gitlab.com/example/helm-charts/-/merge_requests/772",
+     "links":[{"url":"https://example.org/measurements","label":"Measurements"}]}]' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(FM_BEARINGS_BOARD_PR_TIMEOUT=5 run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -eq 0 ] || fail "a card naming a merged MR stopped the whole board: $out"
   assert_contains "$out" "undecided-card: review-772: names https://gitlab.com/example/helm-charts/-/merge_requests/772, already merged" \
     "a card linking a merged MR was not named: $out"
   assert_contains "$out" "undecided-card: review-773: names https://gitlab.com/example/helm-charts/-/merge_requests/773, already closed" \
-    "a card whose pr_url is a closed MR was not named: $out"
+    "a card linking a closed MR was not named: $out"
   assert_not_contains "$out" "review-774" "a card linking an open MR was flagged: $out"
   assert_not_contains "$out" "review-775" "a card whose MR read failed was flagged: $out"
+  assert_not_contains "$out" "next-round" "a card was flagged for its task's recorded merged pr_url, which the hold never names: $out"
   extract_payload "$home/.lavish/bearings-board.html" | jq -e '
     ([.cards_to_fix[].key] | sort) == ["review-772", "review-773"]
-    and ([.captains_call[] | select(.key == "review-774" or .key == "review-775")] | length) == 2
+    and ([.captains_call[] | select(.key == "review-774" or .key == "review-775" or .key == "next-round")] | length) == 3
   ' >/dev/null || fail "the board did not hold back exactly the merged and closed cards: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '{call: [.captains_call[].key], fix: .cards_to_fix}')"
   set +e; out=$(FM_BEARINGS_BOARD_PR_CHECK=0 run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -eq 0 ] || fail "the build failed with the PR check off: $out"
   assert_not_contains "$out" "already merged" "the PR check ran although it was switched off: $out"
-  pass "build holds back a card naming a merged or closed MR and leaves an open or unreadable one"
+  pass "build holds back a card linking a merged or closed MR and leaves an open or unreadable one, or one only its task's recorded pr_url names"
 }
 
 # The real case: a profile switch took jq off PATH for a fraction of a second
