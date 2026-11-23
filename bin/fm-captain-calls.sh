@@ -48,6 +48,11 @@
 # question with its URLs taken out and the noun "merge request" read as "MR". A merge ask or a review hand-off is not a
 # decision; everything else is ("decision": true).
 #
+# Inline options: a call with no options of its own whose question carries
+# them inline as "a) ... b) ... c) ...?" (bin/fm-bearings-question-lib.sh
+# inline_letter_options) has them as its options, and its question is the lead
+# up to them, ending in "?".
+#
 # Settled: a call that is not a decision and is already settled - every linked
 # PR/MR merged or closed, or the captain already answered it - is not a call.
 # It is listed in to_close[] with the evidence that settled it, so main can
@@ -332,19 +337,25 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
     {reason: ((.question // "") | strip_urls | gsub("merge[ -]requests?"; "MR"; "i")),
      choices: {options: .options}} as $d
     | . + {decision: ((is_merge_ask($d) or is_review($d)) | not)};
+  # A call with no options of its own whose question carries them inline as
+  # "a) ... b) ... c) ...?" takes them as its options and asks only its lead.
+  def inline_options:
+    if (.options | length) > 0 then .
+    else ((.question // "") | inline_letter_options) as $p
+      | if $p == null then . else . + {question: $p.question, options: $p.options} end end;
   ([$main.records[]
      | {key: .id, source: "main-hold", home: "main", task: .id, decision_key: null,
         title, repo, question: .hold_reason, options: [.options[] | {value, label}], free_text, no_link,
         links: ([.links[] | {url, label}] + ([(.hold_reason | urls_in[]), (.rest | urls_in[])]
                           | map({url: ., label: ""}))
                 | unique_by(.url)),
-        blocked_by, hold_until, raised_at: .hold_set} | classify]) as $holds
+        blocked_by, hold_until, raised_at: .hold_set} | inline_options | classify]) as $holds
   | ([$mates[] | select(.kind == "call" and .worker)
      | {key: (.home + "." + .key), source: "main-worker", home: "main", task: .home,
         decision_key: .key, title: .home, repo: null,
         question: .note, options: [], free_text: true, no_link: false,
         links: ([.note | urls_in[]] | unique | map({url: ., label: ""})),
-        blocked_by: [], hold_until: null, raised_at: iso(.opened), answered} | classify]) as $worker_calls
+        blocked_by: [], hold_until: null, raised_at: iso(.opened), answered} | inline_options | classify]) as $worker_calls
   | ([$mates[] | select(.kind == "call" and (.worker | not))
      | (.note | capture("^captain hold (?<t>[A-Za-z0-9._-]+):[[:space:]]*(?<q>.*)$")? // null) as $h
      | .home as $mate
@@ -355,7 +366,7 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
         blocked_by: [],
         hold_until: (if $h == null then null
                      else ([$until[] | select(.mate == $mate and .task == $h.t) | .until][0] // null) end),
-        raised_at: iso(.opened), answered} | classify]) as $mate_calls
+        raised_at: iso(.opened), answered} | inline_options | classify]) as $mate_calls
   | def deferred: .hold_until != null and .hold_until > $today;
   {calls: ([$holds[] | select(deferred | not)]
              + [$worker_calls[], $mate_calls[] | select(.answered == "" and (deferred | not)) | del(.answered)])
