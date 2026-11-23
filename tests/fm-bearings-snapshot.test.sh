@@ -89,6 +89,8 @@ SH
   # answers 404, so its archived state is unknown and its MR stays. The captain
   # is user 393; with FAKE_GLAB_REVIEWER=1 they are a requested reviewer on !846
   # (someone else's MR) and on their own !880, otherwise on nothing.
+  # FAKE_GLAB_REVIEW_STATE sets the captain's reviewer state on both, and
+  # `fail` makes those reviewers reads fail; unset, they answer 404.
   cat > "$fb/glab" <<'SH'
 #!/usr/bin/env bash
 echo "glab $*" >> "$NET_LOG"
@@ -136,8 +138,8 @@ case "$path" in
   merge_requests\?*reviewer_id=393\&*)
     if [ "${FAKE_GLAB_REVIEWER:-0}" != 1 ]; then echo '[]'; exit 0; fi
     cat <<'JSON'
-[{"iid":846,"project_id":42,"title":"Teammate pricing change","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/846","references":{"full":"grp/app/aegis!846"},"draft":false,"detailed_merge_status":"not_approved","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T10:00:00Z"},
- {"iid":880,"project_id":42,"title":"Bump the dependencies","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880","references":{"full":"grp/app/aegis!880"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T08:30:00Z"}]
+[{"iid":846,"project_id":42,"title":"Teammate pricing change","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/846","references":{"full":"grp/app/aegis!846"},"author":{"id":501,"username":"boyd.ebsworthy"},"draft":false,"detailed_merge_status":"not_approved","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T10:00:00Z"},
+ {"iid":880,"project_id":42,"title":"Bump the dependencies","web_url":"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880","references":{"full":"grp/app/aegis!880"},"author":{"id":393,"username":"captain"},"draft":false,"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"updated_at":"2026-07-11T08:30:00Z"}]
 JSON
     ;;
   merge_requests\?*)
@@ -149,6 +151,13 @@ JSON
 JSON
     ;;
   projects/42) echo '{"id":42,"archived":false}' ;;
+  projects/42/merge_requests/846/reviewers|projects/42/merge_requests/880/reviewers)
+    case "${FAKE_GLAB_REVIEW_STATE:-}" in
+      '') echo "glab: 404 $path" >&2; exit 1 ;;
+      fail) echo "glab: 500 Internal Server Error" >&2; exit 1 ;;
+    esac
+    printf '[{"user":{"id":502,"username":"ana"},"state":"approved"},{"user":{"id":393,"username":"captain"},"state":"%s"}]\n' \
+      "$FAKE_GLAB_REVIEW_STATE" ;;
   projects/619) echo '{"id":619,"archived":true}' ;;
   projects/42/merge_requests/880) echo '{"iid":880,"head_pipeline":{"status":"success"}}' ;;
   projects/42/merge_requests/880/approvals) echo '{"approved":false,"approvals_left":1,"approved_by":[]}' ;;
@@ -1779,6 +1788,38 @@ test_include_mrs_lists_mrs_awaiting_the_captains_review() {
   pass "--include-mrs lists the MRs awaiting the captain's review beside their own"
 }
 
+# Someone else's MR the captain already reviewed waits on its author, and its
+# state line says so; an unreviewed (first or re-requested) review still waits
+# on the captain, the captain's own MR never names a wait owner, and a failed
+# reviewers read keeps the plain state line rather than guessing one.
+test_include_mrs_names_who_a_reviewed_mr_waits_on() {
+  local home fakebin json st want
+  home=$(make_home mrs-wait-owner); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  for st in reviewed:"you reviewed" requested_changes:"you requested changes" approved:"you approved"; do
+    want="waiting on boyd.ebsworthy (${st#*:}), needs approval, "
+    : > "$home/net.log"
+    json=$(FAKE_GLAB_REVIEWER=1 FAKE_GLAB_REVIEW_STATE="${st%%:*}" run "$home" "$fakebin" --include-mrs --json 2>/dev/null) \
+      || fail "--include-mrs run failed for ${st%%:*}"
+    grep -q 'projects/42/merge_requests/846/reviewers$' "$home/net.log" \
+      || fail "the snapshot must read the MR's reviewers: $(cat "$home/net.log")"
+    printf '%s' "$json" | jq -e --arg want "$want" '
+      ([.open_mrs[] | select(.key == "mr-42-846") | .state | startswith($want)] == [true])
+      and ([.open_mrs[] | select(.key == "mr-42-880") | .state | startswith("mergeable")] == [true])
+      and ([.open_mrs[].state | select(test("waiting on captain|waiting on you"))] == [])
+    ' >/dev/null || fail "a ${st%%:*} review must name the author as the wait owner: $json"
+  done
+  for st in unreviewed fail ""; do
+    json=$(FAKE_GLAB_REVIEWER=1 FAKE_GLAB_REVIEW_STATE="$st" run "$home" "$fakebin" --include-mrs --json 2>/dev/null) \
+      || fail "--include-mrs run failed for '$st'"
+    printf '%s' "$json" | jq -e '
+      [.open_mrs[] | select(.key == "mr-42-846") | .state | startswith("needs approval")] == [true]
+      and ([.open_mrs[].state | select(test("waiting on"))] == [])
+    ' >/dev/null || fail "an unreviewed review or a failed reviewers read must name no wait owner ('$st'): $json"
+  done
+  pass "--include-mrs names the author an already reviewed MR waits on, and no one otherwise"
+}
+
 # Coverage follows what the view shows. A Done record or the tail of a status
 # line that the underway row cuts short names an MR the board never shows, so it
 # must not hide that MR from the open-MR rows.
@@ -1921,7 +1962,7 @@ test_include_mrs_reads_detail_for_every_listed_mr() {
     || fail "one detail and one approvals call per listed MR: $(cat "$home/net.log")"
   max=$(sort -n "$home/net.log.concurrency" | tail -n 1)
   [ "$max" -gt 1 ] || fail "detail reads must run in parallel (max $max at once)"
-  [ "$max" -le 6 ] || fail "at most 3 MRs (6 calls) may be read at once, saw $max"
+  [ "$max" -le 9 ] || fail "at most 3 MRs (9 calls) may be read at once, saw $max"
   # A list longer than the kept rows reads only the rows it keeps.
   : > "$home/net.log"
   json=$(FAKE_GLAB_MANY=13 FM_BEARINGS_MRS=11 run "$home" "$fakebin" --include-mrs --json 2>/dev/null) \
@@ -4655,6 +4696,7 @@ fm_test_run \
   test_include_mrs_lists_only_uncovered_mrs \
   test_include_mrs_covers_by_task_meta_and_reference \
   test_include_mrs_lists_mrs_awaiting_the_captains_review \
+  test_include_mrs_names_who_a_reviewed_mr_waits_on \
   test_include_mrs_ignores_records_the_view_does_not_show \
   test_include_mrs_drops_archived_project_mrs \
   test_include_mrs_reads_detail_for_every_listed_mr \
