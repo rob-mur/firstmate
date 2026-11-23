@@ -217,7 +217,8 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 An active away window refuses (exit 3) unless --during-away is given, which the
 board build passes so the captain can read the board while away.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing,
+    pr_url (the PR or MR the task recorded as its own, else null)},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason,
     stale_note,read_failure},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
@@ -228,11 +229,13 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
     pr_url (a PR or MR its home recorded, when the reason links none),
     note (a row kept from an unreadable home or an idle home's open key)},
   landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner,filed,title_full,reason_full,answers,notes,report_path},
+  gates{id,title,blocked_by,reason,owner,filed,title_full,reason_full,answers,notes,report_path,
+    hold_kind,hold_until},
   reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
-  retain input order after dated gates.
+  retain input order after dated gates. With --all-decisions the bound cuts only
+  unheld gates: a gate with a hold_kind or hold_until is always kept.
 Decision presentation uses question, the full title and hold reason; summary
   remains a bounded overview and must not substitute for the question/options.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
@@ -580,7 +583,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      card_title:(.title_full // .title // null),
      card_reason:(.hold_reason_full // .hold_reason // .blocked_reason // null),
      answers:(.hold_answers // .answers // []),notes:(.body_notes // .notes // []),
-     report_path:(.report_path // null)};
+     report_path:(.report_path // null),
+     hold_kind:(.hold_kind // null), hold_until:(.hold_until // null)};
   def gate_text($wanted):
     if $wanted then . else del(.title_full, .reason_full) end;
   def round_robin_landed($n):
@@ -678,7 +682,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         name:((.backlog.title // "") as $name
               | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90)),
+        pr_url: (.pr.url // null)
       } ]
      + [ $secondmate_views[] as $m
          | $m.bearings_in_flight[]?
@@ -690,7 +695,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
                      then $name else ($m.id + "/" + .id) end) | trunc(70)),
             doing:(((.doing // .state) | trunc(90)) as $d
-                   | if $m.stale_note == null then $d else $m.stale_note + " - " + $d end)} ]) as $in_flight_all
+                   | if $m.stale_note == null then $d else $m.stale_note + " - " + $d end),
+            pr_url:(.pr_url // null)} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
@@ -835,7 +841,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       | sort_by((.value | filed_epoch) as $epoch
           | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
       | map(.value);
-    . as $snap
+    # The gate bound cuts only unheld gates when every decision is requested
+    # (--all-decisions): a gate the fleet holds (hold_kind or hold_until) is
+    # an open wait the board must show, so it is never cut.
+    def bound_gates:
+      if $all_queued == 1 then .
+      else reduce .[] as $g ({n: 0, out: []};
+             if $all_decisions == 1 and ((($g.hold_kind // "") != "") or (($g.hold_until // "") != ""))
+             then .out += [$g]
+             elif .n < $gates_n then .n += 1 | .out += [$g]
+             else . end)
+           | .out end;
+    ($gates_all | newest_filed_first | bound_gates) as $gates_shown
+    | . as $snap
   | {
       schema: "fm-bearings.v1",
       home: $home,
@@ -878,8 +896,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: ($return_catchup_gate
-              + ($gates_all | newest_filed_first
-                 | if $all_queued == 1 then . else .[:$gates_n] end)
+              + $gates_shown
               | map(gate_text($f_gate_text))),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
@@ -927,7 +944,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
         (if $all_decisions == 0 and $decisions_marked_deferred > 0 then {surface:("captain holds bucketed blocked, dated, or aged: \($decisions_marked_deferred)"), reveal:"--all-decisions"} else empty end),
-        (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
+        (if ($gates_shown | length) < ($gates_all | length) then {surface:("gates showing \($gates_shown | length) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
         (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),
         (if $all_recorded_prs == 0 and ($recorded_prs_all | length) > $recorded_prs_n then {surface:("recorded_prs showing \($recorded_prs_n) of \($recorded_prs_all | length)"), reveal:"--all-recorded-prs"} else empty end),
         (if $all_unhealthy == 0 and ($unhealthy_all | length) > $unhealthy_n then {surface:("unhealthy_endpoints showing \($unhealthy_n) of \($unhealthy_all | length)"), reveal:"--all-unhealthy"} else empty end),
