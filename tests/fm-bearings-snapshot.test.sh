@@ -633,6 +633,37 @@ EOF
   pass "a structured child captain hold reaches Captain's Call"
 }
 
+# Real shape (cd-965): a secondmate child's question that sits past the home
+# summary's bounded cut still reaches the board whole, so its card can ask it.
+test_a_child_question_past_the_summary_cut_reaches_the_board_whole() {
+  local home mate fakebin json line
+  home=$(make_home child-long-question)
+  mate="$TMP_ROOT/child-long-question-home"
+  write_domain_alpha_fixture "$home" "$mate"
+  mkdir -p "$mate/projects/phase8"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/phase8.meta" \
+    "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" phase8 idle
+  line="Pages service is up behind IAP (https://pages-413301784905.europe-west1.run.app/_probe-965/) but answers 502 until IAP has an OAuth client, which only the console can create (no org; Google shut the IAP OAuth API). Who does the one-time ~3-min console step? (a, recommended) the captain, following the 4 steps in data/phase8/iap-serving-report.md, then opens the probe; (b) I drive the captain's running Chrome via chrome-devtools-axi auto-connect; (c) drop IAP and choose another serving path."
+  printf 'needs-decision [key=iap]: %s\n' "$line" > "$mate/state/phase8.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg line "$line" '
+    .decisions_open | any(.[]; .key == "status.domain-alpha.phase8.iap" and .source == "status"
+      and .mate == "domain-alpha" and .question == $line and .reason_full == $line)
+  ' >/dev/null || fail "the child question was cut at the home summary bound: $json"
+  pass "a child question past the summary cut reaches the board whole"
+}
+
 make_valid_secondmate_home() {  # <id> <home>
   local id=$1 home=$2
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin"
@@ -4576,6 +4607,7 @@ fm_test_run \
   test_parent_activity_evidence_is_bounded_and_disclosed \
   test_active_child_overrides_old_parent_event \
   test_structured_child_decision_reaches_captains_call \
+  test_a_child_question_past_the_summary_cut_reaches_the_board_whole \
   test_bad_secondmate_homes_never_revive_parent_work \
   test_oversized_secondmate_summary_stays_strict_unknown \
   test_secondmate_and_child_bounds_are_disclosed \

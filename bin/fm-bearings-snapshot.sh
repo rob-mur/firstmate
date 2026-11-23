@@ -74,7 +74,9 @@
 # choices, answers, notes, and report_path bin/fm-fleet-snapshot.sh documents. A needs-decision or blocked status
 # on a task under way, main or secondmate, also reaches decisions_open as a
 # source:"status" row with task, decision_key and mate for routing the answer,
-# plus reason_earlier when the same key was raised before with other text. A
+# plus reason_earlier when the same key was raised before with other text; a
+# secondmate home's row takes its text from the uncut question that home
+# publishes, so a question past the bounded summary still reaches the board. A
 # secondmate question the parent status log shows (the wake drain's open
 # decisions) is read from the parent task itself, so it reaches the board even
 # when the home summary is invalid; it is skipped only when the home already
@@ -541,12 +543,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     | (.key // "default") as $k
     | (("status." + (if $mate == null then "" else $mate + "." end) + $t + "." + $k)
        | gsub("[^A-Za-z0-9._-]"; "-") | .[:128]) as $slug
+    # A secondmate home row carries its uncut text as question beside the
+    # bounded summary; a parent status row carries the uncut text as summary.
+    | ((.question // .summary) | if . == null then null else tostring end) as $full
     | {id:(if $mate == null then $t else $mate + "/" + $t end),key:$slug,verb:.verb,
        source:"status",task:$t,decision_key:$k,mate:$mate,
-       title:($title | trunc(60)),reason:((.summary // "-") | trunc(80)),
-       title_full:$title,reason_full:(.summary // "-"),
-       summary:hold_summary($title; (.summary // "captain decision pending")),
-       question:(.summary // "-"),owner:$owner}
+       title:($title | trunc(60)),reason:(($full // "-") | trunc(80)),
+       title_full:$title,reason_full:($full // "-"),
+       summary:hold_summary($title; ($full // "captain decision pending")),
+       question:($full // "-"),owner:$owner}
       + (if ((.earlier // []) | length) > 0 then {reason_earlier:.earlier} else {} end);
   # A finished task whose last event names a live Lavish review page is a page
   # the captain has not opened yet: it is a question card linking to that page.
