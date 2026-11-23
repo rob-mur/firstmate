@@ -53,8 +53,9 @@
 # Beads `due.required` through `BD_DUE_REQUIRED` rather than inventing a due
 # date or registering a `types.custom` captain issue type. The command records
 # a UTC `Captain hold set:` timestamp in the task body: repeating an active
-# hold preserves the existing timestamp, while re-holding released work starts
-# a new lifecycle. A task already closed is refused rather than reopened.
+# hold with the same reason preserves the existing timestamp, while a new reason
+# or re-holding released work stamps the current time.
+# A task already closed is refused rather than reopened.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
 # `complete` and `verify` check. The reason may hold parentheses and line breaks:
 # tasks-axi refuses them, so `hold` escapes them where it writes the reason and
@@ -978,7 +979,9 @@ body_hold_set_timestamp() {  # <decoded-task-body>
     | head -1
 }
 
-write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existing-0-or-1>
+# Mode 0 starts a new lifecycle, 1 keeps an existing stamp, and 2 moves an
+# existing stamp to the new time while keeping the header lines under it.
+write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <mode-0-1-or-2>
   local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
@@ -986,16 +989,21 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
   if [ "$preserve" = 1 ] && [ -n "$existing" ]; then
     return 0
   fi
-  if [ -n "$existing" ]; then
+  if [ "$preserve" = 2 ] && [ -n "$existing" ]; then
+    [ "$existing" != "$hold_set" ] || return 0
+    new_body="Captain hold set: $hold_set${body#"Captain hold set: $existing"}"
+  elif [ -n "$existing" ]; then
     body=${body#"Captain hold set: $existing"}
     case "$body" in
       $'\n\n'*) body=${body#$'\n\n'} ;;
       $'\n'*) body=${body#$'\n'} ;;
     esac
   fi
-  new_body=$(printf 'Captain hold set: %s' "$hold_set")
-  if [ -n "$body" ]; then
-    new_body=$(printf '%s\n\n%s' "$new_body" "$body")
+  if [ "$preserve" != 2 ] || [ -z "$existing" ]; then
+    new_body=$(printf 'Captain hold set: %s' "$hold_set")
+    if [ -n "$body" ]; then
+      new_body=$(printf '%s\n\n%s' "$new_body" "$body")
+    fi
   fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-stamp.XXXXXX") \
     || fail "cannot stage the hold-set stamp"
@@ -1331,7 +1339,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
+  local existing_hold_kind='' existing_held='' existing_reason='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
   local free_text=0 no_link=0 options_named=0 links_named=0
   HOLD_OPTION_ARGS=()
   HOLD_LINK_ARGS=()
@@ -1380,8 +1388,16 @@ command_hold() {
       || fail "task $id is already closed; a new captain call needs its own task"
     existing_hold_kind=$(show_field_value "$show" hold_kind)
     existing_held=$(show_field_value "$show" held)
+    existing_reason=$(show_field_value "$show" hold_reason)
+    # Only an idempotent re-hold of the same question keeps its set time; a
+    # new reason asks a new question, so its set time moves to now while the
+    # active hold keeps its recorded choices.
     if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
-      preserve_hold_set=1
+      if [ "$existing_reason" = "$stored_reason" ] || [ "$existing_reason" = "$reason" ]; then
+        preserve_hold_set=1
+      else
+        preserve_hold_set=2
+      fi
     fi
     if [ -n "$title" ]; then
       existing_title=$(show_field_value "$show" title)
