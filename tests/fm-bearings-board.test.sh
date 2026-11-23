@@ -764,6 +764,33 @@ test_build_lists_live_pages_and_refuses_payload_pages() {
   pass "build lists only live registered pages and refuses a payload that authors them"
 }
 
+# A markdown page (an understand page drawn as md, as understand-mr821 is) has
+# page.md and no page.html in its folder, so the board links that page.md; a
+# folder with page.html keeps linking it.
+test_build_links_a_markdown_only_page_to_its_page_md() {
+  local home data id
+  home=$(make_home md-pages)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  for id in md-only both html-only; do
+    mkdir -p "$home/state/pages/$id" "$home/.lavish/pages/$id"
+    printf '{"id":"%s","title":"%s","opened":"2026-01-01T00:00:00Z","state":"live"}\n' "$id" "$id" \
+      > "$home/state/pages/$id/page.json"
+  done
+  printf '# Understand\n' > "$home/.lavish/pages/md-only/page.md"
+  printf '# Understand\n' > "$home/.lavish/pages/both/page.md"
+  printf '<html></html>\n' > "$home/.lavish/pages/both/page.html"
+  printf '<html></html>\n' > "$home/.lavish/pages/html-only/page.html"
+  run_board "$home" build "$data" >/dev/null || fail "a board with a markdown page did not build"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    [.pages[] | {id, href}] == [
+      {"id":"both","href":"pages/both/page.html"},
+      {"id":"html-only","href":"pages/html-only/page.html"},
+      {"id":"md-only","href":"pages/md-only/page.md"}
+    ]' >/dev/null || fail "a markdown-only page was not linked to its page.md: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c .pages)"
+  pass "build links a markdown-only page to its page.md and keeps page.html otherwise"
+}
+
 
 # --- part 1: never arm a poll on an ended session ---------------------------
 
@@ -1724,6 +1751,7 @@ test_a_refusal_names_the_first_failing_item_and_its_fields
 test_charted_kind_is_optional_and_accepts_both_values
 test_an_underway_row_may_link_its_mr
 test_build_lists_live_pages_and_refuses_payload_pages
+test_build_links_a_markdown_only_page_to_its_page_md
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails

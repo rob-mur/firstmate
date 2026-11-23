@@ -249,7 +249,9 @@
 # {id, title, href} row per live page registered through bin/fm-board-page.sh
 # (its header owns registration, the page folders, and the one refresh policy of
 # the board app), read from state/pages/*/page.json at build time. The board
-# lists them and shows each in place inside its own tab. A payload never
+# lists them and shows each in place inside its own tab. href is the page
+# folder's page.html, or its page.md when the folder holds only that markdown
+# page, which the frame shows as plain text. A payload never
 # authors `pages`; the validator refuses one that does.
 #
 # FM_BEARINGS_BOARD_TEMPLATE overrides the shipped template path (tests only).
@@ -546,15 +548,21 @@ publish_cards_to_fix() {  # <state-dir>  (payload on stdin)
 
 # Every live page registered through bin/fm-board-page.sh, oldest first, as the
 # board data's `pages` array. A record that does not parse or carries a bad id
-# is left out rather than failing the build.
+# is left out rather than failing the build; href follows PAGES SHOWN IN PLACE.
 live_pages_json() {
-  local f
+  local f folder entry
   for f in "$STATE"/pages/*/page.json; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
-    jq -c 'select(type == "object" and .state == "live"
+    folder="${f%/page.json}"
+    folder="$FM_HOME/.lavish/pages/${folder##*/}"
+    entry=page.html
+    if [ ! -e "$folder/page.html" ] && [ -f "$folder/page.md" ]; then
+      entry=page.md
+    fi
+    jq -c --arg entry "$entry" 'select(type == "object" and .state == "live"
              and (.id | type == "string" and test("^[a-z0-9][a-z0-9-]{0,63}$"))
              and (.title | type == "string" and length > 0))
-           | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/page.html"),
+           | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/" + $entry),
               replaces: ([.replaces // [] | arrays | .[] | strings]),
               task: (.task | if type == "string" and length > 0 then . else null end)}' "$f" 2>/dev/null
   done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))' | pages_named_by_status
