@@ -13,9 +13,9 @@
 #
 # THE RULE. A Captain's Call card needs a prompt that asks - its `question` or
 # `decide` carries a `?`, or its title does (for a `from_status` card only when
-# it has no `question` or `decide`, since its title may come from an option or
-# body sentence that asks) - and a way to answer it, at least one option of its
-# own besides the injected reconcile choice or a free-text answer. A card whose
+# it has no `question` or `decide`, since its title may come from a body
+# sentence that asks, never from one of its options) - and a way to answer it,
+# at least one option of its own besides the injected reconcile choice or a free-text answer. A card whose
 # options include `done` and `not-done` asks for an in-person action, so its
 # prompt may be an imperative sentence. A card also needs the decision's own
 # values and something to click: its options must be recorded ones - not empty

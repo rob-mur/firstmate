@@ -126,7 +126,8 @@
 #                      A `source:"status"` row is titled from its decision, never the
 #                      asking home: the task its decision key names, else a given title
 #                      that is not just the task or home, else that same asking
-#                      sentence, prefixed `<home>: ` for a secondmate. A status row whose
+#                      sentence outside its own options (a choice never titles
+#                      it), prefixed `<home>: ` for a secondmate. A status row whose
 #                      decision key names a captain-held task in the same home is the
 #                      same question: it adds no card or waiting row of its own, and an
 #                      asked hold card merges its text into `about` and its
@@ -582,7 +583,11 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | ( (if $k != "default" then task_title($owner; $k) else null end)
           // (if $given != "" and ([$d.task, $d.id, $d.mate, $owner, $d.key] | index($given) | not)
               then $given else null end)
-          // ((($d.reason_full // $d.reason // "") | ask_sentence | short_text) | nz(null))
+          // ((($d.reason_full // $d.reason // "") | clean_reason
+               # An asking sentence inside the options the reason lists is a choice,
+               # not the question, so it never titles the card.
+               | (option_parse) as $p | if $p == null then . else $p.lead + " " + $p.tail end
+               | ask_sentence | short_text) | nz(null))
           // (if $k != "default" then $k else $d.key end) ) as $t
       | if $owner != "(main)" and ($t | startswith($owner + ": ") | not) then $owner + ": " + $t else $t end;
     [ $held[] | if (.source // "") == "status" then .title_full = status_title(.) else . end ] as $held
