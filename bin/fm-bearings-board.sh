@@ -142,7 +142,8 @@
 # any further failing items.
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
-# when known, otherwise its durable identifier.
+# when known, otherwise its durable identifier. It MAY carry `pr_url`, the https
+# URL of the PR or MR its task records.
 # A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
@@ -438,7 +439,8 @@ payload_errors() {  # <data.json>
       (if .type == "merge" then req("risk"; nonempty_string) else empty end);
     def underway_item:
       repo_marker, req("name"; nonempty_string),
-      (("id", "state", "doing", "kind") as $f | req($f; nonempty_string));
+      (("id", "state", "doing", "kind") as $f | req($f; nonempty_string)),
+      opt("pr_url"; https_url);
     def landed_item:
       repo_marker,
       (("id", "what", "owner") as $f | req($f; nonempty_string)),

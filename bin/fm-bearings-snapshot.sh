@@ -22,8 +22,9 @@
 # (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
 # never ambiguous.
 #
-# --include-mrs lists the captain's open GitLab MRs - those they authored and those
-# they are a requested reviewer on - that this view shows nowhere else, as
+# --include-mrs lists the captain's open GitLab MRs - every one they authored, Draft
+# included, and those they are a requested reviewer on that this view shows
+# nowhere else - as
 # open_mrs{key,repo,title,url,state,updated} with one state line each (merge state,
 # CI, approvals, unresolved threads, last activity). It makes three read-only calls
 # against the host in FM_BEARINGS_GITLAB_HOST or glab's configured host - `glab api
@@ -40,11 +41,13 @@
 # GitLab keeps an MR open after its project is archived, so one bounded
 # `projects/<id>` read per distinct project (at most FM_BEARINGS_MR_PROJECT_MAX)
 # drops the MRs of an archived project; a project it cannot read keeps its MRs.
-# An MR is covered only when its exact URL or full reference (group/project!iid)
+# The captain's own MR is always listed, so it stays on the board after the
+# decision card that named it goes. A review MR is covered, and left out, only
+# when its exact URL or full reference (group/project!iid)
 # appears where the board shows it: a decision (its text, or the PR its own task
 # recorded, which its card links), a queued or landed row, a contribution card,
-# or the visible name or `doing` text of the underway row of the task that
-# records that MR. It is never covered by a fuzzy match, a Done record, a status
+# or the underway row of the task that records that MR, by its pr_url or its
+# visible name or `doing` text. It is never covered by a fuzzy match, a Done record, a status
 # line the view cuts short, a recorded PR no row shows, or a wait that another
 # task's underway row names, since the board would then not show it as its own. A
 # missing glab, no host, no auth, a failure or a timeout leaves open_mrs out, sets
@@ -65,7 +68,15 @@
 # doing starts with that note, and each of its decisions_open rows carries it as
 # note. Each row's name is the durable task title when nonblank and
 # its durable task id otherwise, so renderers always receive a task-identifying
-# label instead of having to substitute run status. A home classified
+# label instead of having to substitute run status. A held main task keeps its
+# row while it works, while the hold is the captain's (its decision card can go
+# between cards) or while it has a PR or MR; only a PR-less external hold leaves
+# Underway for its charted gate row. Its pr_url
+# is the PR or MR the task recorded (pr= meta, else its backlog PR, title link or
+# hold link, else the PR or MR its status log names most often), and its doing names that PR or MR ("MR !900: ...") and says what the
+# task waits on in plain words: the current state when read from the status
+# log, a review park or a known pipeline step, else the latest status line -
+# never a raw pane or source-less reading such as "harness busy". A home classified
 # captain_decision because it has an open
 # captain hold still contributes each working child as its own Underway row;
 # the home row on secondmates[] keeps the decision and gate classification.
@@ -214,7 +225,7 @@ An active away window refuses (exit 3) unless --during-away is given, which the
 board build passes so the captain can read the board while away.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing,
-    pr_url (the PR or MR the task recorded as its own, else null)},
+    pr_url (the PR or MR the task names as its own, else null)},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason,
     stale_note,read_failure},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
@@ -248,10 +259,11 @@ Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs),
-  --include-mrs (adds open_mrs{key,repo,title,url,state,updated}: the captain's open
-  GitLab MRs, authored or awaiting their review, that no decision, queued, landed or
-  contribution row, nor the underway row of the task that records it, shows by URL or
-  full reference; the mrs: line says whether they were checked or unavailable).
+  --include-mrs (adds open_mrs{key,repo,title,url,state,updated}: every open GitLab
+  MR the captain authored, Draft included, and those awaiting their review that no
+  decision, queued, landed or contribution row, nor the underway row of the task that
+  records it, shows by URL or full reference; the mrs: line says whether they were
+  checked or unavailable).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 --include-mrs bounds: FM_BEARINGS_GITLAB_HOST (default: glab's configured host),
   FM_BEARINGS_MR_TIMEOUT seconds per glab call (10), FM_BEARINGS_MR_DETAIL_PARALLEL
@@ -340,6 +352,27 @@ else
 fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
+
+# The PR or MR an Under way row names when its task recorded none: the canonical
+# snapshot reads only a GitHub pull URL from a status log, so a GitLab MR task
+# reaches here with no pr.url. Read-only: the PR or MR URL its status log names
+# most often, the first named winning a tie.
+TASK_PRS=$(printf '%s' "$SNAP" | jq -r '
+    .tasks[]? | select(.kind != "secondmate" and (.pr.url // null) == null
+                       and (.paths.status_log.present == true))
+    | [.id, .paths.status_log.path] | @tsv' \
+  | while IFS=$'\t' read -r task_id task_log; do
+      [ -n "$task_id" ] && [ -f "$task_log" ] || continue
+      grep -Eo 'https://[^[:space:])"<>]+/(-/merge_requests|pulls?)/[0-9]+' "$task_log" 2>/dev/null \
+        | jq -R -s -c --arg id "$task_id" '
+            split("\n") | map(select(. != "")) as $u
+            | if $u == [] then empty else
+                ($u | group_by(.) | map({url: .[0], n: length})) as $g
+                | ($g | map(.n) | max) as $top
+                | {key: $id, value: first($u[] as $x | $g[] | select(.url == $x and .n == $top) | .url)}
+              end'
+    done | jq -s -c 'from_entries')
+[ -n "$TASK_PRS" ] || TASK_PRS='{}'
 
 # --- optional live GitHub PR enrichment -------------------------------------
 PR_STATUS='not_requested (run: /bearings include PRs)'
@@ -478,6 +511,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson return_catchup "$RETURN_CATCHUP" \
+  --argjson task_prs "$TASK_PRS" \
   --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
@@ -486,6 +520,71 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     | if $n <= 0 then ""
       elif length > $n then (if $n == 1 then "…" else (.[:($n - 1)] + "…") end)
       else . end;
+  # The short name of a task PR or MR, for an Under way row: "MR !900", "PR #12".
+  def pr_ref($u):
+    if $u == null then null
+    elif ($u | test("/-/merge_requests/[0-9]+")) then
+      "MR !" + ($u | capture("/-/merge_requests/(?<n>[0-9]+)").n)
+    elif ($u | test("/pulls?/[0-9]+")) then
+      "PR #" + ($u | capture("/pulls?/(?<n>[0-9]+)").n)
+    else "PR" end;
+  # The note of the latest status line. A dated pause ("paused [at=..] until 15:33Z:
+  # waiting on CI") keeps its whole deadline, which a split at the first colon
+  # would cut to "33Z: waiting on CI".
+  def event_note($ev):
+    ($ev.raw // "") as $raw
+    | ($raw | capture("^[a-z-]+(?:\\s+\\[[^\\]]*\\])*\\s+until\\s+(?<t>\\S+?):\\s+(?<n>.*)$") // null) as $u
+    | if $u != null then "until " + $u.t + ": " + $u.n else ($ev.note // "") end;
+  # A worker fault a pane, endpoint or source-less reading reports, in plain
+  # words with the wait it leaves ("worker stopped; waits on a relaunch or
+  # cleanup (<window>)"), or null when the reading names none.
+  def worker_fault($cs):
+    ($cs.detail // "") as $d
+    | ($cs.source // "") as $src
+    | if $src == "none" then
+        (if ($d | startswith("backend target gone: ")) then
+           "worker stopped; waits on a relaunch or cleanup ("
+           + ($d | ltrimstr("backend target gone: ") | sub(" \\(.*$"; "")) + ")"
+         elif ($d | startswith("backend unreachable")) then "worker unreachable; waits on its host"
+         elif ($d | startswith("worktree gone")) then "isolated copy gone; waits on cleanup"
+         elif ($d | startswith("no metadata for")) then "no task record; waits on cleanup"
+         else null end)
+      elif $src == "remote-endpoint" and ($d | startswith("alive on ") | not) then
+        "remote worker unreachable"
+        + ($d | capture(" on (?<h>[^ ]+)") // {} | if .h then " on " + .h else "" end)
+        + "; waits on its host"
+      else null end;
+  # What an Under way task waits on, in plain words. A current state read from
+  # the task status log, a review park or a known pipeline step already speaks
+  # plain words. A pane or source-less reading ("harness busy", "state unknown,
+  # no current-state source available") does not, so the row names a worker
+  # fault in plain words or falls back to the latest status line.
+  def current_wait($cs; $ev):
+    ($cs.detail // "") as $d
+    | ($cs.source // "") as $src
+    | event_note($ev) as $n
+    | ($ev.state // "") as $s
+    | worker_fault($cs) as $f
+    | if $d != "" and $d != ($ev.note // "") and ($src == "status-log" or $src == "review-park"
+                       or ($src == "run-step" and ($cs.state // "unknown") != "unknown"))
+      then $d
+      elif $f != null then $f + (if $n == "" then "" else " (last: " + $n + ")" end)
+      elif $n == "" then (if $src == "status-log" or $src == "review-park" then $d
+                          elif ($cs.state // "") == "working" then "working" else "no update yet" end)
+      elif $s == "blocked" then "blocked: " + $n
+      elif $s == "needs-decision" then "waiting on the captain: " + $n
+      elif $s == "failed" then "failed: " + $n
+      elif $s == "resolved" then "resumed: " + $n
+      elif $s == "paused" then "paused " + (if ($n | startswith("until ")) then "" else "- " end) + $n
+      else $n end;
+  # The doing of an Under way row: the wait, naming the PR or MR of the row when it has one.
+  def row_doing($pr; $w):
+    (if $pr == null then $w
+     else pr_ref($pr) as $ref
+       | ($w | split("MR " + $pr) | join($ref) | split("PR " + $pr) | join($ref)
+          | split($pr) | join($ref)) as $w
+       | if ($w | trunc(80) | contains($ref)) then $w else $ref + ": " + $w end end)
+    | trunc(90);
   def live_captain_call: .hold_bucket == "live";
   # A hold whose reason asks a question is a question for the captain wherever the
   # bucketing put it: blocked and aged holds stay on the board. A dated hold is the
@@ -659,15 +758,22 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
-       | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | (.pr.url // .backlog.pr_url
+          // first(((.backlog.links // [])[]?, (.backlog.hold_choices.links // [])[]?.target?)
+                   | strings | select(test("^https://[^[:space:]]+/(-/merge_requests|pulls?)/[0-9]+$")))
+          // $task_prs[.id] // null) as $pr
+       # A held task keeps its row while it works, while the captain holds it
+       # (its decision card can go between cards) and while it has a PR or MR;
+       # only a PR-less external hold leaves, for its charted gate row.
+       | select(.backlog.current_role != "held" or .current_state.state == "working"
+                or .backlog.hold_kind == "captain" or $pr != null)
        | {id, kind,
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
         name:((.backlog.title // "") as $name
               | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
-        doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90)),
-        pr_url: (.pr.url // null)
+        pr_url: $pr,
+        doing: row_doing($pr; current_wait(.current_state // {}; .paths.status_log.last_event // {}))
       } ]
      + [ $secondmate_views[] as $m
          | $m.bearings_in_flight[]?
@@ -678,9 +784,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             name:((.name // "") as $name
                   | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
                      then $name else ($m.id + "/" + .id) end) | trunc(70)),
-            doing:(((.doing // .state) | trunc(90)) as $d
-                   | if $m.stale_note == null then $d else $m.stale_note + " - " + $d end),
-            pr_url:(.pr_url // null)} ]) as $in_flight_all
+            pr_url:((.pr_url // null) | if type == "string" and startswith("https://") then . else null end),
+            doing:((if ((.source // null) | IN("run-step", "pane", "status-log", "remote-endpoint", "review-park", "none") | not) then ((.doing // .state) | trunc(90))
+                    else row_doing((.pr_url // null) | if type == "string" and startswith("https://") then . else null end;
+                                   current_wait({source, state, detail:(.doing // "")}; .last_event // {})) end) as $d
+                   | if $m.stale_note == null then $d else $m.stale_note + " - " + $d end)} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
@@ -1193,19 +1301,21 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
         end)')
 
 # --- optional live GitLab MR listing ----------------------------------------
-# Under --include-mrs only: the captain's open GitLab MRs, authored or awaiting
-# their review, that the rest of this view does not show. One bounded user call
+# Under --include-mrs only: every open GitLab MR the captain authored, and those
+# awaiting their review that the rest of this view does not show. One bounded user call
 # for the captain's id and two bounded list calls against the configured host
 # (merged by project and iid), one bounded project read per distinct project to
 # drop MRs of an archived project, then one bounded detail, approvals and
 # reviewers call per listed MR (every one of the FM_BEARINGS_MRS kept, so none
 # shows CI or approvals unknown for want of a read), in waves of at most FM_BEARINGS_MR_DETAIL_PARALLEL
 # MRs so a long list neither fans out unboundedly nor runs past a few timeouts.
-# Read-only. An MR is covered when its exact web_url or full reference
+# Read-only. An authored MR (from the created_by_me list, or authored by the
+# captain's id) is never covered. A review MR is covered when its exact web_url or full reference
 # (group/project!iid), not followed by another digit, appears in a projected
 # section the board shows (decisions, gates, landed, captain contributions), is
 # the recorded PR of an open decision's own task (its card links it), or appears
-# in the name or `doing` text of the underway row of the task that records it;
+# as the pr_url or in the name or `doing` text of the underway row of the task
+# that records it;
 # there is no fuzzy match. The canonical snapshot text is deliberately not
 # consulted: its Done records and full status lines name MRs the board never
 # shows, which would hide them from every card and row. recorded_prs alone and
@@ -1233,8 +1343,13 @@ if [ "$INCLUDE_MRS" = 1 ]; then
       || ! mr_reviewing=$(glab_bounded api --hostname "$mr_host" \
         "merge_requests?scope=all&state=opened&reviewer_id=$mr_uid&per_page=100" 2>/dev/null) \
       || ! mr_list=$(printf '%s\n%s\n' "$mr_authored" "$mr_reviewing" \
-        | jq -s -c 'if length == 2 and all(.[]; type == "array")
-                    then add | map(select(type == "object")) | unique_by([.project_id, .iid]) else error("not a list") end' 2>/dev/null); then
+        | jq -s -c --argjson uid "$mr_uid" 'if length == 2 and all(.[]; type == "array")
+                    then .[0] as $mine
+                    | add | map(select(type == "object")) | unique_by([.project_id, .iid])
+                    | map(. as $m | . + {authored: (any($mine[]; type == "object"
+                                                       and .project_id == $m.project_id and .iid == $m.iid)
+                                                   or (.author.id // null) == $uid)})
+                    else error("not a list") end' 2>/dev/null); then
       mr_unavailable "glab api failed or timed out on $mr_host"
     else
       mr_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-mrs.XXXXXX")
@@ -1245,7 +1360,7 @@ if [ "$INCLUDE_MRS" = 1 ]; then
       # What the board shows: decision cards and waiting rows (their text and
       # the PR a decision's own task recorded, which its card links), queued
       # and charted rows, landed rows and contribution cards. An underway row
-      # shows only its name and its cut `doing`, and covers only the MR its own
+      # shows only its name, its cut `doing` and its pr_url link, and covers only the MR its own
       # task records - a wait it names on another task's MR is not that MR's row.
       printf '%s\n' "$MODEL" | jq --argjson rec "$mr_rec" '
         ([.decisions_open[]?.id] | map(strings)) as $ids
@@ -1255,19 +1370,23 @@ if [ "$INCLUDE_MRS" = 1 ]; then
       printf '%s' "$MODEL" | jq -c --argjson rec "$mr_rec" '
         [.in_flight[]? | select(.state != "done") | . as $r
          | {text: ("\(.name // "") \(.doing // "")"),
+            named: ($r.pr_url // null),
             own: ([$rec[] | select(.id == $r.id) | .url] + [$r.pr_url // empty] | map(strings))}
          | select(.own != [])]' > "$mr_tmp/rows" \
         || mr_coverage_failed
-      # Uncovered MRs, newest activity first.
+      # The captain's own MRs (Draft included) and the uncovered review MRs,
+      # newest activity first. An own MR stays listed even when a card names it:
+      # the card goes once its decision is answered, and the MR is still open.
       mr_uncovered=$(printf '%s' "$mr_list" | jq -c --rawfile known "$mr_tmp/known" --slurpfile rows "$mr_tmp/rows" '
         def names($t; $s): ($s | length) > 0 and
           any($t | indices($s)[]; ($t[(. + ($s | length)):(. + ($s | length) + 1)] | test("^[0-9]") | not));
         def shown($s): names($known; $s);
-        def own_row($u; $s): any($rows[0][]; any(.own[]; . == $u) and names(.text; $s));
+        def own_row($u; $s): any($rows[0][]; any(.own[]; . == $u) and (.named == $u or names(.text; $s)));
         [ .[] | select(type == "object" and (.iid | type) == "number" and (.project_id | type) == "number"
                        and ((.web_url // "") | startswith("https://")))
           | .web_url as $u | (.references.full // "") as $ref
-          | select((shown($u) or shown($ref) or own_row($u; $u) or own_row($u; $ref)) | not) ]
+          | select(.authored == true
+                   or ((shown($u) or shown($ref) or own_row($u; $u) or own_row($u; $ref)) | not)) ]
         | sort_by(.updated_at // "") | reverse')
       # GitLab keeps an MR "opened" after its project is archived and does not
       # honour the list call's archive filter everywhere, so read each distinct
@@ -1351,9 +1470,9 @@ EOF
              updated:(.updated_at // "")} ]')
       rm -rf "$mr_tmp"
       mr_shown=$(printf '%s' "$OPEN_MRS" | jq 'length')
-      MR_STATUS="checked ($mr_host, $mr_shown open MR(s) no task covers)"
+      MR_STATUS="checked ($mr_host, $mr_shown open MR(s): own, or reviews no task covers)"
       if [ "$mr_total" -gt "$mr_shown" ]; then
-        MR_STATUS="checked ($mr_host, showing $mr_shown of $mr_total open MR(s) no task covers)"
+        MR_STATUS="checked ($mr_host, showing $mr_shown of $mr_total open MR(s): own, or reviews no task covers)"
       fi
     fi
   fi
