@@ -2001,6 +2001,57 @@ test_a_re_held_card_shows_its_current_options_and_each_link_once() {
   pass "a re-held card shows its current options and each link once"
 }
 
+# The cd-965-iap-console hold as first written: numbered steps that each start
+# with a console URL, then a redirect URI whose path holds a <CLIENT_ID>
+# placeholder, then the card links.
+IAP_HOLD_REASON="Will you finish the Google sign-in setup in the Cloud Run console? Google's Cloud Run docs put these settings in the service's Security tab, not an IAP Applications tab. Auto Generate makes the OAuth client for you, so you need no redirect URI or origins. Corrected steps. 1) https://console.cloud.google.com/auth/branding?project=ai-ci-pipeline: Get started, audience External, Create (skip if done). 2) https://console.cloud.google.com/auth/audience?project=ai-ci-pipeline: add rmurphyswimmer@gmail.com as a test user. 3) https://console.cloud.google.com/run/detail/europe-west1/pages/security?project=ai-ci-pipeline: IAP section, Edit policy, Configure in IAP, Custom OAuth, Auto Generate Credentials, Save. Leave the principals there as they are. 4) Open the probe page in a private window. It should show an account chooser, then the page. If you already made a client by hand: it must be a Web application with no JavaScript origins and one redirect URI, https://iap.googleapis.com/v1/oauth/clientIds/<CLIENT_ID>:handleRedirect (added after it is created). Then enter its ID and secret in Configure in IAP instead of Auto Generate. https://pages-413301784905.europe-west1.run.app/_probe-965/ https://forgejo.clarob.uk/rob/continuous-delivery/pulls/967"
+
+# iap_hold_card: the card the payload makes from that hold, after it validated.
+iap_hold_card() {
+  local p
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq --arg r "$IAP_HOLD_REASON" '.decisions_open = [
+        {id: "cd-965-iap-console", key: "cd-965-iap-console", verb: "captain-hold", owner: "(main)",
+         title: "IAP OAuth client console step for the pages service (#965)", reason: $r,
+         choices: {options: [{value: "a", label: "I will finish in the console with Auto Generate (recommended)"},
+                             {value: "b", label: "I make the client by hand and OpenTofu attaches it to IAP"}],
+                   links: [], free_text: true, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$TMP_ROOT/snap-iap.json"
+  p=$(FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$TMP_ROOT/snap-iap.json") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/iap.json"
+  validates "$TMP_ROOT/iap.json" || fail "the payload did not satisfy the validator"
+  jq -c '.captains_call[] | select(.key == "cd-965-iap-console")' <<<"$p"
+}
+
+# Steps that each start with a URL are prose, so they stay in the about; only
+# the run of links after the last sentence leaves it.
+test_steps_that_start_with_a_url_stay_in_the_about() {
+  local card step
+  card=$(iap_hold_card)
+  for step in "1) " "Get started, audience External" "2) " "add rmurphyswimmer@gmail.com as a test user" \
+              "3) " "Auto Generate Credentials, Save" "4) Open the probe page"; do
+    jq -e --arg s "$step" '(.about // "") | contains($s)' <<<"$card" >/dev/null \
+      || fail "the about lost the step text '$step': $card"
+  done
+  jq -e '(.about // "") | contains("_probe-965") or contains("pulls/967") | not' <<<"$card" >/dev/null \
+    || fail "the about kept the trailing links: $card"
+  jq -e '[.links[].url] | index("https://forgejo.clarob.uk/rob/continuous-delivery/pulls/967") != null' <<<"$card" >/dev/null \
+    || fail "the trailing PR link is not a card link: $card"
+  pass "steps that start with a url stay in the about"
+}
+
+# A URL holding a <PLACEHOLDER> is an address to type, not a link: the text
+# keeps it whole and the card never links the part before the placeholder.
+test_a_url_with_a_placeholder_stays_whole_and_is_never_a_link() {
+  local card uri=https://iap.googleapis.com/v1/oauth/clientIds/
+  card=$(iap_hold_card)
+  jq -e --arg u "$uri<CLIENT_ID>:handleRedirect" '(.about // "") | contains($u)' <<<"$card" >/dev/null \
+    || fail "the about did not keep the redirect URI whole: $card"
+  jq -e --arg u "$uri" '[.links[].url | select(startswith($u))] | length == 0' <<<"$card" >/dev/null \
+    || fail "the card linked the placeholder URI's prefix: $card"
+  pass "a url with a placeholder stays whole and is never a link"
+}
+
 # A YouTrack link that ends a reason after its options is a card link labelled
 # by its issue id, never about text.
 test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link() {
@@ -2312,6 +2363,8 @@ fm_test_run \
   test_a_later_question_beats_a_later_list_lead_in \
   test_a_secondmate_question_after_its_context_is_asked \
   test_a_re_held_card_shows_its_current_options_and_each_link_once \
+  test_steps_that_start_with_a_url_stay_in_the_about \
+  test_a_url_with_a_placeholder_stays_whole_and_is_never_a_link \
   test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
   test_equals_options_and_trailing_links_and_paths_leave_the_about \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \

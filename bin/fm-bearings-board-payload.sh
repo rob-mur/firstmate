@@ -450,8 +450,13 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # prose: trailing_cited cuts it from the text, its URLs become links as any
   # other, and each path becomes a `{path, label}` link labelled by its file
   # name and note ("youtrack-changes.md (Round 5)"), after the web links.
+  # A URL holding a placeholder ("https://host/v1/clientIds/<CLIENT_ID>:x") is
+  # an address to fill in, not a link: it stays whole in the text and the part
+  # before the placeholder never becomes a link.
   | def card_urls:
-      scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]<>\"()]*") | sub("[.,;:!?]+$"; "");
+      scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]\"()]*")
+      | select(test("<[A-Za-z_][A-Za-z0-9_-]*>") | not)
+      | sub("[<>].*$"; "") | sub("[.,;:!?]+$"; "");
     def link_label($u; $t):
       ((($t | split($u)[0]) // "") | .[-80:] | sub("^.*([.;!?,]|\\([0-9]+\\))[[:space:]]"; "") | ascii_downcase) as $pre
       | ($u | test("#(issuecomment-|note_|discussion_r)[0-9]+$")) as $comment
@@ -680,9 +685,16 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     # The body shows the lead and tail of a text; its options are the choices on the card.
     # Words that only introduce the options ("Options are", "Choices:") go with them.
     # A tail that only repeats a link label adds nothing the card links lack.
-    def without_options:
+    # A list whose marks name none of the options a hold recorded ($recorded,
+    # their values) is not the card choices but part of the text, such as
+    # numbered steps on a card with lettered options, so it stays.
+    def without_options($recorded):
       (option_parse) as $p
       | if $p == null then .
+        elif ($recorded | length) > 0
+             and ([ $p.options[].value | ltrimstr("option-") | ascii_downcase ]
+                  | any(. as $v | $recorded | index($v)) | not)
+        then .
         else [ ($p.lead | sub("[[:space:]:;,-]+$"; "")
                 | sub("(?:^|(?<=[.!?])[[:space:]]+)(?:the )?(?:options|choices|alternatives)(?: (?:are|would be))?$"; ""; "i")
                 | if length > 0 and (test("[.?!]$") | not) then . + "." else . end),
@@ -744,7 +756,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                        then . + "?" else . end)
                    else ($long | ask_sentence | short_text_n(120; true) | nz(null)) end) as $q0
                 | (if $q0 == null then null else ($q0 | sub(decision_label; ""; "i") | cap) end) as $q
-                | (if ($d.verb // "") == "review-ready" then $texts else [ $texts[] | without_options ] end) as $body
+                | (if ($d.verb // "") == "review-ready" then $texts else ( [ (($d.choices // {}) | if type == "object" then (.options // []) else [] end)[]
+                           | objects | .value | strings | ascii_downcase ] ) as $recorded
+                       | [ $texts[] | without_options($recorded) ] end) as $body
                 | ($q != null and $title != $q and ($title | endswith(": " + $q) | not)) as $asks
                 # The body drops each whole sentence that only repeats the heading:
                 # one that starts the text or follows a sentence end, never the
