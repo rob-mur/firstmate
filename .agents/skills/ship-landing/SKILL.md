@@ -28,6 +28,11 @@ Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm
 The watcher owns teardown of a merged lane whose merge poll is armed, including a PR merged through `bin/fm-pr-merge.sh`, when the lane is parked or its home has `config/auto-land` ([`docs/configuration.md`](../../../docs/configuration.md#park-on-review)). Otherwise, firstmate tears it down after landing is confirmed.
 A lane parked on review (`bin/fm-park.sh`) has no agent and relaunches itself on review activity; `bin/fm-park.sh park <id>` parks one clean lane on request and `bin/fm-park.sh resume <id> --trigger <text>` relaunches one by hand.
 
+A project whose registry entry declares an after-merge step ([`docs/configuration.md`](../../../docs/configuration.md#after-merge-action-dataprojectsmd-after-merge-token)) has it run by `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` right after the merge.
+When their output says `relay to the captain: <note>`, include that note in the merge outcome you give the captain.
+An `actionable:` line about the step means the merge landed but the step did not run and nothing in that checkout was changed: report the stated reason to the captain, and retry with the command it names once the cause is fixed, or record it done by hand only after the captain says it was done another way.
+Cleanup of that task refuses until the step is recorded done, including after a merge firstmate did not perform, so a cleanup refused for this reason is handled the same way.
+
 Tear down any other ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.

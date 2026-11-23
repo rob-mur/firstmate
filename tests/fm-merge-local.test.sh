@@ -308,7 +308,45 @@ SH
   pass 'two approved tasks with the same tree cannot roll back a successful landing'
 }
 
+# A project that declares an after-merge action has it run right after the
+# landing; a refused action leaves the landing in place but is reported and
+# recorded as failed, never swallowed.
+test_landing_runs_the_declared_after_merge_action() {
+  local up dot out err rc
+  make_case after-merge
+  up="$CASE/upstream" dot="$CASE/dot"
+  fm_git_init_commit "$up"
+  git clone --quiet "$up" "$dot"
+  git -C "$up" commit -q --allow-empty -m landed
+  printf '## Projects\n- project [local-only after-merge=ff:%s@origin/main after-merge-note=run%%20snrs] - fixture (added 2026-01-01)\n' \
+    "$dot" > "$HOME_DIR/data/projects.md"
+  record_done || fail 'done head was not accepted'
+  out=$(land 2>&1) || fail "landing with an after-merge action failed: $out"
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'landing did not use X'
+  [ "$(git -C "$dot" rev-parse HEAD)" = "$(git -C "$up" rev-parse HEAD)" ] || fail 'the declared checkout was not fast-forwarded'
+  assert_contains "$out" 'relay to the captain: run snrs' 'the landing did not print the note for the captain'
+  grep -qx 'after_merge=done' "$META" || fail 'the after-merge result was not recorded done'
+
+  make_case after-merge-dirty
+  up="$CASE/upstream" dot="$CASE/dot"
+  fm_git_init_commit "$up"
+  git clone --quiet "$up" "$dot"
+  git -C "$up" commit -q --allow-empty -m landed
+  printf 'local edit\n' >> "$dot/README.md"
+  printf '## Projects\n- project [local-only after-merge=ff:%s@origin/main] - fixture (added 2026-01-01)\n' \
+    "$dot" > "$HOME_DIR/data/projects.md"
+  record_done || fail 'done head was not accepted'
+  rc=0
+  err=$(land 2>&1 >/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a refused after-merge action undid the landing report: $err"
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'the landing itself did not happen'
+  assert_contains "$err" 'actionable: landed fm/local-task but its project after-merge action did not complete' 'the refused action was not reported'
+  grep -qx 'after_merge=failed' "$META" || fail 'the refused action was not recorded as failed'
+  pass 'landing runs the declared after-merge action and reports a refused one'
+}
+
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_landing_runs_the_declared_after_merge_action

@@ -161,4 +161,45 @@ err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-direct 2>&1 >/dev/null)
 assert_contains "$err" "only a no-mistakes ship takes it" "the direct-PR refusal did not say why"
 pass "fm-project-mode: pr=manual refuses another mode, a bound forge, an empty value, and an unknown value, but leaves --forge answerable"
 
+cat >> "$DATA/projects.md" <<'EOF'
+- after-ff [direct-PR +yolo after-merge=ff:/home/u/repos/dot%20files@origin/main after-merge-note=run%20snrs] - an after-merge action with a note (added 2026-01-01)
+- after-first [after-merge=ff:/srv/at@host/repo@upstream/release/2 no-mistakes] - action first, an "@" inside the path (added 2026-01-01)
+- after-bare [local-only after-merge=ff:/srv/repo@origin/main] - an action without a note (added 2026-01-01)
+- after-kind [direct-PR after-merge=pull:/srv/repo@origin/main] - an unknown action kind (added 2026-01-01)
+- after-relative [direct-PR after-merge=ff:repos/x@origin/main] - a relative path (added 2026-01-01)
+- after-notarget [direct-PR after-merge=ff:/srv/repo] - no remote target (added 2026-01-01)
+- after-badhex [direct-PR after-merge=ff:/srv/repo@origin/main after-merge-note=50%] - a stray percent sign (added 2026-01-01)
+- after-control [direct-PR after-merge=ff:/srv/repo@origin/main after-merge-note=a%0Ab] - a newline in the note (added 2026-01-01)
+- after-noteonly [direct-PR after-merge-note=run%20snrs] - a note without an action (added 2026-01-01)
+EOF
+run_after() {
+  FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --after-merge "$1" 2>/dev/null
+}
+tab=$'\t'
+assert_equals "ff${tab}/home/u/repos/dot files${tab}origin${tab}main${tab}run snrs" "$(run_after after-ff)" "after-merge with a note did not decode"
+assert_equals "ff${tab}/srv/at@host/repo${tab}upstream${tab}release/2${tab}" "$(run_after after-first)" "after-merge first in the brackets, with an @ in its path, did not parse"
+assert_equals "ff${tab}/srv/repo${tab}origin${tab}main${tab}" "$(run_after after-bare)" "after-merge without a note did not parse"
+assert_equals "direct-PR on" "$(run_mode after-ff)" "an after-merge token changed the default posture output"
+assert_equals "fm/" "$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --branch-prefix after-ff 2>/dev/null)" "an after-merge token changed the branch prefix"
+assert_equals "none" "$(run_forge after-first)" "an after-merge token changed the forge binding"
+assert_equals "no-mistakes off" "$(run_mode after-first)" "an after-merge token first in the brackets was taken as the mode"
+for name in legacy flagged lab hand-first; do
+  out=$(run_after "$name")
+  status=$?
+  [ "$status" -eq 0 ] && [ -z "$out" ] || fail "$name has no after-merge token but --after-merge gave status $status, '$out'"
+done
+out=$(run_after not-registered) && [ -z "$out" ] || fail "an unregistered project must declare no after-merge action: '$out'"
+pass "fm-project-mode: --after-merge decodes the ff action and its note in any token order, and projects without the token declare nothing"
+
+for name in after-kind after-relative after-notarget after-badhex after-control after-noteonly; do
+  out=$(run_after "$name")
+  status=$?
+  [ "$status" -eq 3 ] || fail "$name was not refused by --after-merge (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused $name still printed an action: '$out'"
+  [ -n "$(run_mode "$name")" ] || fail "the default output refused over the after-merge token of $name"
+done
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --after-merge after-kind 2>&1 >/dev/null)
+assert_contains "$err" "after-merge=ff:<absolute-path>@<remote>/<branch>" "the after-merge refusal did not name the accepted form"
+pass "fm-project-mode: --after-merge refuses an unknown kind, a relative path, a missing target, bad encoding, and a note alone, while the posture stays readable"
+
 echo "# fm-project-mode.test.sh: all assertions passed"
