@@ -91,7 +91,16 @@
 #
 # option_parse_by($kind): option_parse limited to one kind - "number",
 # "letter" or "list" - so a reason holding a numbered list and a lettered one
-# yields either.
+# yields either. The kind "inline-letter" reads only bare lowercase "a) ...
+# b) ..." marks, the first after a space, colon, semicolon or comma.
+#
+# inline_letter_options: a question that carries its options inline as bare
+# "a) ... b) ... c) ...?" marks, at least two running a, b, c in order after a
+# question lead, split into {question, options, recommend} - the question is
+# the lead up to the options, ending in "?" unless it already ends a sentence,
+# then any text after the last option; each option is {value, label} with the
+# bare letter as its value ("a"), as a hold's own option lines use. A text
+# with no such run, or with nothing before it, gives null.
 #
 # option_refs: the option marks a reason refers to by name, whether or not it
 # lists them - a slash run "A/B/C" (numbers only from three, "1/2/3"), "A, B
@@ -235,8 +244,19 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
         # "a=one, b=two, c=three?": "a=" opens a word and each later mark follows
         # ", ", so key=, at=, a URL query (?a=1&b=2) and "a=1 b=2" are no marks.
         // from_marks(marks("(?:(?<![^[:space:]])(?=a=)|(?<=, ))(?<k>[a-z])=(?=[^[:space:]=])"; "letter"))
+      elif $kind == "inline-letter" then
+        from_marks(marks("(?<![^[:space:]:;,])(?<k>[a-z])\\)(?=[[:space:]])"; "letter"))
       else from_list end;
   def option_parse: option_parse_by("number") // option_parse_by("letter") // option_parse_by("list");
+  def inline_letter_options:
+    option_parse_by("inline-letter") as $p
+    | if $p == null then null
+      else ($p.lead | sub("[[:space:]:;,-]+$"; "")) as $lead
+      | if ($lead | length) == 0 then null
+        else {question: ([($lead | if test("[.?!]$") then . else . + "?" end),
+                          ($p.tail | sub("^[[:space:]]+"; ""))] | map(select(length > 0)) | join(" ")),
+              options: [$p.options[] | {value: (.value | ltrimstr("option-")), label}]}
+             + (if $p.recommend == null then {} else {recommend: ($p.recommend | ltrimstr("option-"))} end) end end;
   def option_mark_value: "option-" + (if test("^[0-9]") then . else ascii_downcase end);
   def option_refs:
     . as $q

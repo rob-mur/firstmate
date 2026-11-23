@@ -688,8 +688,11 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     # A list whose marks name none of the options a hold recorded ($recorded,
     # their values) is not the card choices but part of the text, such as
     # numbered steps on a card with lettered options, so it stays.
+    # A lead that runs into its options with no sentence end takes the "?"
+    # that closes the option run ("so should I a) ... or c) ...?"), else ".".
     def without_options($recorded):
-      (option_parse) as $p
+      . as $whole
+      | (option_parse) as $p
       | if $p == null then .
         elif ($recorded | length) > 0
              and ([ $p.options[].value | ltrimstr("option-") | ascii_downcase ]
@@ -697,7 +700,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         then .
         else [ ($p.lead | sub("[[:space:]:;,-]+$"; "")
                 | sub("(?:^|(?<=[.!?])[[:space:]]+)(?:the )?(?:options|choices|alternatives)(?: (?:are|would be))?$"; ""; "i")
-                | if length > 0 and (test("[.?!]$") | not) then . + "." else . end),
+                | if length > 0 and (test("[.?!]$") | not)
+                  then . + (if $whole[:(($whole | length) - ($p.tail | length))] | test("[?][[:space:]]*$") then "?" else "." end)
+                  else . end),
                ($p.tail | sub("^[[:space:]]+"; "")
                 | if test("^((Comment on (PR|MR|issue) [0-9]+)|(PR|MR|Issue) [0-9]+|[A-Z][a-z]+ page|Report)[.]?$") then "" else . end) ]
              | map(select(length > 0)) | join(" ") end;
