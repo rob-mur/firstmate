@@ -76,7 +76,9 @@
 # recommendation ("Option a is my recommendation: ...", also "is the
 # recommended option" or "is the preferred one"), or a parenthesised one
 # before the colon ("Option a (recommended): ...", also "(preferred)" or "(my
-# recommendation)", any case). Markers must run 1, 2, 3 or a, b, c
+# recommendation)", any case). Then inline lowercase
+# "a=one, b=two, c=three?" marks: "a=" opens a word and each later mark
+# follows ", ". Markers must run 1, 2, 3 or a, b, c
 # from the first, at least two; the last option ends at its sentence end; a
 # reason with no such list parses to null. Values are option-<n> or
 # option-<letter>. A label is the full option text, never shortened, with URLs
@@ -230,6 +232,9 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
         # word "option", its letter and a colon, any case; "Option a
         # (recommended): one." marks its option the same way.
         // from_marks(marks("(?<![[:alnum:]])[Oo][Pp][Tt][Ii][Oo][Nn] (?<k>[A-Za-z])(?<r> (?i:is (?:my|the) (?:recommendation|recommended (?:one|option)|preferred (?:one|option))))?(?:[[:space:]]+\\((?<q>(?i:recommended|preferred|my recommendation))\\))?[[:space:]]*:(?=[[:space:]])"; "letter"))
+        # "a=one, b=two, c=three?": "a=" opens a word and each later mark follows
+        # ", ", so key=, at=, a URL query (?a=1&b=2) and "a=1 b=2" are no marks.
+        // from_marks(marks("(?:(?<![^[:space:]])(?=a=)|(?<=, ))(?<k>[a-z])=(?=[^[:space:]=])"; "letter"))
       else from_list end;
   def option_parse: option_parse_by("number") // option_parse_by("letter") // option_parse_by("list");
   def option_mark_value: "option-" + (if test("^[0-9]") then . else ascii_downcase end);
