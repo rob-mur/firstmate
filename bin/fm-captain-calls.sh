@@ -34,6 +34,9 @@
 #     not a registered secondmate (a finished task's leftover log has no meta
 #     and is not read). Same fold, same answered rule; source "main-worker".
 #     Only needs-decision is a captain call; a blocked line is firstmate's.
+#     A worker key whose task is a main hold that is a call asks that same
+#     call: it is not a second call and is listed in skipped[], so the hold
+#     shows once.
 #
 # Work hours: outside work hours a work-project item (a call whose key, task,
 # title, repo, question or links name descartesunderwriting, aegis, iac-* or a
@@ -368,12 +371,20 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
                      else ([$until[] | select(.mate == $mate and .task == $h.t) | .until][0] // null) end),
         raised_at: iso(.opened), answered} | inline_options | classify]) as $mate_calls
   | def deferred: .hold_until != null and .hold_until > $today;
+  # A live worker key on a task that is itself held for the captain asks the
+  # same call: the hold is the one call, so the worker key is skipped.
+  ([$holds[] | select(deferred | not) | .task]) as $held_tasks
+  | def on_held_task: .source == "main-worker" and (.task as $t | $held_tasks | index([$t])) != null;
   {calls: ([$holds[] | select(deferred | not)]
-             + [$worker_calls[], $mate_calls[] | select(.answered == "" and (deferred | not)) | del(.answered)])
+             + [$worker_calls[], $mate_calls[] | select(.answered == "" and (deferred | not) and (on_held_task | not))
+                | del(.answered)])
            | map(. + {pr_urls: ([.links[].url] | pr_urls_in)}),
      answered: [$worker_calls[], $mate_calls[] | select(.answered != "")],
-     skipped: [$holds[], ($mate_calls[] | select(.answered == "")) | select(deferred)
-               | {key, home, task, title, question, why: ("deferred until " + .hold_until)}],
+     skipped: ([$holds[], ($mate_calls[] | select(.answered == "")) | select(deferred)
+                | {key, home, task, title, question, why: ("deferred until " + .hold_until)}]
+               + [$worker_calls[] | select(.answered == "" and on_held_task)
+                  | {key, home, task, title, question,
+                     why: ("task " + .task + " is held for the captain; its hold is the one call")}]),
      homes: [$mates[] | select(.kind != "call" and (.worker | not)) | {id: .home, remote, status_log: .kind}],
      workers: [$mates[] | select(.kind != "call" and .worker) | .home]}')
 
