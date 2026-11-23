@@ -41,6 +41,8 @@
 # lift the deferral (it authorizes discarding unlanded WORK, never the
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
+# A merged ship task whose project declares an after-merge action REFUSES until
+# bin/fm-after-merge.sh has recorded that action done; see the gate below.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch other than the local no-mistakes
@@ -4123,6 +4125,25 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
     echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
+    exit 1
+  fi
+fi
+
+# A project that declares an after-merge action (bin/fm-project-mode.sh owns
+# the registry token) owes it once its work has merged, so a ship is not
+# cleaned up until bin/fm-after-merge.sh has recorded it done when this home
+# saw its PR merge (the merge-notification marker that bin/fm-pr-merge.sh and
+# the merge poll both write), already attempted the action, or holds a local
+# done head that this non-forced cleanup has just found landed. That script's
+# refusal names the retry and the hand-record commands. A project without the
+# token is never gated, nor is a PR closed without a merge or a --force
+# (discarded) cleanup.
+if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ] \
+    && { [ -e "$STATE/$ID.pr-poll-merge-notified" ] \
+      || grep -q -e '^after_merge=' -e '^local_done_head=' "$META"; }; then
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-after-merge.sh" "$ID" --require-done; then
+    echo "REFUSED: task $ID's project after-merge action has not been recorded done." >&2
     exit 1
   fi
 fi
