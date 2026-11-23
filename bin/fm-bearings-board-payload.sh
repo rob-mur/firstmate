@@ -175,7 +175,9 @@
 #   open_mrs        -> open_mrs: the captain's open GitLab MRs (authored or awaiting
 #                      their review) that the rest of the board does not show,
 #                      as information rows {key, repo, title, url, state} - never
-#                      decision cards. The section is absent when the snapshot has
+#                      decision cards or waiting rows; the snapshot's state line,
+#                      including any `waiting on <author>` it opens with, passes
+#                      through verbatim. The section is absent when the snapshot has
 #                      no open_mrs (not requested, or GitLab unavailable).
 #
 # Copy overlay (--copy): a JSON object whose optional maps are keyed by the row
