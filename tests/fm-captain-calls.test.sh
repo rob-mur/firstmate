@@ -330,6 +330,44 @@ test_plain_hold_is_a_call_with_its_options() {
   pass "a plain held question is a call with its question and options"
 }
 
+# A task re-held after released holds keeps every earlier hold's option and
+# link lines in its backlog body, as wp-results-persist did on 2026-11-23: its
+# card showed the earlier holds' options after the current ones and PR 78 twice.
+test_a_re_held_task_shows_only_its_current_options() {
+  local home out pr=https://forgejo.example/rob/workload-pruner/pulls/78
+  home=$(make_home re-held)
+  hold "$home" wp-results-persist --title "Save stage results outside the runner cache" \
+    --reason "How should the GPU measurement job log in to the new private results bucket?" \
+    --option "a=New workload-identity pool that admits only main runs; no stored key (recommended)" \
+    --option "b=Dedicated service-account key in a new forge secret" \
+    --option "c=Give the existing registry writer access to the bucket" \
+    --link "https://forgejo.example/rob/workload-pruner/issues/77 Storage survey and options"
+  answer "$home" wp-results-persist --release
+  hold "$home" wp-results-persist \
+    --reason "Will you apply the new results bucket before I merge PR 78?" \
+    --option "a=Applied it; merge PR 78 when its checks pass" \
+    --option "b=Merge PR 78 when its checks pass; I will apply it later" \
+    --link "$pr PR 78 (infra/README.md has the apply steps)"
+  answer "$home" wp-results-persist --release
+  hold "$home" wp-results-persist \
+    --reason "May a project admin apply infra/identity in PR 78 once, so that CI can create the results bucket?" \
+    --option "a=Yes: an admin applies infra/identity once; CI then creates the bucket" \
+    --option "b=No project-wide create: an admin creates the bucket once in infra/identity too" \
+    --free-text --link "$pr PR 78 (infra/README.md explains both roots)"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" wp-results-persist calls "a re-held question"
+  assert_equals "a,b" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "wp-results-persist") | [.options[].value] | join(",")')" \
+    "the call carries only the current hold's options"
+  assert_equals "No project-wide create: an admin creates the bucket once in infra/identity too" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "wp-results-persist") | .options[1].label')" \
+    "the options are the current hold's, not an earlier hold's"
+  assert_equals "$pr|PR 78 (infra/README.md explains both roots)" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "wp-results-persist") | .links[] | "\(.url)|\(.label)"')" \
+    "the call links PR 78 once, with the current hold's label, and no earlier hold's link"
+  pass "a re-held task shows only its current hold's options and links"
+}
+
 test_cd_calls_named_by_housekeeping_steers_stay_calls() {
   local out key
   out=$(run_calls "$FIXTURE" "$FIXTURE/prs-fos-merged.tsv") || fail "fm-captain-calls failed"
@@ -525,6 +563,7 @@ fm_test_run \
   test_deferred_hold_is_skipped_until_its_date \
   test_deferred_secondmate_hold_is_skipped_until_its_date \
   test_plain_hold_is_a_call_with_its_options \
+  test_a_re_held_task_shows_only_its_current_options \
   test_cd_calls_named_by_housekeeping_steers_stay_calls \
   test_cd_870_version_file_is_a_call_with_its_open_pr \
   test_captain_hold_key_names_its_task_and_question \

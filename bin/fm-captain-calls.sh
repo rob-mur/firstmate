@@ -12,7 +12,9 @@
 #     Done, not checked, with (hold-kind: captain) and a hold reason. A hold
 #     whose (hold-until: YYYY-MM-DD) is after today (UTC) is deferred and is
 #     not a call; it is listed in skipped[] instead. A hold with an unresolved
-#     blocked-by stays a call and carries its blocker ids.
+#     blocked-by stays a call and carries its blocker ids. Its options and links
+#     are the current hold's alone (the row body's first paragraph); a re-held
+#     task's earlier holds stay in later paragraphs and are never shown.
 #   - an open needs-decision key in the parent status log state/<mate>.status of
 #     a secondmate in data/secondmates.md, local or remote (a remote home's
 #     status reaches the same parent log). A key raised for a captain hold
@@ -189,6 +191,8 @@ MAIN_JSON=$(jq -R -n '
       | .rows += [{id: $m.id, section: .section, checked: ($m.check | test("[xX]")), rest: $m.rest, body: []}]
     elif (.rows | length) > 0 and ($line | test("^[[:space:]]+[^[:space:]]")) then
       .rows[-1].body += [$line | gsub("^\\s+|\\s+$"; "")]
+    elif (.rows | length) > 0 and ($line | test("^[[:space:]]*$")) then
+      .rows[-1].body += [""]
     else . end)
   | {records: [.rows[]
       | select(.section != "done" and (.checked | not))
@@ -196,19 +200,22 @@ MAIN_JSON=$(jq -R -n '
       | select(metadata($rest; "hold-kind") == "captain")
       | (cap($rest; ".*\\(hold:[[:space:]]*(?<v>[^)]*)")) as $reason
       | select($reason != null and $reason != "")
+      # The current hold is the first body paragraph; a re-held task keeps each
+      # earlier hold option and link line in later paragraphs, never shown.
+      | (.body | (index("") // length) as $n | .[:$n]) as $header
       | {id, section, rest: $rest,
          title: title_of($rest),
          repo: metadata($rest; "repo"),
          hold_reason: $reason,
          hold_until: metadata($rest; "hold-until"),
          blocked_by: ([$rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0]] | unique),
-         hold_set: ([.body[] | capture("^Captain hold set:[[:space:]]*(?<v>[0-9TZ:-]+)")? | .v][0] // null),
-         options: [.body[] | capture("^Captain hold option:[[:space:]]*(?<v>[^=[:space:]]+)(?:=(?<l>.+))?$")?
+         hold_set: ([$header[] | capture("^Captain hold set:[[:space:]]*(?<v>[0-9TZ:-]+)")? | .v][0] // null),
+         options: [$header[] | capture("^Captain hold option:[[:space:]]*(?<v>[^=[:space:]]+)(?:=(?<l>.+))?$")?
                    | {value: .v, label: ((.l // .v) | gsub("^\\s+|\\s+$"; ""))}],
-         links: [.body[] | capture("^Captain hold link:[[:space:]]*(?<t>[^[:space:]]+)(?:[[:space:]]+(?<l>.*))?$")?
+         links: [$header[] | capture("^Captain hold link:[[:space:]]*(?<t>[^[:space:]]+)(?:[[:space:]]+(?<l>.*))?$")?
                  | {url: .t, label: ((.l // "") | gsub("^\\s+|\\s+$"; ""))}],
-         free_text: any(.body[]; test("^Captain hold free text:[[:space:]]*yes$")),
-         no_link: any(.body[]; test("^Captain hold no link:[[:space:]]*yes$"))}]}
+         free_text: any($header[]; test("^Captain hold free text:[[:space:]]*yes$")),
+         no_link: any($header[]; test("^Captain hold no link:[[:space:]]*yes$"))}]}
 ' < "$BACKLOG" | fm_hold_reason_decode_stream json) || {
   echo "fm-captain-calls: cannot parse $BACKLOG" >&2; exit 1; }
 
