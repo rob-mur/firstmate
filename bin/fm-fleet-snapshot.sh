@@ -93,9 +93,11 @@
 #     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
 #     active_children lists only working children; in_flight_children lists
 #     every owned in-flight child in whatever current state it is in, and is
-#     null for a summary from an older producer that does not publish it.
-#     Each in_flight_children row carries pr_url, the PR or MR the child
-#     recorded as its own (null when none).
+#     null for a summary from an older producer that does not publish it. Each
+#     in_flight_children row carries pr_url (its recorded PR, else a PR or MR URL
+#     its latest status line names, else null) and last_event{state,note,raw}
+#     (its latest status line, cut short) so a parent can name its wait in plain
+#     words instead of a raw pane or source-less reading.
 #     provenance.summary_source distinguishes "local-ledger", "remote-ledger",
 #     "local-ledger-cache", and "remote-ledger-cache". Every usable ledger read,
 #     local or remote, refreshes a last-good copy for its registered route under
@@ -1293,7 +1295,13 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
             doing:((.current_state.detail // .current_state.state // "") | trunc(120)),
-            pr_url:(.pr.url // null)} ]) as $in_flight_all
+            pr_url:(.pr.url
+                    // ([(.paths.status_log.last_event.raw // "")
+                         | match("https://[^\\s)\"<>]+/(-/merge_requests|pulls?)/[0-9]+"; "g") | .string][0])
+                    // null),
+            last_event:((.paths.status_log.last_event // {})
+                        | {state:(.state // null), note:((.note // null) | if . == null then null else trunc(200) end),
+                           raw:((.raw // null) | if . == null then null else trunc(240) end)})} ]) as $in_flight_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status",

@@ -340,6 +340,13 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a non-HTTPS Landed PR URL was accepted"
 
+  write_valid_payload "$data"
+  jq '.underway = [{"id":"sample-task","repo":"sample","name":"Sample task","state":"working",
+    "kind":"ship","doing":"MR !9: waiting on CI","pr_url":"javascript:alert(1)"}]' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a non-HTTPS Under way MR URL was accepted"
+
   assert_absent "$board" "a refused payload still produced a board"
   pass "build refuses malformed payloads before touching the board"
 }
@@ -715,6 +722,23 @@ test_charted_kind_is_optional_and_accepts_both_values() {
       and .charted_warning_more == 2
   ' >/dev/null || fail "the built board did not carry the charted kinds and omitted-warning count it was given"
   pass "charted kind is optional and accepts queued and warning"
+}
+
+# An Under way row may link the PR or MR its task works on.
+test_an_underway_row_may_link_its_mr() {
+  local home data
+  home=$(make_home underwaymr)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.underway = [{"id":"sample-task","repo":"sample","name":"Sample task","state":"working",
+    "kind":"ship","doing":"MR !9: waiting on CI",
+    "pr_url":"https://gitlab.example.com/grp/sample/-/merge_requests/9"}]' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "an Under way row with an HTTPS MR link was refused"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    .underway[0].pr_url == "https://gitlab.example.com/grp/sample/-/merge_requests/9"
+  ' >/dev/null || fail "the built board did not carry the Under way MR link"
+  pass "an Under way row may link its MR"
 }
 
 test_build_lists_live_pages_and_refuses_payload_pages() {
@@ -1698,6 +1722,7 @@ test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_a_refusal_names_the_first_failing_item_and_its_fields
 test_charted_kind_is_optional_and_accepts_both_values
+test_an_underway_row_may_link_its_mr
 test_build_lists_live_pages_and_refuses_payload_pages
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
