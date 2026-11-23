@@ -166,13 +166,18 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
   def phrase_cap: if test("^[a-z][a-z-]* ") then cap else . end;
   def captain_terms:
     def stem: if test("(ch|sh|ss|x|z|o)es$") then .[:-2] elif test("[^aeiou]ies$") then .[:-3] + "y" elif test("s$") then .[:-1] else . end;
+    def past:
+      (test("[^e]ed$") and (test("^(em|im)?bed$|^shred$|^wed$|^sled$") | not))
+      or test("^(agreed|freed|guaranteed|ran|reran|did|redid|undid|made|went|took|saw|got|found|gave|told|thought|brought|bought|sent|built|left|kept|wrote|rewrote|began|came|knew|held|felt|meant|spent|lost|won|sat|stood|understood|chose|broke|spoke|drove|rode|rose|fell|forgot|threw|grew|drew|flew|said|paid|laid|heard|led|fed|met|slept|caught|taught|fought|sought|dealt|struck|stuck|hung|swung|shook|woke|wore|tore|bore|swore|hid|bit|lit|slid|split|set|put|read|cut|hit|let|quit|shut|spread|cast|cost|upset|reset)$");
     def third: if test("(ch|sh|ss|x|z|o)$") then . + "es" elif test("[^aeiou]y$") then .[:-1] + "ies" else . + "s" end;
     if test("^(the )?first ?mate [a-z]+s([^a-z]|$)"; "i") then
       capture("^(the )?first ?mate (?<v>[a-z]+s)(?<rest>([^a-z].*)?)$"; "i")
       | (.v | ascii_downcase | stem | cap) + .rest + " for me"
     elif test("^I(\u0027ll| will| can| could| would| should| may| might)? [a-z]") then
       capture("^I(?<aux>(\u0027ll| will| can| could| would| should| may| might)?) (?<v>[a-z]+)(?<rest>.*)$")
-      | if .aux == "" then "The worker " + (.v | third) + .rest
+      # A past-tense verb stays as it is: "I ran" is "The worker ran", not "rans".
+      | if .aux == "" and (.v | past) then "The worker " + .v + .rest
+        elif .aux == "" then "The worker " + (.v | third) + .rest
         else "The worker " + (.aux | sub("^\u0027ll$"; " will") | ltrimstr(" ")) + " " + .v + .rest end
     else . end;
   def option_parse_by($kind):

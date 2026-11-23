@@ -924,6 +924,67 @@ test_an_unkeyed_status_line_naming_a_held_card_does_not_make_a_second_card() {
   pass "an unkeyed status line naming a held card is dropped and the held card stays"
 }
 
+test_a_keyed_worker_question_on_a_held_task_does_not_make_a_second_card() {
+  local snap="$TMP_ROOT/held-task.json" p
+  fresh_homes held-task
+  write_snapshot "$TMP_ROOT/held-task-base.json"
+  jq '.decisions_open = [
+        {id: "aegis-821-review", key: "aegis-821-review", verb: "captain-hold", title: "Pick which MR 821 review comments to post", reason: "Which held review comments on MR 821 should be posted?", owner: "(main)"},
+        {id: "aegis-821-review", key: "status.aegis-821-review.mr821-comment-pick", task: "aegis-821-review", decision_key: "mr821-comment-pick", source: "status", verb: "needs-decision", title: "aegis-821-review", reason: "Which of the held comments on MR 821 do you want posted?", owner: "(main)"},
+        {id: "aegis-821-plain", key: "status.aegis-821-review.default", task: "aegis-821-review", decision_key: "default", source: "status", verb: "needs-decision", title: "aegis-821-review", reason: "Rebase the review branch onto main now?", owner: "(main)"},
+        {id: "aegis-822", key: "status.aegis-822.pick", task: "aegis-822", decision_key: "pick", source: "status", verb: "needs-decision", title: "aegis-822", reason: "Post the MR 822 comments now?", owner: "(main)"},
+        {id: "cd/aegis-821-review", key: "status.aegis-821-review.other-home", task: "aegis-821-review", decision_key: "other-home", source: "status", verb: "needs-decision", title: "aegis-821-review", reason: "Close the cd issue for MR 821?", owner: "cd", mate: "cd"}]' \
+    "$TMP_ROOT/held-task-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "0" "$(jq '[.captains_call[], .waiting[]] | map(select(.key == "status.aegis-821-review.mr821-comment-pick")) | length' <<<"$p")" "the keyed worker question on the held task renders no card or waiting row"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "aegis-821-review")] | length' <<<"$p")" "the hold card stays the one card"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.aegis-821-review.default")] | length' <<<"$p")" "an unkeyed line on the held task is not folded by its task"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.aegis-822.pick")] | length' <<<"$p")" "a keyed question on another task stays a card"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.aegis-821-review.other-home")] | length' <<<"$p")" "a keyed question in another home stays a card"
+  printf '%s\n' "$p" > "$TMP_ROOT/held-task-payload.json"
+  validates "$TMP_ROOT/held-task-payload.json" || fail "a payload with a folded worker key did not satisfy the board validator"
+  pass "a keyed worker question on a captain-held task is folded into the hold card"
+}
+
+test_a_past_tense_worker_option_keeps_its_verb() {
+  local snap="$TMP_ROOT/past-tense.json" p
+  fresh_homes past-tense
+  write_snapshot "$TMP_ROOT/past-tense-base.json"
+  jq '.decisions_open = [
+        {id: "gcloud", key: "status.gcloud.login", task: "gcloud", decision_key: "login", source: "status", verb: "needs-decision", title: "gcloud", reason: "gcloud credentials expired for MR 902. Options: I ran gcloud auth login, carry on / I took a new token from the vault / I need more time / I post it later", owner: "(main)"}]' \
+    "$TMP_ROOT/past-tense-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "The worker ran gcloud auth login, carry on|The worker took a new token from the vault|The worker needs more time|The worker posts it later" \
+    "$(jq -r '.captains_call[] | select(.key == "status.gcloud.login") | [.options[].label] | join("|")' <<<"$p")" "a past-tense verb stays as it is and a present one takes its s"
+  printf '%s\n' "$p" > "$TMP_ROOT/past-tense-payload.json"
+  validates "$TMP_ROOT/past-tense-payload.json" || fail "a payload with past-tense options did not satisfy the board validator"
+  pass "a past-tense worker option keeps its verb"
+}
+
+test_a_recorded_option_marked_recommended_is_the_card_recommendation() {
+  local snap="$TMP_ROOT/rec-label.json" p
+  fresh_homes rec-label
+  write_snapshot "$TMP_ROOT/rec-label-base.json"
+  jq '.decisions_open = [
+        {id: "cd/cd-962-merge-2", key: "cd-962-merge-2", verb: "captain-hold", owner: "cd", title: "Merge fos-rulings-research PR 29",
+         reason: "Both review comments on PR 29 are answered and all 10 checks are green. Merge PR 29?",
+         choices: {options: [{value: "a", label: "Merge it (recommended)"}, {value: "b", label: "Leave it for you to review first"}], free_text: true}},
+        {id: "plain", key: "plain", verb: "captain-hold", owner: "(main)", title: "Plain pick", reason: "Which one?",
+         choices: {options: [{value: "x", label: "Take x"}, {value: "y", label: "Take y"}]}},
+        {id: "pref", key: "pref", verb: "captain-hold", owner: "(main)", title: "Preferred pick", reason: "Which one?",
+         choices: {options: [{value: "x", label: "Take x"}, {value: "y", label: "Take y (Preferred)."}]}}]' \
+    "$TMP_ROOT/rec-label-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
+  assert_equals "a" "$(card cd-962-merge-2 | jq -r .recommend_value)" "a recorded label ending in (recommended) is the recommendation"
+  assert_equals "Merge it|Leave it for you to review first" "$(card cd-962-merge-2 | jq -r '[.options[].label] | join("|")')" "the marker leaves the label"
+  assert_equals "null" "$(card plain | jq -r .recommend_value)" "no marker, no recommendation"
+  assert_equals "y" "$(card pref | jq -r .recommend_value)" "a (preferred) marker in any case marks its option"
+  printf '%s\n' "$p" > "$TMP_ROOT/rec-label-payload.json"
+  validates "$TMP_ROOT/rec-label-payload.json" || fail "a payload with a recommended recorded option did not satisfy the board validator"
+  pass "a recorded hold option marked (recommended) is the card recommendation"
+}
+
 test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question() {
   local snap="$TMP_ROOT/parked.json" p
   fresh_homes parked
@@ -2381,6 +2442,9 @@ fm_test_run \
   test_a_status_question_whose_only_asking_sentence_is_inside_an_option_is_listed_to_fix \
   test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice \
   test_an_unkeyed_status_line_naming_a_held_card_does_not_make_a_second_card \
+  test_a_keyed_worker_question_on_a_held_task_does_not_make_a_second_card \
+  test_a_past_tense_worker_option_keeps_its_verb \
+  test_a_recorded_option_marked_recommended_is_the_card_recommendation \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
   test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids \
   test_a_long_asking_sentence_still_heads_its_card_as_a_question \

@@ -368,6 +368,28 @@ test_a_re_held_task_shows_only_its_current_options() {
   pass "a re-held task shows only its current hold's options and links"
 }
 
+test_a_worker_key_on_a_held_task_is_not_a_second_call() {
+  local home out
+  home=$(make_home held-task)
+  hold "$home" aegis-821-review --title "Pick which MR 821 review comments to post" --repo aegis \
+    --reason "Which held review comments on MR 821 should be posted?" --free-text
+  printf 'needs-decision [key=mr821-comment-pick] [at=%s]: Which of the held MR 821 comments should be posted?\n' "$LATER" \
+    > "$home/state/aegis-821-review.status"
+  : > "$home/state/aegis-821-review.meta"
+  printf 'needs-decision [key=mr822-pick] [at=%s]: Post the MR 822 comments now?\n' "$LATER" \
+    > "$home/state/aegis-822-review.status"
+  : > "$home/state/aegis-822-review.meta"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" aegis-821-review calls "the captain hold"
+  expect_where "$out" aegis-821-review.mr821-comment-pick skipped "a worker key on the held task"
+  assert_contains "$(printf '%s\n' "$out" | jq -r '.skipped[] | select(.key == "aegis-821-review.mr821-comment-pick") | .why')" \
+    "is held for the captain" "the skip names the hold"
+  expect_where "$out" aegis-822-review.mr822-pick calls "a worker key on a task with no hold"
+  assert_equals "1" "$(printf '%s\n' "$out" | jq '[.calls[] | select(.task == "aegis-821-review")] | length')" \
+    "the held task asks one call"
+  pass "a worker key on a captain-held task is skipped, so the hold is the one call"
+}
+
 test_inline_lettered_options_leave_the_question() {
   local home out card mr=https://gitlab.example/app/aegis/-/merge_requests/848
   home=$(make_home inline-letters)
@@ -586,6 +608,7 @@ fm_test_run \
   test_deferred_secondmate_hold_is_skipped_until_its_date \
   test_plain_hold_is_a_call_with_its_options \
   test_a_re_held_task_shows_only_its_current_options \
+  test_a_worker_key_on_a_held_task_is_not_a_second_call \
   test_inline_lettered_options_leave_the_question \
   test_cd_calls_named_by_housekeeping_steers_stay_calls \
   test_cd_870_version_file_is_a_call_with_its_open_pr \
