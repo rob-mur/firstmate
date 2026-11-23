@@ -206,3 +206,8 @@ MERGE_PROJECT_LOCK=
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-fleet-ledger.sh" merged "$ID" local || true
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+# The project's declared after-merge action runs after the landing;
+# bin/fm-after-merge.sh owns it and records the result bin/fm-teardown.sh requires.
+if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-after-merge.sh" "$ID"; then
+  echo "actionable: landed $BRANCH but its project after-merge action did not complete; cleanup stays refused until it is recorded done" >&2
+fi
