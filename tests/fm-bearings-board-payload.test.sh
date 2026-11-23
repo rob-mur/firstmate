@@ -848,6 +848,36 @@ test_a_secondmate_status_question_is_titled_from_its_decision_not_its_home() {
   pass "a secondmate status question is titled from its task or question, never the bare home name"
 }
 
+# A secondmate status line made only of numbered items - here a relay request
+# to firstmate and a scout note - asks the captain nothing of its own: an
+# asking sentence inside one of its items is a choice, never its title, so the
+# card has no question and the build lists it to fix instead of Captain's Call.
+test_a_status_question_whose_only_asking_sentence_is_inside_an_option_is_listed_to_fix() {
+  local snap="$TMP_ROOT/relay-items.json" p out
+  fresh_homes relay-items
+  write_snapshot "$TMP_ROOT/relay-items-base.json"
+  jq '.decisions_open = [
+        {id: "cd", key: "status.cd.cd-web-bucket-home", task: "cd", decision_key: "cd-web-bucket-home", source: "status", verb: "needs-decision", title: "cd",
+         reason: "(1) Please relay to the runner-image second mate, I have no channel to it: '"'"'The captain wants ONE private GCS bucket for the web home builds. Should its Terraform live in runner-image'"'"'s infra or in continuous-delivery'"'"'s infra/? Reason for your answer please.'"'"' Worker cd-965-c4-diagram holds the infra part until the answer comes back. (2) pin-bump: scout cd-pinbump-red dispatched. Already known: the pin bump turned the runner image CI red.",
+         owner: "cd", mate: "cd"}]' \
+    "$TMP_ROOT/relay-items-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "null" "$(jq -c '.captains_call[] | select(.key == "status.cd.cd-web-bucket-home") | .question' <<<"$p")" \
+    "the numbered items stood in for a question"
+  assert_not_contains "$(jq -r '.captains_call[] | select(.key == "status.cd.cd-web-bucket-home") | .title' <<<"$p")" "Terraform" \
+    "an asking sentence inside an option titled the card"
+  printf '%s\n' "$p" > "$TMP_ROOT/relay-items-payload.json"
+  out=$(build_checks "$TMP_ROOT/relay-items-payload.json")
+  assert_contains "$out" "undecided-card: status.cd.cd-web-bucket-home: missing question" \
+    "a status card with no question was not refused: $out"
+  p=$(built_data)
+  assert_equals "0" "$(jq '[.captains_call[] | select(.key == "status.cd.cd-web-bucket-home")] | length' <<<"$p")" \
+    "a status card with no question reached Captain's Call"
+  assert_equals "missing question" "$(jq -r '.cards_to_fix[] | select(.key == "status.cd.cd-web-bucket-home") | .problem | split(" (")[0]' <<<"$p")" \
+    "a status card with no question was not listed to fix for its missing question"
+  pass "a status line whose only asking sentence is inside a numbered item is listed to fix, not put on Captain's Call"
+}
+
 test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice() {
   local snap="$TMP_ROOT/twin.json" p
   fresh_homes twin
@@ -2153,6 +2183,7 @@ fm_test_run \
   test_urls_in_a_question_become_card_links \
   test_a_tailnet_review_page_link_and_a_review_card_get_choices \
   test_a_secondmate_status_question_is_titled_from_its_decision_not_its_home \
+  test_a_status_question_whose_only_asking_sentence_is_inside_an_option_is_listed_to_fix \
   test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice \
   test_an_unkeyed_status_line_naming_a_held_card_does_not_make_a_second_card \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
