@@ -994,6 +994,29 @@ test_a_recorded_option_marked_recommended_is_the_card_recommendation() {
   pass "a recorded hold option marked (recommended) is the card recommendation"
 }
 
+test_an_a_recommended_hold_with_recorded_labels_is_the_recommendation() {
+  local snap="$TMP_ROOT/a-rec-held.json" p
+  fresh_homes a-rec-held
+  write_snapshot "$TMP_ROOT/a-rec-held-base.json"
+  # The cd-965-ack-981 hold as its second mate recorded it: the reason carries
+  # "(a, recommended) ..." and the recorded option a keeps "(recommended)".
+  jq '.decisions_open = [
+        {id: "cd/cd-965-ack-981", key: "cd-965-ack-981", verb: "captain-hold", owner: "cd",
+         title: "Acknowledge PR 981 (infra plan guard admits IAP settings, #965)",
+         reason_full: "You dismissed review 710 on PR 981 at 15:06; shall I merge PR 981 and then PR 982? (a, recommended) Merge PR 981, then PR 982. (b) Leave both open. https://forgejo.example/rob/continuous-delivery/pulls/981 https://forgejo.example/rob/continuous-delivery/pulls/982",
+         choices: {options: [{value: "a", label: "Merge PR 981, then PR 982 (recommended)"}, {value: "b", label: "Leave both open"}], free_text: true}}]' \
+    "$TMP_ROOT/a-rec-held-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "a" "$(jq -r '.captains_call[] | select(.key == "cd-965-ack-981") | .recommend_value' <<<"$p")" \
+    "an (a, recommended) hold did not mark option a as the recommendation"
+  assert_equals "Merge PR 981, then PR 982|Leave both open" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-965-ack-981") | [.options[].label] | join("|")' <<<"$p")" \
+    "the (recommended) marker stayed in the label"
+  printf '%s\n' "$p" > "$TMP_ROOT/a-rec-held-payload.json"
+  validates "$TMP_ROOT/a-rec-held-payload.json" || fail "an (a, recommended) hold payload did not satisfy the board validator"
+  pass "an (a, recommended) hold with recorded labels marks option a"
+}
+
 test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question() {
   local snap="$TMP_ROOT/parked.json" p
   fresh_homes parked
@@ -2504,6 +2527,7 @@ fm_test_run \
   test_a_keyed_worker_question_on_a_held_task_does_not_make_a_second_card \
   test_a_past_tense_worker_option_keeps_its_verb \
   test_a_recorded_option_marked_recommended_is_the_card_recommendation \
+  test_an_a_recommended_hold_with_recorded_labels_is_the_recommendation \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
   test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids \
   test_a_long_asking_sentence_still_heads_its_card_as_a_question \
