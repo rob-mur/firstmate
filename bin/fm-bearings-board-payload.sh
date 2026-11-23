@@ -152,7 +152,8 @@
 #                      reason shows what it waits on. Waiting rows keep
 #                      snapshot order and are not part of the priority list.
 #   in_flight       -> underway: every row in snapshot order, with the projected
-#                      `name`, except a main row in state `done`, a row not
+#                      `name`, and `pr_url` when the row carries an https PR or MR
+#                      URL, except a main row in state `done`, a row not
 #                      `working` whose `pr_url` merged or closed, and a row not
 #                      `working` that a held gate's waiting row already covers;
 #                      a second mate's `done` child stays until its home cleans it up.
@@ -1041,6 +1042,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
         | { id, name: (.name | nz($r.id)), repo: (.repo // null),
             state: (.state | nz("unknown")), doing: (.doing | nz("-")),
             kind: (.kind | nz("task")) }
+          + (if ($r.pr_url | type) == "string" and ($r.pr_url | startswith("https://"))
+             then {pr_url: $r.pr_url} else {} end)
           + overlay("underway"; .id; underway_fields) ] ) as $underway
 
   | ( [ $landed_rows[]
