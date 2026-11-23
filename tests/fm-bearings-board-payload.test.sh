@@ -2229,6 +2229,19 @@ test_inline_letter_equals_options_are_the_card_options() {
   pass "inline letter equals options are the card options"
 }
 
+test_inline_bare_letter_options_are_the_card_options() {
+  local card
+  card=$(real_line_card aegis-848-recheck aegis-848-recheck 'needs-decision [key=default] [at=1795422660]: On aegis MR 848 (https://gitlab.example/app/aegis/-/merge_requests/848), the author fixed your comment-length and test-gap threads but has not replied to or changed anything for your same-tab early-navigation QA gap or your description-rewrite request, so should I a) draft follow-up replies on those two threads (plus the give-up behaviour question) for your approval before anything is posted, b) build the understand page anyway, or c) leave the MR as it is?')
+  assert_equals "option-a|option-b|option-c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "848: option values"
+  assert_equals "Draft follow-up replies on those two threads (plus the give-up behaviour question) for your approval before anything is posted|Build the understand page anyway|Leave the MR as it is" \
+    "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "848: option labels"
+  jq -e '(.question | test("[a-c]\\) ") | not) and (.question | endswith("?"))' <<<"$card" >/dev/null \
+    || fail "848: the question holds its options or does not ask: $(jq -r .question <<<"$card")"
+  jq -e '(.about | test("so should I[?]$")) and (.about | test("[a-c]\\) ") | not)' <<<"$card" >/dev/null \
+    || fail "848: the about holds its options or does not end in the question: $(jq -r .about <<<"$card")"
+  pass "inline bare a), b), c) options are the card options and leave the question"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -2394,4 +2407,5 @@ fm_test_run \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \
   test_option_x_colon_marks_are_the_card_options \
   test_option_x_parenthesised_recommendation_marks_are_the_card_options \
-  test_inline_letter_equals_options_are_the_card_options
+  test_inline_letter_equals_options_are_the_card_options \
+  test_inline_bare_letter_options_are_the_card_options
