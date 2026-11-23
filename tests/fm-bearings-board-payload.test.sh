@@ -1681,6 +1681,7 @@ PDM_LINE="needs-decision [key=captain-hold-pdm-registry-ns-1] [at=1795093479]: c
 # a, b, c, d as the question names them, never the parser's option-a.
 MR900_LINE="needs-decision [at=1795442310]: Review of https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/900 is done and nothing is posted (summary: /home/rob/repos/firstmate/data/APP-5999-bcr-flags/review-900-summary.md; 16 held, no crash or data defect, design good, verdict COMMENT). Which held comments should I post as one COMMENT review? (a) recommended: the 13 unique ones, #1-7, #9-13 and #15, dropping duplicates #8, #14 and #16; (b) all 16 as held; (c) only the review-me three, #1-3; (d) none, and instead fix them on the branch myself"
 MR891_LINE="needs-decision [at=1795430298] [key=mr891-comments]: After reading page:understand-mr891 (live on the board, built on the current MR head 6342f52d, with your three earlier answers kept), which of my 37 held review comments should I post on MR 891, where the recommended 9 cover its five small runtime defects plus wrong guard ticket markers, silently dropped status inputs, a missing default-date test and stale guard-ticket steps? (a, recommended) Post the recommended 9: 3, 4, 7, 8, 9, 10, 11, 22, 36. (b) Post none. (c) Post all 37 held comments. https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/891"
+GCLOUD_LINE="needs-decision [key=gcloud-login] [at=1795444442]: Will you renew the gcloud login so I can commit the Slopstrap fix to MR https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/902? (a, recommended) I ran gcloud auth login and gcloud auth application-default login, carry on; (b) commit with --no-verify; (c) wait."
 
 test_lettered_options_answer_as_their_letters() {
   local card
@@ -1690,6 +1691,8 @@ test_lettered_options_answer_as_their_letters() {
   card=$(real_line_card letters-mr891 aegis-891-review "$MR891_LINE")
   assert_equals "a|b|c|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "MR 891: letter values and recommendation"
   assert_equals "Post the recommended 9: 3, 4, 7, 8, 9, 10, 11, 22, 36" "$(jq -r '.options[] | select(.value == "a") | .label' <<<"$card")" "MR 891: a letter keeps its label"
+  card=$(real_line_card letters-gcloud aegis-slopstrap-demo "$GCLOUD_LINE")
+  assert_equals "a|b|c|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "gcloud login: (a, recommended) answers as a"
   pass "lettered options answer as their letters, never option-a"
 }
 
