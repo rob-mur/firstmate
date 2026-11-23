@@ -1983,6 +1983,23 @@ test_option_x_parenthesised_recommendation_marks_are_the_card_options() {
   pass "option x parenthesised recommendation marks are the card options"
 }
 
+# The APP-4132-tests-unit-rename mr898-gate line: inline "a=..., b=..., c=...?"
+# options after the question.
+MR898_LINE='needs-decision [key=mr898-gate] [at=1795422660]: The gate found no gaps in the test rename - how shall MR 898 proceed? a=mark ready and merge under the single-reviewer route (re-run the gate once ready to get the official AUTO_APPROVE first), b=fix the gaps first (none found; the only arguable hunk is app/pyrightconfig.json, which is not a test file), c=leave it as Draft?'
+
+# Inline "a=label, b=label, c=label?" marks are the card options; key=, at= and
+# a URL query string are never read as options.
+test_inline_letter_equals_options_are_the_card_options() {
+  local card
+  card=$(real_line_card mr898 APP-4132-tests-unit-rename "$MR898_LINE")
+  assert_equals "option-a|option-b|option-c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "898: option values"
+  assert_equals "Mark ready and merge under the single-reviewer route (re-run the gate once ready to get the official AUTO_APPROVE first)|Fix the gaps first (none found; the only arguable hunk is app/pyrightconfig.json, which is not a test file)|Leave it as Draft" \
+    "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "898: option labels"
+  card=$(real_line_card eq-tokens eq-tokens 'needs-decision [key=eq-tokens] [at=1795422660]: The gate stopped with key=mr898 at=08:31Z; the log is at https://ci.example.com/job?x=1&y=2 and a=1 b=2 is set, so what next?')
+  assert_equals "" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "key=/at=/query tokens: no options"
+  pass "inline letter equals options are the card options"
+}
+
 # A secondmate decision is answered from its card: options the reason marks
 # recommended are the card recommendation, a "Captain call:" label is not the
 # heading, and a decision answered on a page the board may not show carries what
@@ -2138,4 +2155,5 @@ fm_test_run \
   test_equals_options_and_trailing_links_and_paths_leave_the_about \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \
   test_option_x_colon_marks_are_the_card_options \
-  test_option_x_parenthesised_recommendation_marks_are_the_card_options
+  test_option_x_parenthesised_recommendation_marks_are_the_card_options \
+  test_inline_letter_equals_options_are_the_card_options
