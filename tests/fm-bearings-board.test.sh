@@ -1563,6 +1563,57 @@ test_a_linked_page_token_leaves_the_card_text() {
   pass "a linked page token leaves the card text"
 }
 
+# The understand page a hold's own task status names (page:understand-mr821)
+# links the hold card that says "open on the understand page", though the page
+# record names no task; another task's status naming it, a card that does not
+# speak of that page, and an ended page give no link.
+test_a_page_its_task_status_names_links_the_hold_card() {
+  local home data dir out id payload
+  home=$(make_home page-named-by-status)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null 2>&1 || fail "the first build failed"
+  for id in understand-mr821 understand-mr900; do
+    dir=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-board-page.sh" dir "$id") \
+      || fail "the page folder was not given"
+    printf '<html></html>\n' > "$dir/page.html"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_BOARD_PAGE_REFRESH=true \
+      "$ROOT/bin/fm-board-page.sh" open "$id" --title "Understand: MR !${id#understand-mr}" >/dev/null \
+      || fail "the page $id did not open"
+  done
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_BOARD_PAGE_REFRESH=true \
+    "$ROOT/bin/fm-board-page.sh" end understand-mr900 >/dev/null 2>&1 || fail "the page understand-mr900 did not end"
+  printf 'needs-decision [key=post-821] [at=1795400000]: understand page ready: page:understand-mr821 (8 why-questions)\n' \
+    > "$home/state/aegis-821-review.status"
+  printf 'needs-decision [key=post-900] [at=1795400000]: understand page ready: page:understand-mr900\n' \
+    > "$home/state/aegis-900-review.status"
+  printf 'done [at=1795400000]: rebuilt the board; page:understand-mr821 checked\n' > "$home/state/board-keeper.status"
+  jq '.captains_call += [
+    {"key":"aegis-821-review","type":"decision","repo":"aegis","title":"Which held !821 review comments do you want me to post?",
+     "about":"n2 is correct and n3 partly correct; n4 to n11 are open on the understand page. Recommended: post #3, #4 and #6 to #14 and drop #1, #2 and #5.",
+     "options":[{"value":"a","label":"Post the recommended set"},{"value":"b","label":"Post none"}]},
+    {"key":"board-keeper","type":"decision","repo":"firstmate","title":"Keep the board tidy?",
+     "about":"The board was rebuilt.",
+     "options":[{"value":"a","label":"Yes"},{"value":"b","label":"No"}]},
+    {"key":"aegis-900-review","type":"decision","repo":"aegis","title":"Which held !900 review comments do you want me to post?",
+     "about":"They are open on the understand page.",
+     "options":[{"value":"a","label":"All"},{"value":"b","label":"None"}]},
+    {"key":"aegis-821-other","type":"decision","repo":"aegis","title":"Rebase !821 now?",
+     "about":"The branch is behind main; its comments are on the understand page.",
+     "options":[{"value":"a","label":"Yes"},{"value":"b","label":"No"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the build was refused: $out"
+  payload=$(extract_payload "$home/.lavish/bearings-board.html")
+  links() { jq -c --arg k "$1" '[.captains_call[] | select(.key == $k) | (.links // [])[] | .page // empty]' <<<"$payload"; }
+  assert_equals '["understand-mr821"]' "$(links aegis-821-review)" "the hold its task status names the page for links it"
+  assert_equals '[]' "$(links board-keeper)" "a card whose task status names the page but whose text does not speak of it"
+  assert_equals '[]' "$(links aegis-900-review)" "an ended page is never linked"
+  assert_equals '[]' "$(links aegis-821-other)" "a card whose task status does not name the page"
+  jq -e '[.. | objects | select(has("named_by"))] | length == 0' <<<"$payload" >/dev/null \
+    || fail "the internal named_by field reached the board"
+  pass "a page its task status names links the hold card that speaks of it"
+}
+
 test_a_page_about_a_task_links_its_card_and_context_in_place() {
   local home data dir out
   home=$(make_home page-links)
@@ -1640,6 +1691,7 @@ test_build_does_not_retry_an_ordinary_failure
 test_build_flags_a_card_whose_option_marks_were_not_read
 test_a_page_about_a_task_links_its_card_and_context_in_place
 test_a_linked_page_token_leaves_the_card_text
+test_a_page_its_task_status_names_links_the_hold_card
 test_a_card_that_names_a_page_title_links_that_page
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
 test_build_accepts_explicit_decisions_and_in_person_actions

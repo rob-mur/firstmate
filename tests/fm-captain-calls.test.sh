@@ -368,6 +368,28 @@ test_a_re_held_task_shows_only_its_current_options() {
   pass "a re-held task shows only its current hold's options and links"
 }
 
+test_inline_lettered_options_leave_the_question() {
+  local home out card mr=https://gitlab.example/app/aegis/-/merge_requests/848
+  home=$(make_home inline-letters)
+  printf 'needs-decision [key=default] [at=%s]: On aegis MR 848 (%s), the author fixed your comment-length and test-gap threads but has not replied to or changed anything for your same-tab early-navigation QA gap or your description-rewrite request, so should I a) draft follow-up replies on those two threads (plus the give-up behaviour question) for your approval before anything is posted, b) build the understand page anyway, or c) leave the MR as it is?\n' \
+    "$LATER" "$mr" > "$home/state/aegis-848-recheck.status"
+  : > "$home/state/aegis-848-recheck.meta"
+  printf 'needs-decision [key=stray] [at=%s]: Should I keep note a) as it is?\n' "$LATER" > "$home/state/stray-task.status"
+  : > "$home/state/stray-task.meta"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  card=$(printf '%s\n' "$out" | jq -c '.calls[] | select(.key == "aegis-848-recheck.default")')
+  [ -n "$card" ] || fail "the 848 worker question is not a call"
+  assert_equals "On aegis MR 848 ($mr), the author fixed your comment-length and test-gap threads but has not replied to or changed anything for your same-tab early-navigation QA gap or your description-rewrite request, so should I?" \
+    "$(printf '%s\n' "$card" | jq -r '.question')" "the question is its lead up to the options, ending in ?"
+  assert_equals "a|Draft follow-up replies on those two threads (plus the give-up behaviour question) for your approval before anything is posted,b|Build the understand page anyway,c|Leave the MR as it is" \
+    "$(printf '%s\n' "$card" | jq -r '[.options[] | "\(.value)|\(.label)"] | join(",")')" \
+    "the inline a), b), c) are the call's options"
+  assert_equals "Should I keep note a) as it is?|0" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "stray-task.stray") | "\(.question)|\(.options | length)"')" \
+    "a lone a) in a sentence is not an option list"
+  pass "a question's inline a), b), c) become its options and leave the question"
+}
+
 test_cd_calls_named_by_housekeeping_steers_stay_calls() {
   local out key
   out=$(run_calls "$FIXTURE" "$FIXTURE/prs-fos-merged.tsv") || fail "fm-captain-calls failed"
@@ -564,6 +586,7 @@ fm_test_run \
   test_deferred_secondmate_hold_is_skipped_until_its_date \
   test_plain_hold_is_a_call_with_its_options \
   test_a_re_held_task_shows_only_its_current_options \
+  test_inline_lettered_options_leave_the_question \
   test_cd_calls_named_by_housekeeping_steers_stay_calls \
   test_cd_870_version_file_is_a_call_with_its_open_pr \
   test_captain_hold_key_names_its_task_and_question \

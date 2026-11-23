@@ -185,7 +185,11 @@
 # whole word, or names the page title whole when that title is 12 characters
 # or more ("Architecture page: board tab 'Architecture: MR 887 net-only
 # claims'"), gains a `{page, label}` link to it, and a Waiting or Charted row
-# matched the same way gains `context.page` ({id, title}).
+# matched the same way gains `context.page` ({id, title}). A card whose task's
+# own status log (state/<task>.status) names the page as `page:<id>` links it
+# too when its text speaks of a "<word> page" whose word (4 letters or more)
+# is a word of the page id or title ("open on the understand page" for
+# understand-mr821).
 #
 # EVERY BOARD ITEM MAY CARRY `context`, what it expands to show in place: an
 # object of `task`, `reason` and `report` (strings), `answers` (an array of
@@ -554,7 +558,22 @@ live_pages_json() {
            | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/page.html"),
               replaces: ([.replaces // [] | arrays | .[] | strings]),
               task: (.task | if type == "string" and length > 0 then . else null end)}' "$f" 2>/dev/null
-  done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))'
+  done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))' | pages_named_by_status
+}
+
+# Add `named_by` to each page in the pages JSON on stdin: the task ids whose own
+# status file ($STATE/<task>.status) names the page as a whole `page:<id>` token.
+pages_named_by_status() {
+  local pages id named
+  pages=$(cat)
+  for id in $(printf '%s\n' "$pages" | jq -r '.[].id'); do
+    named=$(grep -lE "(^|[^[:alnum:]-])page:$id([^[:alnum:]-]|\$)" "$STATE"/*.status 2>/dev/null \
+              | sed 's#^.*/##; s#\.status$##' | jq -R -s -c 'split("\n") | map(select(length > 0))') \
+      || named='[]'
+    pages=$(printf '%s\n' "$pages" | jq -c --arg id "$id" --argjson named "${named:-[]}" \
+              'map(if .id == $id then .named_by = $named else . end)')
+  done
+  printf '%s\n' "$pages"
 }
 
 # Every Lavish session the server lists, as {"<session-id>": "<page-id>"} for a
@@ -595,10 +614,17 @@ attach_page_links() {  # <pages-json>
       type == "string" and ($t | type == "string" and length >= 12)
       and (ascii_downcase | contains($t | ascii_downcase));
     def task_ids($i): [$i.key, $i.id, ($i.context.task // null)] | map(strings | ., (split("/") | last)) | unique;
+    def texts($i): ($i.title, $i.question, $i.about, $i.reason, $i.context.reason, ($i.context.notes // [])[]);
+    def page_words($p): [($p.id, $p.title) | ascii_downcase | scan("[a-z]{4,}")] | unique;
+    def names_kind($p):
+      type == "string"
+      and ([ascii_downcase | scan("([a-z]{4,}) page\\b") | .[0]] as $k | page_words($p) as $w
+           | any($k[]; . as $x | $w | index([$x])));
     def about_page($i; $p):
-      (task_ids($i) as $t | ($t | index([$p.id])) or ($p.task != null and ($t | index([$p.task]))))
-      or any(($i.title, $i.question, $i.about, $i.reason, $i.context.reason, ($i.context.notes // [])[]);
-             names($p.id) or names_title($p.title));
+      (task_ids($i) as $t
+         | ($t | index([$p.id])) or ($p.task != null and ($t | index([$p.task])))
+           or (any(($p.named_by // [])[]; . as $n | $t | index([$n])) and any(texts($i); names_kind($p))))
+      or any(texts($i); names($p.id) or names_title($p.title));
     def pages_for($i): [ $pages[] | select(about_page($i; .)) ];
     .captains_call |= map(
       . as $c
@@ -633,7 +659,7 @@ resolve_page_links() {  # <pages-json> <sessions-json>
              elif $id != null and ($live | index([$id])) then label_of + {page: $id}
              else label_of + {not_in_board: true} end)
         else . end;
-    . + {pages: ($pages | map(del(.replaces, .task)))}
+    . + {pages: ($pages | map(del(.replaces, .task, .named_by)))}
     | .captains_call |= map(
         (if has("links") then .links |= map(resolve) else . end)
         | if has("off_board") then
