@@ -660,9 +660,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     # before the options: the sentence that introduces them when it ends in a
     # colon ("Merge PR 13: (1) ..."), else its asking sentence, without a
     # trailing colon or dash. Words that only introduce the options
-    # ("... reviewer? Options: (1) ...") are not that sentence. A text that
-    # opens with an asking sentence asks that sentence, not a later colon
-    # lead-in ("Which tool draws it? Two ways to add sign-in: 1) ...").
+    # ("... reviewer? Options: (1) ...") are not that sentence. A text with an
+    # asking sentence before a colon lead-in asks the first such sentence, not
+    # the lead-in ("Which tool draws it? Two ways to add sign-in: 1) ...").
     # A last sentence led by a decision label ("Captain call: the re-run must
     # either") is the heading; the card question drops that label.
   | def decision_label: "^(?:Captain(?:\u0027s)? (?:call|decision)|Decision(?: needed)?)[[:space:]]*:[[:space:]]*";
@@ -674,7 +674,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | if ($last | test(decision_label + "[^[:space:]]"; "i"))
         then $last
         elif test(":[[:space:]]*$") and (test("Question:"; "i") | not)
-        then (if ($all | length) > 1 and ($all[0] | test("[?]$")) then $all[0] else $last end)
+        then ([ $all[:-1][] | select(test("[?]$")) ][0] // $last)
         else ask_sentence end
       | sub("[[:space:]:;,-]+$"; "");
     # The body shows the lead and tail of a text; its options are the choices on the card.
