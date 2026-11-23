@@ -762,7 +762,20 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                           and ([$parsed.options[].label | test("[?]")] | any | not)
                           and ($long[:(($long | length) - ($parsed.tail | length))] | test("[?][[:space:]]*$"))
                        then . + "?" else . end)
-                   else ($long | ask_sentence | short_text_n(120; true) | nz(null)) end) as $q0
+                   else ($long | ask_sentence | short_text_n(120; true) | nz(null)) end) as $q_named
+                # A URL the heading names only by its host ("v1.1.1 (<url>) to")
+                # is a card link, so the heading drops that host label with its
+                # parentheses or the word leading it ("at", "on", "in", "see", "via").
+                | ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
+                    | map(strings | . as $t | card_urls | link_label(.; $t)
+                          | select(test("^[a-z0-9-]+(?:[.][a-z0-9-]+)+$"))) | unique ) as $hosts
+                | ($q_named | if . == null then null
+                   else reduce $hosts[] as $h (.;
+                          ($h | re_escape) as $e
+                          | gsub("(?:[[:space:]]+(?:at|on|in|see|via))?[[:space:]]*\\(" + $e + "\\)"
+                                 + "|(?:[[:space:]]+(?:at|on|in|see|via))?[[:space:]]+" + $e + "(?=[[:space:]?.,;:!]|$)"; ""))
+                     | sub("[[:space:]]+(?=[?.!]$)"; "")
+                   end) as $q0
                 | (if $q0 == null then null else ($q0 | sub(decision_label; ""; "i") | cap) end) as $q
                 | (if ($d.verb // "") == "review-ready" then $texts else ( [ (($d.choices // {}) | if type == "object" then (.options // []) else [] end)[]
                            | objects | .value | strings | ascii_downcase ] ) as $recorded
