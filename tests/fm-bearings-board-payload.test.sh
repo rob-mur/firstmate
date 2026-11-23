@@ -104,7 +104,8 @@ write_snapshot() {  # <path>
   "in_flight": [
     {"id": "t1", "name": "Build the thing", "repo": "alpha", "state": "working", "doing": "writing tests", "kind": "ship"},
     {"id": "t2", "name": "-", "repo": null, "state": "done", "doing": "-", "kind": "ship"},
-    {"id": "alpha-fix", "name": "Alpha fix", "repo": "alpha", "state": "parked", "doing": "waiting", "kind": "ship"}
+    {"id": "alpha-fix", "name": "Alpha fix", "repo": "alpha", "state": "parked", "doing": "MR !3: waiting", "kind": "ship",
+     "pr_url": "https://gitlab.example.com/acme/alpha/-/merge_requests/3"}
   ],
   "landed": [
     {"id": "l1", "what": "shipped the widget", "artifact": "https://github.com/acme/widgets/pull/7", "owner": "(main)"},
@@ -181,6 +182,8 @@ test_rows_map_deterministically_from_the_snapshot() {
   assert_equals "true" "$(jq -r '[.captains_call[] | .allow_freeform] | all' <<<"$p")" "every generated card takes a freeform answer"
   assert_equals "t1,alpha-fix" "$(jq -r '[.underway[].id] | join(",")' <<<"$p")" "a done row is not underway"
   assert_equals "Build the thing" "$(jq -r '.underway[0].name' <<<"$p")" "underway keeps the projected name"
+  assert_equals "https://gitlab.example.com/acme/alpha/-/merge_requests/3" "$(jq -r '.underway[1].pr_url' <<<"$p")" "an underway row keeps the MR it names"
+  assert_equals "false" "$(jq '.underway[0] | has("pr_url")' <<<"$p")" "an underway row with no MR carries no link"
   assert_equals "https://github.com/acme/widgets/pull/7" "$(jq -r '.landed[0].pr_url' <<<"$p")" "a landed PR artifact becomes its link"
   assert_equals "widgets" "$(jq -r '.landed[0].repo' <<<"$p")" "a landed PR artifact supplies the repo"
   assert_equals "null" "$(jq -c '.landed[1].repo' <<<"$p")" "a landed row with no PR has no repo"
