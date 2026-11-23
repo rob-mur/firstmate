@@ -112,7 +112,9 @@
 #     reason, title, and hold_reason fields stay bounded. A decisions_open
 #     captain-hold row also carries hold_set, hold_reconciled, and origin (null
 #     when unrecorded), so a reader can tell when the hold was raised or re-held
-#     and which task carries it.
+#     and which task carries it. A status-raised decisions_open row likewise
+#     carries its uncut text as question beside the bounded summary, so a
+#     question past the summary cut still reaches the parent board.
 #     Both captain-hold row shapes also carry choices (the options, links,
 #     free_text, and no_link that bin/fm-captain-hold.sh recorded on the hold),
 #     answers (each recorded resolution's at, mode, and first paragraph of
@@ -1294,7 +1296,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             doing:((.current_state.detail // .current_state.state // "") | trunc(120))} ]) as $in_flight_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status",
+               question:(.summary | if . == null then null else tostring | gsub("\\s+"; " ") end)} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),

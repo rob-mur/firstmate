@@ -1921,6 +1921,58 @@ test_a_leading_question_beats_a_later_list_lead_in() {
   pass "a leading question beats a later list lead-in"
 }
 
+CD965_LINE="needs-decision [key=default] [at=1795432859]: Pages service is up behind IAP (https://pages-413301784905.europe-west1.run.app/_probe-965/) but answers 502 until IAP has an OAuth client, which only the console can create (no org; Google shut the IAP OAuth API). Who does the one-time ~3-min console step? (a, recommended) the captain, following the 4 steps in data/cd-965-c4-diagram/iap-serving-report.md, then opens the probe; (b) I drive the captain's running Chrome via chrome-devtools-axi auto-connect (needs remote debugging enabled at chrome://inspect/#remote-debugging); (c) drop IAP and choose another serving path. New guard PR https://forgejo.clarob.uk/rob/continuous-delivery/pulls/977 must merge before https://forgejo.clarob.uk/rob/continuous-delivery/pulls/967; https://forgejo.clarob.uk/rob/continuous-delivery/pulls/971 and https://forgejo.clarob.uk/rob/continuous-delivery/pulls/972 CI green; https://forgejo.clarob.uk/rob/continuous-delivery/pulls/973 updated, held."
+
+# A secondmate child's question that follows a context sentence titles its
+# card, so the card reaches Captain's Call and is not held back to fix.
+test_a_secondmate_question_after_its_context_is_asked() {
+  local snap="$TMP_ROOT/cd965.json" p out reason
+  fresh_homes cd965
+  reason=${CD965_LINE#*]: }
+  write_snapshot "$TMP_ROOT/cd965-base.json"
+  jq --arg r "$reason" '.decisions_open = [
+        {id: "cd/cd-965-c4-diagram", key: "status.cd.cd-965-c4-diagram.default", verb: "needs-decision",
+         source: "status", task: "cd-965-c4-diagram", decision_key: "default", mate: "cd",
+         title: "cd-965-c4-diagram", title_full: "cd-965-c4-diagram", reason: $r[:80], reason_full: $r,
+         question: $r, owner: "cd"}]' \
+    "$TMP_ROOT/cd965-base.json" > "$snap"
+  p=$(FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/cd965-payload.json"
+  validates "$TMP_ROOT/cd965-payload.json" || fail "the payload did not satisfy the validator"
+  assert_equals "cd: Who does the one-time ~3-min console step?" "$(jq -r '.captains_call[0].title' <<<"$p")" \
+    "the card was not titled from its asking sentence"
+  out=$(build_checks "$TMP_ROOT/cd965-payload.json")
+  assert_not_contains "$out" "undecided-card: status.cd.cd-965-c4-diagram.default" "the question was refused: $out"
+  p=$(built_data)
+  assert_equals "status.cd.cd-965-c4-diagram.default" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "the question did not reach Captain's Call"
+  pass "a secondmate question after its context is asked"
+}
+
+# A reason whose asking sentence follows a context sentence asks that sentence,
+# even when a later lead-in ending in ":" introduces an inline numbered list.
+test_a_later_question_beats_a_later_list_lead_in() {
+  local snap="$TMP_ROOT/snap-later-question.json" p out
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.decisions_open = [
+        {id: "iap-console", key: "iap-console", verb: "captain-hold", owner: "(main)",
+         title: "IAP console step for the pages service",
+         reason: "The pages service answers 502 until IAP has an OAuth client, which only the console can create. Who does the one-time ~3-min console step? Two ways to do it: 1) the captain, following the 4 steps in the report 2) the worker drives the captain\u0027s running Chrome.",
+         choices: {options: [{value: "captain", label: "The captain"}, {value: "worker", label: "The worker"}],
+                   links: [{target: "https://forgejo.clarob.uk/rob/continuous-delivery/pulls/967", label: "PR 967"}],
+                   free_text: false, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/later-question.json"
+  validates "$TMP_ROOT/later-question.json" || fail "the payload did not satisfy the validator"
+  assert_equals "Who does the one-time ~3-min console step?" \
+    "$(jq -r '.captains_call[] | select(.key == "iap-console") | .question' <<<"$p")" \
+    "the card asked its list lead-in, not its question"
+  out=$(build_checks "$TMP_ROOT/later-question.json")
+  assert_not_contains "$out" "undecided-card: iap-console" "the hold was refused: $out"
+  pass "a later question beats a later list lead-in"
+}
+
 # A YouTrack link that ends a reason after its options is a card link labelled
 # by its issue id, never about text.
 test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link() {
@@ -2229,6 +2281,8 @@ fm_test_run \
   test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary \
   test_a_trailing_which_clause_is_never_the_question \
   test_a_leading_question_beats_a_later_list_lead_in \
+  test_a_later_question_beats_a_later_list_lead_in \
+  test_a_secondmate_question_after_its_context_is_asked \
   test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
   test_equals_options_and_trailing_links_and_paths_leave_the_about \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \
