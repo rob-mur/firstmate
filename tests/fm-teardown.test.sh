@@ -939,6 +939,90 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# A merged local-only ship whose project declares an after-merge action is not
+# cleaned up until bin/fm-after-merge.sh records it done; a project without the
+# token is cleaned up exactly as before. Args: case_dir [registry tokens]
+make_landed_local_only_case() {
+  local case_dir=$1 tokens=${2:-} wt_head
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'local_done_head=%s\n' "$wt_head" >> "$case_dir/state/task-x1.meta"
+  printf '## Projects\n- project [local-only%s] - teardown fixture (added 2026-01-01)\n' \
+    "${tokens:+ $tokens}" > "$case_dir/data/projects.md"
+}
+
+test_after_merge_action_gates_cleanup_until_done() {
+  local case_dir rc
+  case_dir=$(make_case after-merge-gate)
+  make_landed_local_only_case "$case_dir" "after-merge=ff:$case_dir/elsewhere@origin/main after-merge-note=run%20snrs"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "after-merge-gate: teardown should refuse before the action is recorded done"
+  grep -q 'after-merge action has not been recorded done' "$case_dir/stderr" \
+    || fail "after-merge-gate: the refusal did not name the after-merge action: $(cat "$case_dir/stderr")"
+  grep -qF "fm-after-merge.sh task-x1 --mark-done" "$case_dir/stderr" \
+    || fail "after-merge-gate: the refusal did not offer recording it by hand: $(cat "$case_dir/stderr")"
+  grep -qF "run it with $ROOT/bin/fm-after-merge.sh task-x1" "$case_dir/stderr" \
+    || fail "after-merge-gate: the refusal did not name the retry command: $(cat "$case_dir/stderr")"
+  [ -d "$case_dir/wt" ] || fail "after-merge-gate: the refused teardown removed the worktree"
+
+  FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-after-merge.sh" task-x1 --mark-done "captain pulled by hand" >/dev/null \
+    || fail "after-merge-gate: recording the action by hand failed"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "after-merge-gate: teardown should succeed once the action is recorded done"
+  pass "a merged ship whose project declares an after-merge action is cleaned up only after it is recorded done"
+}
+
+test_project_without_after_merge_token_is_not_gated() {
+  local case_dir rc
+  case_dir=$(make_case after-merge-none)
+  make_landed_local_only_case "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "after-merge-none: a project without the token should be cleaned up as before"
+  ! grep -qi 'after-merge action' "$case_dir/stderr" "$case_dir/stdout" \
+    || fail "after-merge-none: a project without the token mentioned an after-merge action"
+  pass "a merged ship whose project declares no after-merge action is cleaned up as before"
+}
+
+# A PR this home never saw merge (for example one closed without merging) owes
+# no after-merge action, while one whose merge this home recorded does.
+test_after_merge_gate_follows_an_observed_pr_merge() {
+  local case_dir rc
+  case_dir=$(make_case after-merge-pr)
+  make_landed_local_only_case "$case_dir" "after-merge=ff:$case_dir/elsewhere@origin/main"
+  sed -i.bak -e '/^local_done_head=/d' "$case_dir/state/task-x1.meta"
+  printf 'pr=https://github.com/example/repo/pull/7\n' >> "$case_dir/state/task-x1.meta"
+  touch "$case_dir/state/task-x1.pr-poll-merge-notified"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "after-merge-pr: teardown should refuse a merged PR before the action is recorded done"
+  grep -q 'after-merge action has not been recorded done' "$case_dir/stderr" \
+    || fail "after-merge-pr: the refusal did not name the after-merge action: $(cat "$case_dir/stderr")"
+
+  rm -f "$case_dir/state/task-x1.pr-poll-merge-notified"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "after-merge-pr: a PR this home never saw merge should be cleaned up as before"
+  pass "the after-merge gate applies to a PR whose merge this home recorded, not to one it never saw merge"
+}
+
 # A merge-time cleanup request belongs to the detached cleanup that runs this
 # teardown: only that cleanup removes it, after its outcome report is saved, so
 # a cleanup that dies mid-teardown is still retried by the next park tick.
@@ -7073,6 +7157,9 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_after_merge_action_gates_cleanup_until_done
+test_project_without_after_merge_token_is_not_gated
+test_after_merge_gate_follows_an_observed_pr_merge
 test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
