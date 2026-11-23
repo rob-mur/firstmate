@@ -61,7 +61,7 @@ Publishing the stamp first ensures a snapshot cannot observe a newly captain-hel
 
 Repeat and edge cases:
 
-- Retries of an active hold preserve its hold-set timestamp.
+- Retries of an active hold with the same reason preserve its hold-set timestamp; a new reason stamps the current time.
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
@@ -616,7 +616,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - With answer words enabled, `test_option_answers_keep_their_displayed_words` exercises the option-word guard: `answer` refuses a decision file that is only an option selection, the intake skips an option selection with an empty or blank label and closes it once the label arrives, a blank label on a free-text answer is not recorded as displayed words, the record keeps the raw selection with its displayed meaning, each answered fixture exposes one `Selected answer:` field cut at the first newline of a multi-line decision, and a reconciled close exposes none.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
 - `test_answer_on_in_flight_work_releases_instead_of_closing` exercises a keyed answer on in-flight work: it releases with the words recorded and the body kept, replays idempotently, and is refused while away.
-- Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
+- Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp for the same reason, and resets on a new reason or after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 
