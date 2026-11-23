@@ -1860,6 +1860,37 @@ test_a_trailing_which_clause_is_never_the_question() {
   pass "a trailing which clause is never the question"
 }
 
+# A reason that opens with its question asks that sentence, even when a later
+# lead-in ending in ":" introduces an inline numbered list, so the hold is a
+# card and is not held back to fix.
+test_a_leading_question_beats_a_later_list_lead_in() {
+  local snap p out
+  snap="$TMP_ROOT/snap-lead-question.json"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.decisions_open = [
+        {id: "c4-diagrams", key: "c4-diagrams", verb: "captain-hold", owner: "(main)",
+         title: "C4 diagrams for each repo",
+         reason: "Which tool should draw each repo\u0027s C4 diagram? Two ways to add sign-in: 1) Structurizr DSL checked into each repo, rendered in CI 2) Mermaid C4 blocks in each README, rendered by the forge.",
+         choices: {options: [{value: "structurizr", label: "Structurizr DSL"}, {value: "mermaid", label: "Mermaid C4"}],
+                   links: [{target: "https://github.com/acme/docs/issues/4", label: "Issue 4"}],
+                   free_text: false, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/lead-question.json"
+  validates "$TMP_ROOT/lead-question.json" || fail "the payload did not satisfy the validator"
+  assert_equals "Which tool should draw each repo's C4 diagram?" \
+    "$(jq -r '.captains_call[] | select(.key == "c4-diagrams") | .question' <<<"$p")" \
+    "the card did not ask its leading question"
+  out=$(build_checks "$TMP_ROOT/lead-question.json")
+  assert_not_contains "$out" "undecided-card: c4-diagrams" "the hold was refused: $out"
+  p=$(built_data)
+  assert_equals "c4-diagrams" "$(jq -r '[.captains_call[].key | select(. == "c4-diagrams")] | join(",")' <<<"$p")" \
+    "the hold did not reach Captain's Call"
+  assert_equals "" "$(jq -r '[.cards_to_fix[]?.key] | join(",")' <<<"$p")" \
+    "the hold was sent to cards_to_fix"
+  pass "a leading question beats a later list lead-in"
+}
+
 # A YouTrack link that ends a reason after its options is a card link labelled
 # by its issue id, never about text.
 test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link() {
@@ -2166,6 +2197,7 @@ fm_test_run \
   test_a_comment_link_reads_as_a_comment \
   test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary \
   test_a_trailing_which_clause_is_never_the_question \
+  test_a_leading_question_beats_a_later_list_lead_in \
   test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
   test_equals_options_and_trailing_links_and_paths_leave_the_about \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \

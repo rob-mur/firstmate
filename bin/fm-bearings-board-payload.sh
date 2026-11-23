@@ -94,7 +94,8 @@
 #                      sentence keeping its closing "?" and never cut inside a parenthesis that closes right before that "?", first letter
 #                      capitalised): for a reason with its own options, the sentence
 #                      that introduces them (without a leading "Captain call:" or
-#                      "Decision needed:" label); else the sentence led by "Question:", else
+#                      "Decision needed:" label), or the first sentence when that asks
+#                      and the introducing one is a later lead-in ending in ":"; else the sentence led by "Question:", else
 #                      its first sentence ending in "?", else its first sentence; dropped
 #                      when it only repeats the title. `about` holds the rest of the
 #                      text without the options and without any whole sentence that
@@ -662,18 +663,21 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     # before the options: the sentence that introduces them when it ends in a
     # colon ("Merge PR 13: (1) ..."), else its asking sentence, without a
     # trailing colon or dash. Words that only introduce the options
-    # ("... reviewer? Options: (1) ...") are not that sentence.
+    # ("... reviewer? Options: (1) ...") are not that sentence. A text that
+    # opens with an asking sentence asks that sentence, not a later colon
+    # lead-in ("Which tool draws it? Two ways to add sign-in: 1) ...").
     # A last sentence led by a decision label ("Captain call: the re-run must
     # either") is the heading; the card question drops that label.
   | def decision_label: "^(?:Captain(?:\u0027s)? (?:call|decision)|Decision(?: needed)?)[[:space:]]*:[[:space:]]*";
     def lead_sentence:
       gsub("[[:space:]]+"; " ") | sub("^ "; "")
       | sub("(?:^|(?<=[.!?]) )(?:the )?(?:options|choices|alternatives)(?: (?:are|would be))?[[:space:]]*:[[:space:]]*$"; ""; "i")
-      | ([ sentences[] | select(length > 0) ][-1] // "") as $last
+      | [ sentences[] | select(length > 0) ] as $all
+      | ($all[-1] // "") as $last
       | if ($last | test(decision_label + "[^[:space:]]"; "i"))
         then $last
         elif test(":[[:space:]]*$") and (test("Question:"; "i") | not)
-        then $last
+        then (if ($all | length) > 1 and ($all[0] | test("[?]$")) then $all[0] else $last end)
         else ask_sentence end
       | sub("[[:space:]:;,-]+$"; "");
     # The body shows the lead and tail of a text; its options are the choices on the card.
@@ -736,6 +740,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                 | (if $long == null then null
                    elif $parsed != null then ($parsed.lead | lead_sentence | short_text_n(120; true) | nz(null)
                      | if . != null
+                          and (test("[?]$") | not)
                           and ($parsed.lead | test("[.?!][[:space:]]*$") | not)
                           and ([$parsed.options[].label | test("[?]")] | any | not)
                           and ($long[:(($long | length) - ($parsed.tail | length))] | test("[?][[:space:]]*$"))
