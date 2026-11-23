@@ -725,6 +725,22 @@ test_a_card_page_button_shows_the_page_in_place() {
   pass "a card page button shows its page in place inside the board"
 }
 
+# A markdown-only page (page.md, no page.html) opens in place on its page.md.
+test_a_markdown_only_page_shows_its_page_md_in_place() {
+  local home page out
+  home=$(make_home page-md)
+  page=$(register_page "$home" understand-mr-872 "Understand MR 872")
+  rm -f -- "$page"
+  printf '# Understand MR 872\n' > "${page%/page.html}/page.md"
+  render_card_links "$home" '[{page:"understand-mr-872", label:"Understand page"}]' >/dev/null
+  out=$(run_board "$home" "go,page:mr-872,snap")
+  printf '%s' "$out" | jq -e '
+    .pageView.shown and .pageView.title == "Understand MR 872" and .opens == []
+      and (.snaps[0] | length) == 1 and .snaps[0][0].src == "pages/understand-mr-872/page.md"
+  ' >/dev/null || fail "the markdown-only page did not show its page.md in place: $out"
+  pass "a markdown-only page shows its page.md in place inside the board"
+}
+
 # Full screen maximises the page in place: the same frame, never re-created,
 # moved or re-pointed, and the same button, Esc on the board, or Esc pressed
 # inside the page leaves it.
@@ -836,6 +852,7 @@ test_a_worker_decision_card_always_has_an_answer_box_above_reconcile
 test_a_numbered_option_card_renders_its_buttons
 test_an_a_recommended_option_renders_as_the_recommendation
 test_a_card_page_button_shows_the_page_in_place
+test_a_markdown_only_page_shows_its_page_md_in_place
 test_full_screen_keeps_the_same_page_frame
 test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent
 
