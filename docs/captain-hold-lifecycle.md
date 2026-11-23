@@ -61,7 +61,7 @@ Publishing the stamp first ensures a snapshot cannot observe a newly captain-hel
 
 Repeat and edge cases:
 
-- Retries of an active hold preserve its hold-set timestamp.
+- Retries of an active hold with the same reason preserve its hold-set timestamp; a new reason stamps the current time.
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
@@ -609,7 +609,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - The chat channel reaches the same intake.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
 - `test_answer_on_in_flight_work_releases_instead_of_closing` exercises a keyed answer on in-flight work: it releases with the words recorded and the body kept, replays idempotently, and is refused while away.
-- Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
+- Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp for the same reason, and resets on a new reason or after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 
