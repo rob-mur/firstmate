@@ -939,6 +939,19 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
           # A decision from a home that could not be read this time shows why
           # it may be out of date; an authored detail still wins.
           | if ($d.note // null) != null and (.detail // null) == null then . + {detail: $d.note} else . end
+          # A lettered option read from the text ("(a) ... (b) ...") answers as
+          # its letter, as the question names it and as a hold records it: the
+          # parser value option-a becomes a, and the recommendation with it.
+          # A letter another option on the card already uses keeps its value.
+          | ( [ (.options // [])[].value ] ) as $vals
+          | ( reduce $vals[] as $v ({};
+                if ($v | test("^option-[a-z]$")) and (($v | ltrimstr("option-")) | IN($vals[]) | not)
+                then .[$v] = ($v | ltrimstr("option-")) else . end) ) as $letters
+          | if ($letters | length) == 0 then .
+            else .options |= map(.value = ($letters[.value] // .value))
+                 | if (.recommend_value | type) == "string"
+                   then .recommend_value = ($letters[.recommend_value] // .recommend_value) else . end
+            end
           | overlay("captains_call"; $d.key; card_fields) as $ov
           | . + $ov
           | if ($ov | has("options")) then del(.malformed, .options_inferred) else . end

@@ -632,7 +632,7 @@ test_a_worker_decision_card_always_has_an_answer_box_above_reconcile() {
   printf '%s' "$out" | jq -e '
     (.call[] | select(.key == "status.bcr-dec10-grill.grill-bcr-r1")) as $c
     | .error == ""
-      and ($c.options | map(.value)) == ["option-a","option-b","option-c","reconcile"]
+      and ($c.options | map(.value)) == ["a","b","c","reconcile"]
       and ($c.options | map(.aside)) == [false,false,false,true]
       and $c.answer_box.tag == "textarea" and $c.answer_box.name == "note"
       and $c.answer_box.label == "Or answer in your own words" and $c.answer_box.before_aside
@@ -702,9 +702,9 @@ test_an_a_recommended_option_renders_as_the_recommendation() {
     def card($k): .call[] | select(.key == $k);
     def recs($k): [card($k).options[] | select(.rec) | .value];
     .error == ""
-      and recs("status.aegis-879-review.mr879-comments") == ["option-a"]
-      and recs("status.runner-fuse.runner-fuse-apply") == ["option-a"]
-      and recs("status.cd-forge-arm.captain-hold-cd-forge-arm-lab-1") == ["option-a"]
+      and recs("status.aegis-879-review.mr879-comments") == ["a"]
+      and recs("status.runner-fuse.runner-fuse-apply") == ["a"]
+      and recs("status.cd-forge-arm.captain-hold-cd-forge-arm-lab-1") == ["a"]
       and ([card("status.aegis-879-review.mr879-comments").options[] | select(.aside | not) | .label]
            == ["Post 1, 2, 3, 4, 6 with request changes", "Post 1-4 and 6-10 (adds the test gaps)", "Post all 12", "Post none"])
   ' >/dev/null || fail "an (a, recommended) option did not render as the recommendation: $out"
