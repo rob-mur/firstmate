@@ -2052,6 +2052,29 @@ test_a_url_with_a_placeholder_stays_whole_and_is_never_a_link() {
   pass "a url with a placeholder stays whole and is never a link"
 }
 
+# A hold question that names its release by a full URL in parentheses: the URL
+# is a card link, so the question drops it and its parentheses whole.
+test_a_url_in_a_hold_question_leaves_it_cleanly() {
+  local p q rel=https://forgejo.clarob.uk/rob/proton-drive-mount/releases/tag/v1.1.1
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq --arg rel "$rel" '.decisions_open = [
+        {id: "pdm-deploy-v111", key: "pdm-deploy-v111", verb: "captain-hold", owner: "(main)",
+         title: "Deploy proton-drive-mount v1.1.1 to the Immich storage host",
+         reason: ("Deploy proton-drive-mount v1.1.1 (" + $rel + ") to the Immich storage host?"),
+         choices: {options: [{value: "a", label: "deploy in a quiet window and check reads and writes after (recommended)"},
+                             {value: "b", label: "wait"}, {value: "c", label: "do not deploy"}],
+                   links: [], free_text: true, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$TMP_ROOT/snap-pdm.json"
+  p=$(FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$TMP_ROOT/snap-pdm.json") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/pdm.json"
+  validates "$TMP_ROOT/pdm.json" || fail "the payload did not satisfy the validator"
+  q=$(jq -r '.captains_call[] | select(.key == "pdm-deploy-v111") | .question // .title' <<<"$p")
+  assert_equals "Deploy proton-drive-mount v1.1.1 to the Immich storage host?" "$q" "the question drops the URL cleanly"
+  jq -e --arg u "$rel" '[.captains_call[] | select(.key == "pdm-deploy-v111") | .links[].url] | index($u) != null' <<<"$p" >/dev/null \
+    || fail "the release is not a card link: $p"
+  pass "a url in a hold question leaves it cleanly"
+}
+
 # A YouTrack link that ends a reason after its options is a card link labelled
 # by its issue id, never about text.
 test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link() {
@@ -2365,6 +2388,7 @@ fm_test_run \
   test_a_re_held_card_shows_its_current_options_and_each_link_once \
   test_steps_that_start_with_a_url_stay_in_the_about \
   test_a_url_with_a_placeholder_stays_whole_and_is_never_a_link \
+  test_a_url_in_a_hold_question_leaves_it_cleanly \
   test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
   test_equals_options_and_trailing_links_and_paths_leave_the_about \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \
