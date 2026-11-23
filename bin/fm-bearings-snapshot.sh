@@ -28,10 +28,15 @@
 # CI, approvals, unresolved threads, last activity). It makes three read-only calls
 # against the host in FM_BEARINGS_GITLAB_HOST or glab's configured host - `glab api
 # user` for the captain's id, `merge_requests?scope=created_by_me&state=opened` and
-# `merge_requests?scope=all&state=opened&reviewer_id=<id>` - plus one detail and one
-# approvals read for every MR it lists, at most FM_BEARINGS_MR_DETAIL_PARALLEL MRs
-# at a time, each call bounded by FM_BEARINGS_MR_TIMEOUT seconds; at most
-# FM_BEARINGS_MRS rows are kept.
+# `merge_requests?scope=all&state=opened&reviewer_id=<id>` - plus one detail, one
+# approvals and one reviewers read for every MR it lists, at most
+# FM_BEARINGS_MR_DETAIL_PARALLEL MRs at a time, each call bounded by
+# FM_BEARINGS_MR_TIMEOUT seconds; at most FM_BEARINGS_MRS rows are kept.
+# Someone else's MR the captain has already reviewed, requested changes on or
+# approved waits on its author, so its state line opens with `waiting on <author>
+# (you reviewed|you requested changes|you approved)`; an unreviewed (first or
+# re-requested) review, the captain's own MR, or a failed reviewers read adds
+# no wait owner.
 # GitLab keeps an MR open after its project is archived, so one bounded
 # `projects/<id>` read per distinct project (at most FM_BEARINGS_MR_PROJECT_MAX)
 # drops the MRs of an archived project; a project it cannot read keeps its MRs.
@@ -1198,9 +1203,9 @@ MODEL=$(printf '%s' "$MODEL" | jq --slurpfile evs "$HANDOFF_EVIDENCE" '
 # their review, that the rest of this view does not show. One bounded user call
 # for the captain's id and two bounded list calls against the configured host
 # (merged by project and iid), one bounded project read per distinct project to
-# drop MRs of an archived project, then one bounded detail and approvals call per
-# listed MR (every one of the FM_BEARINGS_MRS kept, so none shows CI or approvals
-# unknown for want of a read), in waves of at most FM_BEARINGS_MR_DETAIL_PARALLEL
+# drop MRs of an archived project, then one bounded detail, approvals and
+# reviewers call per listed MR (every one of the FM_BEARINGS_MRS kept, so none
+# shows CI or approvals unknown for want of a read), in waves of at most FM_BEARINGS_MR_DETAIL_PARALLEL
 # MRs so a long list neither fans out unboundedly nor runs past a few timeouts.
 # Read-only. An MR is covered when its exact web_url or full reference
 # (group/project!iid), not followed by another digit, appears in a projected
@@ -1296,20 +1301,32 @@ EOF
         i=$((i + 1))
         ( glab_bounded api --hostname "$mr_host" "projects/$pid/merge_requests/$iid" > "$mr_tmp/d-$pid-$iid" 2>/dev/null || rm -f "$mr_tmp/d-$pid-$iid" ) &
         ( glab_bounded api --hostname "$mr_host" "projects/$pid/merge_requests/$iid/approvals" > "$mr_tmp/a-$pid-$iid" 2>/dev/null || rm -f "$mr_tmp/a-$pid-$iid" ) &
+        ( glab_bounded api --hostname "$mr_host" "projects/$pid/merge_requests/$iid/reviewers" > "$mr_tmp/r-$pid-$iid" 2>/dev/null || rm -f "$mr_tmp/r-$pid-$iid" ) &
       done <<EOF
 $(printf '%s' "$mr_uncovered" | jq -r --argjson cap "$FM_BEARINGS_MRS" '.[:$cap][] | "\(.project_id)\t\(.iid)"')
 EOF
       wait
       # The detail map grows with every listed MR, so it reaches jq as a file:
       # an argument that size overflows the kernel's argument limit.
-      for f in "$mr_tmp"/d-* "$mr_tmp"/a-*; do
+      for f in "$mr_tmp"/d-* "$mr_tmp"/a-* "$mr_tmp"/r-*; do
           [ -f "$f" ] || continue
-          jq -c --arg k "${f##*/}" 'select(type == "object") | {key:$k, value:.}' "$f" 2>/dev/null
+          jq -c --arg k "${f##*/}" 'select(type == (if ($k | startswith("r-")) then "array" else "object" end))
+            | {key:$k, value:.}' "$f" 2>/dev/null
         done | jq -s 'from_entries' > "$mr_tmp/details"
       [ -s "$mr_tmp/details" ] || printf '{}' > "$mr_tmp/details"
-      OPEN_MRS=$(printf '%s' "$mr_uncovered" | jq -c --slurpfile detf "$mr_tmp/details" --argjson cap "$FM_BEARINGS_MRS" '
+      OPEN_MRS=$(printf '%s' "$mr_uncovered" | jq -c --slurpfile detf "$mr_tmp/details" --argjson cap "$FM_BEARINGS_MRS" \
+        --argjson uid "$mr_uid" '
         $detf[0] as $det
         |
+        # Someone else'"'"'s MR the captain already reviewed waits on its author;
+        # a missing reviewers read names no one.
+        def wait_owner($r):
+          (.author.username // "") as $who
+          | if (.author.id // null) == $uid or ($r | type) != "array" or ($who | type) != "string" or $who == ""
+            then empty
+            else ({reviewed:"you reviewed", requested_changes:"you requested changes", approved:"you approved"}
+                  [first($r[] | select(type == "object" and .user.id == $uid) | .state | strings) // ""])
+                 | select(. != null) | "waiting on \($who) (\(.))" end;
         def merge_state:
           if .draft == true or .detailed_merge_status == "draft_status" then "draft"
           elif .has_conflicts == true or .detailed_merge_status == "conflict" then "has conflicts"
@@ -1333,7 +1350,7 @@ EOF
              repo:((.web_url | split("/-/")[0] | split("/") | last) // "-"),
              title:((.title // "") | if . == "" then "MR !\(.iid)" else . end),
              url:.web_url,
-             state:([merge_state, ci($det["d-" + $id]), approvals($det["a-" + $id]),
+             state:([wait_owner($det["r-" + $id]), merge_state, ci($det["d-" + $id]), approvals($det["a-" + $id]),
                      (if .blocking_discussions_resolved == false then "threads open" else "threads resolved" end),
                      "last activity " + ((.updated_at // "unknown") | .[0:10])]
                     | reduce .[] as $p ([]; if index([$p]) then . else . + [$p] end) | join(", ")),

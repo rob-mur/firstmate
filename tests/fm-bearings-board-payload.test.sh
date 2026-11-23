@@ -2291,7 +2291,8 @@ test_a_secondmate_decision_is_answerable_from_its_card() {
 
 # The captain's open GitLab MRs that no task covers reach the board as
 # information rows - URL and one state line - never as decision cards. A
-# snapshot without them adds no section.
+# snapshot without them adds no section. An MR that waits on its author keeps
+# that wait in its state line and never becomes a card or a waiting row.
 test_open_mrs_no_task_covers_become_information_rows() {
   local base snap out
   base="$TMP_ROOT/mrs-base.json"; write_snapshot "$base"
@@ -2300,15 +2301,23 @@ test_open_mrs_no_task_covers_become_information_rows() {
         {key:"mr-42-880", repo:"aegis", title:"Bump the dependencies",
          url:"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880",
          state:"mergeable, CI passing, 0 approvals, threads resolved, last activity 2026-07-11",
-         updated:"2026-07-11T08:30:00Z"}]
-      | .mrs = "checked (gitlab.example.com, 1 open MR(s) no task covers)"' "$base" > "$snap"
+         updated:"2026-07-11T08:30:00Z"},
+        {key:"mr-42-846", repo:"aegis", title:"Teammate pricing change",
+         url:"https://gitlab.example.com/grp/app/aegis/-/merge_requests/846",
+         state:"waiting on boyd.ebsworthy (you requested changes), threads open, CI passing, 0 approvals, last activity 2026-07-11",
+         updated:"2026-07-11T08:00:00Z"}]
+      | .mrs = "checked (gitlab.example.com, 2 open MR(s) no task covers)"' "$base" > "$snap"
   out="$TMP_ROOT/mrs-payload.json"
   "$GEN" --snapshot "$snap" > "$out" || fail "the generator failed on a snapshot with open MRs"
   jq -e '
     .open_mrs == [{key:"mr-42-880", repo:"aegis", title:"Bump the dependencies",
                    url:"https://gitlab.example.com/grp/app/aegis/-/merge_requests/880",
-                   state:"mergeable, CI passing, 0 approvals, threads resolved, last activity 2026-07-11"}]
-    and ([.captains_call[] | select((.pr_url // "") | test("merge_requests/880"))] | length) == 0
+                   state:"mergeable, CI passing, 0 approvals, threads resolved, last activity 2026-07-11"},
+                  {key:"mr-42-846", repo:"aegis", title:"Teammate pricing change",
+                   url:"https://gitlab.example.com/grp/app/aegis/-/merge_requests/846",
+                   state:"waiting on boyd.ebsworthy (you requested changes), threads open, CI passing, 0 approvals, last activity 2026-07-11"}]
+    and ([.captains_call[] | select((.pr_url // "") | test("merge_requests/(880|846)"))] | length) == 0
+    and ([.waiting[]? | tostring | select(test("merge_requests/846|aegis!846"))] | length) == 0
   ' "$out" >/dev/null || fail "an uncovered MR must be an information row, not a card: $(cat "$out")"
   validates "$out" || fail "a payload with open MRs must satisfy the board validator"
   "$GEN" --snapshot "$base" | jq -e 'has("open_mrs") | not' >/dev/null \
