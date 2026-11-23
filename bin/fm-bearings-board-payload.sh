@@ -15,13 +15,13 @@
 # itself (--during-away keeps the board building while the captain is away;
 # --include-prs is passed through; FM_BEARINGS_BOARD_MR_CHECK=0 drops
 # --include-mrs, so the build makes no GitLab call), so every open captain hold - live, blocked, dated, or aged, past the
-# snapshot's decision cap - yields at most one card, waiting row, or dated charted
-# row; with --snapshot it reads that JSON from the file or stdin instead.
+# snapshot's decision cap - yields at most one card or waiting row; with
+# --snapshot it reads that JSON from the file or stdin instead.
 #
 # Stale rows never reach Captain's Call:
 #   - a hold deferred to a later date (hold_until after today, or fleet bucket
-#     `dated`), from any home, is charted with `until <date>: <reason>` instead;
-#     once that date arrives the hold is a card again, never a waiting row, and
+#     `dated`), from any home, is a waiting row with `until <date>: <reason>`
+#     instead; once that date arrives the hold is a card again, and
 #     a lapsed card whose text does not ask asks whether it is still waiting
 #     (go ahead / hold it again / free text) when the hold recorded no choices;
 #   - a merge-ask card (is_merge_ask in bin/fm-bearings-question-lib.sh) whose
@@ -151,11 +151,19 @@
 #                      reason that opens with wait wording is a wait; the row's
 #                      reason shows what it waits on. Waiting rows keep
 #                      snapshot order and are not part of the priority list.
-#   in_flight       -> underway: every row except state `done`, in snapshot order,
-#                      with the projected `name`.
+#   in_flight       -> underway: every row in snapshot order, with the projected
+#                      `name`, except a main row in state `done`, a row not
+#                      `working` whose `pr_url` merged or closed, and a row not
+#                      `working` that a held gate's waiting row already covers;
+#                      a second mate's `done` child stays until its home cleans it up.
 #   landed          -> landed: every row; `pr_url` and `repo` come from the
 #                      artifact or recorded PR when it is one.
-#   gates           -> charted: one row per gate; `(main-inventory)` and
+#   gates           -> waiting: a held gate (a `hold_kind`, or a future `hold_until`),
+#                      keyed `<owner>-<id>`, titled `<owner>: <title>`, its
+#                      reason the hold reason, prefixed `until <date>: ` while
+#                      `hold_until` is in the future, so every held second-mate
+#                      task names its wait;
+#                   -> charted: one row per other gate; `(main-inventory)` and
 #                      `(return-catchup)` become warning rows (kind warning, never
 #                      dispatchable), and a gate with neither blocker nor hold
 #                      reason is the only dispatchable row.
@@ -303,6 +311,7 @@ if [ "${FM_BEARINGS_BOARD_PR_CHECK:-1}" != 0 ]; then
             | scan("https://[^[:space:]<>\"()]+?/(?:pull|pulls|-/merge_requests)/[0-9]+") )
         | {u: ., rv: $rv} ]
       + [ ($s.contributions.captain // [])[] | {u: .url, rv: 0} ]
+      + [ ($s.in_flight // [])[] | select(.state != "working") | {u: .pr_url, rv: 0} ]
     | map(select(.u | strings | test("^https://")))
     | group_by(.u) | map({u: .[0].u, rv: (map(.rv) | max)})
     | map(select(.u as $u | $landed | index($u) | not)) | .[:$max][]
@@ -394,7 +403,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     ( [ $snap.decisions_open[]? | select(released(.) | not) ]
       | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end) ) as $held
   # A hold deferred to a future date (hold_until after today, or the dated
-  # bucket) is charted with its date, main and secondmate alike, never a call.
+  # bucket) is a waiting row with its date, main and secondmate alike, never a call.
   | def deferred($d):
       ($d.hold_bucket // "") == "dated"
       or ( (($d.hold_until // "") | tostring) as $u
@@ -1002,7 +1011,33 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | map(. + overlay("captains_call"; .key; card_fields)) ) as $contrib_cards
   | ($cards + $contrib_cards + ($copy.captains_call_extra // [])) as $captains_call
 
-  | ( [ $in_flight[] | select(.state != "done") | . as $r
+  # A gate the fleet holds (a hold kind, such as an external wait or a future
+  # date) waits on that hold: a waiting row naming it, never a charted row.
+  | def future($u): (($u // "") | tostring) as $s | ($s | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")) and ($s[:10] > $today);
+    def held_gate($r): ($r.id | test("^\\(") | not) and ((($r.hold_kind // "") != "") or future($r.hold_until));
+    def until_reason($u; $text):
+      (if future($u) then "until " + (($u | tostring)[:10]) + ": " else "" end) + $text;
+    def owner_title($o; $t): (if $o == "(main)" then "" else $o + ": " end) + $t;
+    ( [ ($snap.gates // [])[] | select(held_gate(.))
+        | . as $r | ($r.owner // "(main)") as $o
+        | { key: ((if $o == "(main)" then $r.id else $o + "-" + $r.id end) | gsub("[^A-Za-z0-9._-]"; "-") | .[:128]),
+            title: owner_title($o; (($r.title_full // $r.title) | nz($r.id))),
+            reason: until_reason($r.hold_until;
+                      (($r.reason_full // $r.reason) | nz(null)
+                       | if . == null then "waiting" else (tostring | clean_reason | nz("waiting")) end)),
+            repo: ([$in_flight[] | select(.id == $r.id or .id == ($o + "/" + $r.id)) | .repo][0] // null),
+            context: context_of($r),
+            owner_id: (if $o == "(main)" then $r.id else $o + "/" + $r.id end) } ] ) as $gate_waits
+  # A main row that is done has left the fleet work; a secondmate child that
+  # is done stays under way until its home cleans it up, since that home has
+  # not landed it. Any row not working whose PR/MR has merged or closed is
+  # finished, and a row whose task waits on a fleet hold shows as that wait.
+  | ( [ $gate_waits[] | .owner_id ] ) as $waiting_ids
+  | ( [ $in_flight[]
+        | select(.state != "done" or ((.id // "") | test("/")))
+        | select(.state == "working" or (pr_finished([.pr_url | strings]) | not))
+        | select(.state == "working" or (.id as $i | $waiting_ids | index($i) | not))
+        | . as $r
         | { id, name: (.name | nz($r.id)), repo: (.repo // null),
             state: (.state | nz("unknown")), doing: (.doing | nz("-")),
             kind: (.kind | nz("task")) }
@@ -1015,7 +1050,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
           + (if $pr != null then {pr_url: $pr} else {} end)
           + overlay("landed"; .id; landed_fields) ] ) as $landed
 
-  | ( [ $snap.gates[]?
+  | ( [ $snap.gates[]? | select(held_gate(.) | not)
         | . as $r | (.id | test("^\\(")) as $synthetic
         | { id: (.id | gsub("^\\(|\\)$"; "")),
             repo: null,
@@ -1060,17 +1095,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
 
   | ( [ $deferred[]
         | . as $d | ($d.owner // "(main)") as $o
-        | { id: (($d.id // $d.key) | gsub("[^A-Za-z0-9._-]"; "-") | .[:128]),
-            repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null),
-            title: ((if $o == "(main)" then "" else $o + ": " end)
-                    + (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key))),
+        | { key: (($d.id // $d.key) | gsub("[^A-Za-z0-9._-]"; "-") | .[:128]),
+            title: owner_title($o; (($d.title_full // $d.title // $d.summary // $d.key) | nz($d.key))),
             reason: ("until " + ((($d.hold_until // "") | tostring | .[:10]) | nz("a later date")) + ": "
                      + (($d.reason_full // $d.reason) | nz("deferred"))),
-            dispatchable: false, kind: "queued", context: context_of($d) }
-        | . as $row | . + overlay("charted"; $row.id; charted_fields)
-        | .dispatchable = false ] ) as $deferred_rows
+            repo: ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0] // null),
+            context: context_of($d) } ] ) as $deferred_waits
 
-  | ($gate_rows + $deferred_rows + $home_rows) as $charted
+  | ($gate_rows + $home_rows) as $charted
 
   | def ranked($v): ($prio | index($v)) as $i | if $i == null then 1000000 else $i end;
     def by_priority(k): to_entries | sort_by([ranked(.value | k), .key]) | map(.value);
@@ -1080,7 +1112,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       prs_live: (($snap.prs // "") | startswith("checked")),
       captains_call: ($captains_call | by_priority(.key)),
       underway: ($underway | by_priority(.id)),
-      waiting: $waiting,
+      waiting: ($waiting + $deferred_waits + ($gate_waits | map(del(.owner_id)))),
       landed: $landed,
       charted: $charted }
     + (if $gates_cut != null then {charted_more: (($gates_cut.m | tonumber) - ($gates_cut.n | tonumber))} else {} end)

@@ -94,6 +94,8 @@
 #     active_children lists only working children; in_flight_children lists
 #     every owned in-flight child in whatever current state it is in, and is
 #     null for a summary from an older producer that does not publish it.
+#     Each in_flight_children row carries pr_url, the PR or MR the child
+#     recorded as its own (null when none).
 #     provenance.summary_source distinguishes "local-ledger", "remote-ledger",
 #     "local-ledger-cache", and "remote-ledger-cache". Every usable ledger read,
 #     local or remote, refreshes a last-good copy for its registered route under
@@ -1290,7 +1292,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
-            doing:((.current_state.detail // .current_state.state // "") | trunc(120))} ]) as $in_flight_all
+            doing:((.current_state.detail // .current_state.state // "") | trunc(120)),
+            pr_url:(.pr.url // null)} ]) as $in_flight_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status",
