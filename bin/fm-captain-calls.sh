@@ -38,14 +38,6 @@
 #     call: it is not a second call and is listed in skipped[], so the hold
 #     shows once.
 #
-# Work hours: outside work hours a work-project item (a call whose key, task,
-# title, repo, question or links name descartesunderwriting, aegis, iac-* or a
-# YouTrack id like APP-1234) is not surfaced: it leaves calls[] and to_close[]
-# and is listed in skipped[] as held until work hours. Work hours are Monday to
-# Friday, FM_CAPTAIN_CALLS_WORK_HOURS (default 09-18: from 09:00 to before
-# 18:00, local time); "off" surfaces work items at any time.
-# FM_CAPTAIN_CALLS_CLOCK (YYYY-MM-DDTHH:MM, local) replaces the current time.
-#
 # Decision or not: every call is classified with the shared board question
 # rules (bin/fm-bearings-question-lib.sh is_merge_ask and is_review), read on the
 # question with its URLs taken out and the noun "merge request" read as "MR". A merge ask or a review hand-off is not a
@@ -81,12 +73,9 @@
 #   to_close[] settled calls that are not decisions (same fields, plus
 #             evidence {settled_by, prs[{url,state}], text} and close_with),
 #   skipped[] {key, home, task, why} deferred holds (main or secondmate, also
-#             with title and question), captain-answered keys and work items
-#             held until work hours,
+#             with title and question) and captain-answered keys,
 #   homes[]   {id, remote, status_log ("read" or "missing")} for every registered mate,
-#   workers[] the ids of the live workers whose status logs were read,
-#   work_hours {clock, hours, open} the time used, the hours, and whether
-#             work items are surfaced now.
+#   workers[] the ids of the live workers whose status logs were read.
 # Each call:
 #   key       card key, unique in the output: the task id for a main hold,
 #             "<mate>.<decision-key>" for a secondmate call,
@@ -100,8 +89,7 @@
 #   links[{url,label}], blocked_by[], hold_until, raised_at (UTC ISO or null),
 #   prs[{url,state}]  state is merged, closed, open or unknown
 #
-# Exit 0 with the JSON; exit 1 when the backlog cannot be read; exit 2 on usage
-# or a malformed FM_CAPTAIN_CALLS_CLOCK or FM_CAPTAIN_CALLS_WORK_HOURS.
+# Exit 0 with the JSON; exit 1 when the backlog cannot be read; exit 2 on usage.
 
 set -u
 
@@ -119,18 +107,15 @@ Usage: fm-captain-calls.sh [--help]
 
 Print every open captain call of this home (FM_HOME) as one JSON object:
 held main-backlog tasks and open decision keys of secondmates and of this
-home's live workers. Read-only. Outside work hours, work-project items are
-held in skipped[] instead of shown.
+home's live workers. Read-only.
 
   calls[]     open calls, each marked decision true or false
   to_close[]  settled calls that are not decisions, with the evidence that
               settled them (linked PRs/MRs all merged or closed, or already
               answered) and how main closes them; nothing is closed here
-  skipped[]   deferred holds, answered decision keys not yet closed, and work
-              items held until work hours
+  skipped[]   deferred holds and answered decision keys not yet closed
   homes[]     every registered secondmate and whether its status log was read
   workers[]   the live workers whose status logs were read
-  work_hours  the time used, the hours, and whether work items show now
 
 Environment:
   FM_HOME                       the home to read (default: this repository)
@@ -138,8 +123,6 @@ Environment:
   FM_CAPTAIN_CALLS_PR_STATES    file of "<url>\t<state>" lines used instead of lookups
   FM_CAPTAIN_CALLS_PR_TIMEOUT   seconds per lookup (default 5)
   FM_CAPTAIN_CALLS_PR_MAX       most URLs looked up (default 32)
-  FM_CAPTAIN_CALLS_WORK_HOURS   Mon-Fri hours as HH-HH (default 09-18), or off
-  FM_CAPTAIN_CALLS_CLOCK        YYYY-MM-DDTHH:MM local time to use instead of now
 
 The script header owns the full contract.
 EOF
@@ -446,23 +429,6 @@ EOF
 fi
 [ -n "$PR_STATES" ] || PR_STATES='{}'
 
-# --- work hours -------------------------------------------------------------------
-# The captain's rule: outside work hours (weekends, evenings) never surface a
-# work-project item. Work hours are Monday to Friday, FM_CAPTAIN_CALLS_WORK_HOURS
-# (default 09-18: from 09:00 up to 18:00), local time. FM_CAPTAIN_CALLS_CLOCK
-# (YYYY-MM-DDTHH:MM, local) stands in for the clock in tests.
-# FM_CAPTAIN_CALLS_WORK_HOURS=off turns the rule off (every item shows).
-CLOCK=${FM_CAPTAIN_CALLS_CLOCK:-$(date +%Y-%m-%dT%H:%M)}
-WORK_HOURS=${FM_CAPTAIN_CALLS_WORK_HOURS:-09-18}
-case "$CLOCK" in
-  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]) ;;
-  *) echo "fm-captain-calls: FM_CAPTAIN_CALLS_CLOCK must be YYYY-MM-DDTHH:MM" >&2; exit 2 ;;
-esac
-case "$WORK_HOURS" in
-  off|[0-2][0-9]-[0-2][0-9]) ;;
-  *) echo "fm-captain-calls: FM_CAPTAIN_CALLS_WORK_HOURS must be HH-HH or off" >&2; exit 2 ;;
-esac
-
 # --- calls, settled calls to close, and skipped ------------------------------
 # A call that is not a decision and is already settled (every linked PR/MR
 # merged or closed, or the captain already answered it) leaves calls[] for
@@ -471,21 +437,7 @@ esac
 # here closes anything; to_close[].close_with names how main closes it.
 # shellcheck disable=SC2016  # jq program text.
 printf '%s\n' "$CALLS_JSON" | jq --argjson states "$PR_STATES" --arg check "$PR_CHECK" \
-  --arg now "$NOW" --arg today "$TODAY" --arg home "$FM_HOME" \
-  --arg clock "$CLOCK" --arg hours "$WORK_HOURS" '
-  # A work-project item names company work: aegis, an iac-* repo, the company
-  # GitLab or YouTrack host, or a YouTrack issue id (APP-1234).
-  def work_item:
-    ([.key, .task, .title, .repo, .question, (.links[]?.url), (.prs[]?.url)]
-     | map(select(. != null)) | join(" "))
-    | test("descartesunderwriting|(^|[^a-z0-9])aegis($|[^a-z])|(^|[^a-z0-9-])iac-|(^|[^a-z0-9-])app-[0-9]+"; "i");
-  ($clock | strptime("%Y-%m-%dT%H:%M") | mktime) as $t
-  | ($t | strftime("%u") | tonumber) as $dow
-  | ($t | strftime("%H") | tonumber) as $hour
-  | (if $hours == "off" then true
-     else ($hours | split("-") | map(tonumber)) as [$from, $to]
-          | $dow <= 5 and $hour >= $from and $hour < $to end) as $in_hours
-  | def held: ($in_hours | not) and work_item;
+  --arg now "$NOW" --arg today "$TODAY" --arg home "$FM_HOME" '
   def finished: (.prs | length) > 0 and all(.prs[]; .state == "merged" or .state == "closed");
   def close_with:
     if .source == "main-hold"
@@ -498,19 +450,16 @@ printf '%s\n' "$CALLS_JSON" | jq --argjson states "$PR_STATES" --arg check "$PR_
   [.calls[] | . + {prs: [.pr_urls[] | {url: ., state: ($states[.] // "unknown")}]} | del(.pr_urls)] as $all
   | [.answered[] | . + {prs: []}] as $answered
   | {schema: "fm-captain-calls.v1", generated: $now, home: $home, today: $today, pr_check: $check,
-     work_hours: {clock: $clock, hours: $hours, open: $in_hours},
-     calls: [$all[] | select(.decision or (finished | not)) | select(held | not)],
-     to_close: ([$all[] | select(held | not) | select((.decision | not) and finished)
+     calls: [$all[] | select(.decision or (finished | not))],
+     to_close: ([$all[] | select((.decision | not) and finished)
                  | to_close("every linked PR/MR merged or closed";
                      "Not a decision and already settled: every linked PR/MR is merged or closed ("
                      + ([.prs[] | .url + " " + .state] | join(", ")) + "), checked " + $now + ".")]
-               + [$answered[] | select(held | not) | select(.decision | not)
+               + [$answered[] | select(.decision | not)
                   | to_close("answered by the captain in " + .answered;
                       "Not a decision and already settled: the captain answered it in " + .answered + ".")
                   | del(.answered)]),
      skipped: (.skipped
-               + [$answered[] | select(held | not) | select(.decision)
-                  | {key, home, task, why: ("answered by the captain in " + .answered + "; waiting for " + closer + " to close it")}]
-               + [$all[], $answered[] | select(held)
-                  | {key, home, task, why: "work-project item, held until work hours"}]),
+               + [$answered[] | select(.decision)
+                  | {key, home, task, why: ("answered by the captain in " + .answered + "; waiting for " + closer + " to close it")}]),
      homes, workers}'

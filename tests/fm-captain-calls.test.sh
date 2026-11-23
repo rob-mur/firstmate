@@ -14,8 +14,7 @@
 # captain-hold-cd-915-stable-lag-1, captain-hold-gke-cp-lockdown-rollout-1 and
 # captain-hold-runner-fuse-rollout-1. It also holds a question from one of main's
 # own workers, like bcr-dec10-grill's grill-bcr-r4 (APP-3655) that the model
-# missed, and checks the work-hours rule: outside work hours a work-project item
-# is held, not shown. Every run pins the clock with FM_CAPTAIN_CALLS_CLOCK.
+# missed, and checks that a work-project call is shown at any time of day.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -188,15 +187,12 @@ EOF
   printf '%s\n' "$home"
 }
 
-# A Wednesday noon, inside work hours, unless a test sets CALLS_CLOCK.
-CALLS_CLOCK=2026-11-18T12:00
-
 run_calls() {  # <home> <pr-states-file or "off">  -> JSON on stdout
   local home=$1 prs=$2
   if [ "$prs" = off ]; then
-    FM_CAPTAIN_CALLS_CLOCK=$CALLS_CLOCK FM_CAPTAIN_CALLS_PR_CHECK=0 in_home "$home" "$CALLS"
+    FM_CAPTAIN_CALLS_PR_CHECK=0 in_home "$home" "$CALLS"
   else
-    FM_CAPTAIN_CALLS_CLOCK=$CALLS_CLOCK FM_CAPTAIN_CALLS_PR_STATES="$prs" in_home "$home" "$CALLS"
+    FM_CAPTAIN_CALLS_PR_STATES="$prs" in_home "$home" "$CALLS"
   fi
 }
 
@@ -532,36 +528,15 @@ test_main_worker_question_is_a_call() {
   pass "a live main worker's open question is a call; a resolved key or a finished task is not"
 }
 
-test_work_items_show_in_work_hours() {
-  local out
-  out=$(run_calls "$FIXTURE" off) || fail "fm-captain-calls failed"
-  assert_equals "true" "$(printf '%s\n' "$out" | jq -r '.work_hours.open')" "Wednesday noon is work hours"
-  expect_where "$out" bcr-grill.grill-bcr-r4 calls "a YouTrack question in work hours"
-  expect_where "$out" aegis-880-held calls "an aegis hold in work hours"
-  pass "work-project items show in work hours"
-}
-
-test_work_items_are_held_outside_work_hours() {
-  local out clock
-  for clock in 2026-11-21T12:00 2026-11-18T19:30 2026-11-18T08:59 2026-11-18T18:00; do
-    out=$(CALLS_CLOCK=$clock run_calls "$FIXTURE" off) || fail "fm-captain-calls failed at $clock"
-    assert_equals "false" "$(printf '%s\n' "$out" | jq -r '.work_hours.open')" "$clock is outside work hours"
-    expect_where "$out" bcr-grill.grill-bcr-r4 skipped "a YouTrack question at $clock"
-    expect_where "$out" aegis-880-held skipped "an aegis hold at $clock"
-    assert_contains "$(printf '%s\n' "$out" | jq -r '.skipped[] | select(.key == "aegis-880-held") | .why')" \
-      "held until work hours" "the held item says why"
-    expect_where "$out" home-task.name-pick calls "a personal worker question at $clock"
-    expect_where "$out" plain-call calls "a personal hold at $clock"
-    expect_where "$out" cd.cd-870-version-file calls "a personal secondmate call at $clock"
+test_work_items_show_at_any_time() {
+  local out tz
+  # Two local clocks 12 hours apart: at least one of them is outside 09:00-18:00.
+  for tz in UTC Etc/GMT-12; do
+    out=$(TZ=$tz run_calls "$FIXTURE" off) || fail "fm-captain-calls failed in $tz"
+    expect_where "$out" bcr-grill.grill-bcr-r4 calls "a YouTrack question in $tz"
+    expect_where "$out" aegis-880-held calls "an aegis hold in $tz"
   done
-  out=$(CALLS_CLOCK=2026-11-18T09:00 run_calls "$FIXTURE" off) || fail "fm-captain-calls failed"
-  expect_where "$out" aegis-880-held calls "an aegis hold at 09:00"
-  out=$(CALLS_CLOCK=2026-11-21T12:00 FM_CAPTAIN_CALLS_WORK_HOURS=off run_calls "$FIXTURE" off) \
-    || fail "fm-captain-calls failed"
-  expect_where "$out" aegis-880-held calls "an aegis hold with the rule off"
-  CALLS_CLOCK=noon run_calls "$FIXTURE" off >/dev/null 2>&1
-  expect_code 2 $? "a malformed clock"
-  pass "outside work hours (weekend, evening, early morning) work-project items are held; others show"
+  pass "a work-project call is a call at any time of day; the model reads no clock"
 }
 
 test_reads_without_writing() {
@@ -594,8 +569,7 @@ test_unreadable_backlog_exits_1() {
 
 fm_test_run \
   test_main_worker_question_is_a_call \
-  test_work_items_show_in_work_hours \
-  test_work_items_are_held_outside_work_hours \
+  test_work_items_show_at_any_time \
   test_settled_merge_ask_goes_to_close_not_calls \
   test_settled_secondmate_merge_ask_goes_to_close \
   test_answered_non_decision_goes_to_close \
