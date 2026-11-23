@@ -5440,6 +5440,33 @@ test_hold_refuses_malformed_choices() {
   pass "a hold refuses malformed options and links before touching the backlog"
 }
 
+# An active hold re-held with the same reason keeps its set time, while a new
+# reason asks a new question, so its set time moves to the re-hold.
+test_active_rehold_moves_set_time_only_for_a_new_reason() {
+  local home id
+  home=$(make_home hold-rehold-time)
+  id=sample-rehold-call
+  FM_CAPTAIN_HOLD_NOW=2026-07-01T09:00:00Z run_captain "$home" hold "$id" --title "Rehold call" \
+    --reason "captain rehold choice pending" --repo sample >/dev/null \
+    || fail "could not hold the rehold call"
+  FM_CAPTAIN_HOLD_NOW=2026-07-05T09:00:00Z run_captain "$home" hold "$id" \
+    --reason "captain rehold choice pending" >/dev/null \
+    || fail "could not repeat the rehold call with the same reason"
+  assert_contains "$(tasks_in "$home" show "$id" --full)" 'Captain hold set: 2026-07-01T09:00:00Z' \
+    "a same-reason re-hold moved the set time"
+  FM_CAPTAIN_HOLD_NOW=2026-07-09T09:00:00Z run_captain "$home" hold "$id" \
+    --reason "captain rehold choice changed (new question)" >/dev/null \
+    || fail "could not re-hold the rehold call with a new reason"
+  assert_contains "$(tasks_in "$home" show "$id" --full)" 'Captain hold set: 2026-07-09T09:00:00Z' \
+    "a new-reason re-hold kept the old set time"
+  FM_CAPTAIN_HOLD_NOW=2026-07-12T09:00:00Z run_captain "$home" hold "$id" \
+    --reason "captain rehold choice changed (new question)" >/dev/null \
+    || fail "could not repeat the encoded reason"
+  assert_contains "$(tasks_in "$home" show "$id" --full)" 'Captain hold set: 2026-07-09T09:00:00Z' \
+    "a same encoded-reason re-hold moved the set time"
+  pass "an active re-hold moves its set time only for a new reason"
+}
+
 # Re-holding released work starts a new lifecycle, so the previous call's
 # choices never resurface on the new card; an origin and choices coexist.
 test_new_hold_lifecycle_starts_without_old_choices() {
@@ -5612,6 +5639,7 @@ test_archived_answered_hold_still_satisfies_the_gate
 test_archived_answer_in_a_user_configured_archive_satisfies_the_gate
 test_hold_records_options_and_links
 test_hold_refuses_malformed_choices
+test_active_rehold_moves_set_time_only_for_a_new_reason
 test_new_hold_lifecycle_starts_without_old_choices
 test_bearings_carries_hold_answers_and_notes
 test_board_comment_on_an_option_card_does_not_close_the_call
