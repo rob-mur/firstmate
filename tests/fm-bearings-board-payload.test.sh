@@ -1973,6 +1973,34 @@ test_a_later_question_beats_a_later_list_lead_in() {
   pass "a later question beats a later list lead-in"
 }
 
+# The wp-results-persist hold, re-held twice: its card shows only the current
+# hold's options, and PR 78, linked by its hold and named in its reason, once
+# under the hold's label.
+test_a_re_held_card_shows_its_current_options_and_each_link_once() {
+  local snap="$TMP_ROOT/snap-re-held.json" p pr=https://forgejo.clarob.uk/rob/workload-pruner/pulls/78
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq --arg pr "$pr" '.decisions_open = [
+        {id: "wp-results-persist", key: "wp-results-persist", verb: "captain-hold", owner: "(main)",
+         title: "Save stage results outside the runner cache",
+         reason: ("May a project admin apply infra/identity in PR 78 (" + $pr + ") once, so that CI can create the results bucket? The CI login does not exist yet, and a CI job must not set up its own access."),
+         choices: {options: [{value: "a", label: "Yes: an admin applies infra/identity once; CI then creates the bucket on the next main run"},
+                             {value: "b", label: "No project-wide create: an admin creates the bucket once in infra/identity too"}],
+                   links: [{target: $pr, label: "PR 78 (infra/README.md explains both roots)"},
+                           {target: $pr, label: "PR 78 (infra/README.md has the apply steps)"}],
+                   free_text: true, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/re-held.json"
+  validates "$TMP_ROOT/re-held.json" || fail "the payload did not satisfy the validator"
+  assert_equals "a,b" \
+    "$(jq -r '.captains_call[] | select(.key == "wp-results-persist") | [.options[].value] | join(",")' <<<"$p")" \
+    "the card shows only the current hold's options"
+  assert_equals "1|PR 78 (infra/README.md explains both roots)" \
+    "$(jq -r --arg pr "$pr" '.captains_call[] | select(.key == "wp-results-persist") | [.links[] | select(.url == $pr)] | "\(length)|\(.[0].label)"' <<<"$p")" \
+    "the card links PR 78 once, under its first label"
+  pass "a re-held card shows its current options and each link once"
+}
+
 # A YouTrack link that ends a reason after its options is a card link labelled
 # by its issue id, never about text.
 test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link() {
@@ -2283,6 +2311,7 @@ fm_test_run \
   test_a_leading_question_beats_a_later_list_lead_in \
   test_a_later_question_beats_a_later_list_lead_in \
   test_a_secondmate_question_after_its_context_is_asked \
+  test_a_re_held_card_shows_its_current_options_and_each_link_once \
   test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
   test_equals_options_and_trailing_links_and_paths_leave_the_about \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \
