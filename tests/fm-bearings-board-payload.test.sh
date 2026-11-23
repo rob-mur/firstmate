@@ -652,11 +652,11 @@ test_a_lapsed_time_gate_returns_the_hold_to_captains_call() {
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   assert_equals "lapsed-wait,lapsed-ask,lapsed-mate" "$(jq -r '[.captains_call[] | select(.key | startswith("lapsed")) | .key] | join(",")' <<<"$p")" \
     "a hold whose time gate passed is a Captain's Call card"
-  assert_equals "" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "a lapsed hold is not waiting"
+  assert_equals "later" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "a lapsed hold is not waiting"
   assert_equals "" "$(jq -r '[.charted[] | select(.id | startswith("lapsed") or startswith("mate-lapsed")) | .id] | join(",")' <<<"$p")" \
     "a lapsed hold is not charted"
-  assert_equals "later|until 2999-01-01: Waiting on devops" "$(jq -r '.charted[] | select(.id == "later") | "\(.id)|\(.reason)"' <<<"$p")" \
-    "a hold dated in the future is still charted with its date"
+  assert_equals "later|until 2999-01-01: Waiting on devops" "$(jq -r '.waiting[] | select(.key == "later") | "\(.key)|\(.reason)"' <<<"$p")" \
+    "a hold dated in the future is still a waiting row with its date"
   assert_contains "$(jq -r '.captains_call[] | select(.key == "lapsed-wait") | .question' <<<"$p")" "2020-01-01" \
     "a lapsed card that does not ask names its passed date in its question"
   assert_equals "Which rollout should we use?|a,b" "$(jq -r '.captains_call[] | select(.key == "lapsed-ask") | "\(.question)|\([.options[].value] | join(","))"' <<<"$p")" \
@@ -665,7 +665,7 @@ test_a_lapsed_time_gate_returns_the_hold_to_captains_call() {
   validates "$TMP_ROOT/lapsed-payload.json" || fail "a payload with lapsed hold cards did not satisfy the board validator"
   out=$(build_checks "$TMP_ROOT/lapsed-payload.json")
   assert_not_contains "$out" "undecided-card: lapsed" "the build refused a lapsed hold card: $out"
-  pass "a hold whose time gate passed returns to Captain's Call and a future one stays charted"
+  pass "a hold whose time gate passed returns to Captain's Call and a future one waits with its date"
 }
 
 test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards() {
@@ -679,8 +679,8 @@ test_a_wait_or_park_hold_moves_to_the_waiting_group_and_questions_lead_cards() {
         {id: "q2", key: "q2", verb: "captain-hold", title: "Pick a name", reason: "Choose the public name", owner: "(main)"}]' \
     "$TMP_ROOT/snap.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
-  assert_equals "w1,w2" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "waits and parks go to the waiting group, in snapshot order"
-  assert_equals "until 2026-12-01: needs a call" "$(jq -r '.charted[] | select(.id == "w3") | .reason' <<<"$p")" "a hold dated in the future is charted with its date"
+  assert_equals "w1,w2,w3" "$(jq -r '[.waiting[].key] | join(",")' <<<"$p")" "waits, parks and future-dated holds go to the waiting group"
+  assert_equals "until 2026-12-01: needs a call" "$(jq -r '.waiting[] | select(.key == "w3") | .reason' <<<"$p")" "a hold dated in the future waits with its date"
   assert_equals "alpha-fix,old-row,q1,q2" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "a reason with a question mark, or no wait wording, stays a decision card"
   assert_equals "Parked for the weekend; resume Monday" "$(jq -r '.waiting[0].reason' <<<"$p")" "a waiting row carries its hold reason"
   assert_equals "Forge ops" "$(jq -r '.waiting[0].title' <<<"$p")" "a waiting row carries its task title"
@@ -704,8 +704,8 @@ test_a_released_hold_is_not_a_decision_card() {
     "$TMP_ROOT/snap.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   assert_equals "r1,r5" "$(jq -r '[.captains_call[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "an active hold and a lapsed dated hold stay decision cards"
-  assert_equals "" "$(jq -r '[.waiting[] | select(.key | test("^r[0-9]$")) | .key] | join(",")' <<<"$p")" "a hold dated in the future is not waiting"
-  assert_equals "r4|false|until 2999-01-01: Pick the plan" "$(jq -r '.charted[] | select(.id == "r4") | "\(.id)|\(.dispatchable)|\(.reason)"' <<<"$p")" "a hold dated in the future is charted next with its date, never a card"
+  assert_equals "r4|until 2999-01-01: Pick the plan" "$(jq -r '.waiting[] | select(.key | test("^r[0-9]$")) | "\(.key)|\(.reason)"' <<<"$p")" "a hold dated in the future waits with its date, never a card"
+  assert_equals "" "$(jq -r '[.charted[] | select(.id == "r4") | .id] | join(",")' <<<"$p")" "a hold dated in the future is not charted"
   assert_equals "0" "$(jq -r '[.. | objects | select(.key? == "r2" or .key? == "r3")] | length' <<<"$p")" "a released hold appears nowhere on the board"
   pass "a released hold does not render as a decision card"
 }
@@ -958,6 +958,15 @@ test_a_past_tense_worker_option_keeps_its_verb() {
     "$(jq -r '.captains_call[] | select(.key == "status.gcloud.login") | [.options[].label] | join("|")' <<<"$p")" "a past-tense verb stays as it is and a present one takes its s"
   printf '%s\n' "$p" > "$TMP_ROOT/past-tense-payload.json"
   validates "$TMP_ROOT/past-tense-payload.json" || fail "a payload with past-tense options did not satisfy the board validator"
+  # A regular -ed verb after "(a) recommended: I" stays past tense, never "removeds".
+  jq '.decisions_open = [
+        {id: "prek", key: "status.prek.prek-shim", task: "prek", decision_key: "prek-shim", source: "status", verb: "needs-decision", title: "prek", reason: "Will you clear the stale prek hook copies so I can commit the 13 fixes for MR 900? The shared hooks dir holds pre-commit.legacy, commit-msg.legacy and pre-push.legacy, so the commit fails. (a) recommended: I removed the three .legacy files there (or ran prek install -f for pre-commit, commit-msg and pre-push), carry on; (b) you may remove those three .legacy files yourself, then carry on; (c) wait", owner: "(main)"}]' \
+    "$TMP_ROOT/past-tense-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "a|The worker removed the three .legacy files there (or ran prek install -f for pre-commit, commit-msg and pre-push), carry on" \
+    "$(jq -r '.captains_call[] | select(.key == "status.prek.prek-shim") | "\(.recommend_value)|\(.options[0].label)"' <<<"$p")" \
+    "a regular past-tense verb keeps its form and the recommended option stays the recommendation"
+  assert_not_contains "$p" "removeds" "a past-tense verb took a present-tense s"
   pass "a past-tense worker option keeps its verb"
 }
 
@@ -1253,7 +1262,7 @@ test_page_live_lines_fold_their_links_into_the_mr_card() {
   pass "page-live lines fold their links into the matching MR card"
 }
 
-test_a_secondmate_dated_hold_is_charted_with_its_date() {
+test_a_secondmate_dated_hold_waits_with_its_date() {
   local snap="$TMP_ROOT/sm-dated.json" p
   fresh_homes sm-dated
   write_snapshot "$TMP_ROOT/sm-dated-base.json"
@@ -1264,14 +1273,64 @@ test_a_secondmate_dated_hold_is_charted_with_its_date() {
     "$TMP_ROOT/sm-dated-base.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   assert_equals "live" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "only the live hold is a card"
-  assert_equals "home7: Explore trial measure|until 2999-11-14: Pick the trial metric|false" \
-    "$(jq -r '.charted[] | select(.id == "home7-explore-trial-measure") | "\(.title)|\(.reason)|\(.dispatchable)"' <<<"$p")" \
-    "a secondmate hold deferred to a later date is charted next with its date"
-  assert_equals "1" "$(jq '[.charted[] | select(.id == "bucket-only")] | length' <<<"$p")" "a hold the fleet dated is charted next"
-  assert_equals "0" "$(jq '.waiting | length' <<<"$p")" "a dated hold is not a waiting row"
+  assert_equals "home7: Explore trial measure|until 2999-11-14: Pick the trial metric" \
+    "$(jq -r '.waiting[] | select(.key == "home7-explore-trial-measure") | "\(.title)|\(.reason)"' <<<"$p")" \
+    "a secondmate hold deferred to a later date waits with its date"
+  assert_equals "1" "$(jq '[.waiting[] | select(.key == "bucket-only")] | length' <<<"$p")" "a hold the fleet dated waits"
+  assert_equals "0" "$(jq '[.charted[] | select(.id == "bucket-only" or .id == "home7-explore-trial-measure")] | length' <<<"$p")" "a dated hold is not charted"
   printf '%s\n' "$p" > "$TMP_ROOT/sm-dated-payload.json"
-  validates "$TMP_ROOT/sm-dated-payload.json" || fail "a payload with charted dated holds did not satisfy the board validator"
-  pass "a dated hold from any home is charted next with its date"
+  validates "$TMP_ROOT/sm-dated-payload.json" || fail "a payload with dated waiting holds did not satisfy the board validator"
+  pass "a dated hold from any home waits with its date"
+}
+
+# Every open held or in-flight task in a second mate home names what it waits
+# on: a held gate is a waiting row (with its date while that is in the future,
+# or its outside party from its reason), a second mate's in-flight child is
+# under way, and a row whose PR or MR merged leaves Under way.
+test_every_held_or_in_flight_secondmate_task_has_a_row() {
+  local snap="$TMP_ROOT/sm-cover.json" p
+  fresh_homes sm-cover
+  write_snapshot "$TMP_ROOT/sm-cover-base.json"
+  jq '.decisions_open = []
+      | .gates += [
+          {id: "pinocchio-litellm-mr", title: "LiteLLM MR", blocked_by: "-", reason: "blocked on DevOps: new service for agent access in CI", hold_kind: "external", owner: "intake", filed: "2026-11-20"},
+          {id: "gke-cp-ip-close", title: "Close the GKE control plane IP", blocked_by: "-", reason: "Soak gate before closing", hold_kind: "until", hold_until: "2999-11-26", owner: "runner-image", filed: "2026-11-20"},
+          {id: "lapsed-park", title: "Lapsed park", blocked_by: "-", reason: "Soak ended", hold_kind: "external", hold_until: "2020-01-01", owner: "runner-image", filed: "2026-11-20"},
+          {id: "lapsed-date", title: "Lapsed date", blocked_by: "-", reason: "-", hold_until: "2020-01-01", owner: "runner-image", filed: "2026-11-20"}]
+      | .in_flight += [
+          {id: "fos-rulings-research/fos-insurer-facts", name: "Insurer facts", repo: "fos", state: "done", doing: "-", kind: "ship"},
+          {id: "workload-pruner/wp-r1-i1-why", name: "R1-I1 why", repo: "wp", state: "working", doing: "reading", kind: "scout"},
+          {id: "intake/pinocchio-litellm-mr", name: "LiteLLM MR", repo: "pinocchio", state: "parked", doing: "-", kind: "ship"},
+          {id: "cd-962-main-acceptance", name: "Main acceptance", repo: "cd", state: "parked", doing: "-", kind: "ship", pr_url: "https://github.com/acme/widgets/pull/7"},
+          {id: "cd/cd-merged-child", name: "Merged child", repo: "cd", state: "parked", doing: "-", kind: "ship", pr_url: "https://github.com/acme/widgets/pull/7"},
+          {id: "cd/cd-open-child", name: "Open child", repo: "cd", state: "parked", doing: "-", kind: "ship", pr_url: "https://github.com/acme/widgets/pull/8"},
+          {id: "cd/cd-working-child", name: "Working child", repo: "cd", state: "working", doing: "fixing", kind: "ship", pr_url: "https://github.com/acme/widgets/pull/7"}]' \
+    "$TMP_ROOT/sm-cover-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "intake: LiteLLM MR|blocked on DevOps: new service for agent access in CI|pinocchio" \
+    "$(jq -r '.waiting[] | select(.key == "intake-pinocchio-litellm-mr") | "\(.title)|\(.reason)|\(.repo)"' <<<"$p")" \
+    "an external hold waits naming its outside party"
+  assert_equals "until 2999-11-26: Soak gate before closing" \
+    "$(jq -r '.waiting[] | select(.key == "runner-image-gke-cp-ip-close") | .reason' <<<"$p")" \
+    "a future-dated hold waits with its date"
+  assert_equals "Soak ended" "$(jq -r '.waiting[] | select(.key == "runner-image-lapsed-park") | .reason' <<<"$p")" \
+    "a hold whose date passed waits without a stale date"
+  assert_equals "0" "$(jq '[.charted[] | select(.id | test("litellm|gke-cp|lapsed-park"))] | length' <<<"$p")" "a held gate is not charted"
+  assert_equals "Lapsed date" "$(jq -r '.charted[] | select(.id == "lapsed-date") | .title' <<<"$p")" \
+    "a gate whose only hold was a date now past is charted work again"
+  local ids
+  ids=$(jq -r '[.underway[].id] | join(",")' <<<"$p")
+  assert_contains "$ids" "fos-rulings-research/fos-insurer-facts" "a second mate child that is done stays under way until its home cleans it up"
+  assert_contains "$ids" "workload-pruner/wp-r1-i1-why" "a second mate in-flight child is under way"
+  assert_contains "$ids" "cd/cd-open-child" "a row whose PR is still open stays under way"
+  assert_contains "$ids" "cd/cd-working-child" "a working row stays under way even when its PR merged"
+  assert_not_contains "$ids" "intake/pinocchio-litellm-mr" "a row its held gate already shows as waiting leaves Under way"
+  assert_not_contains "$ids" "cd-962-main-acceptance" "a main row whose PR merged leaves Under way"
+  assert_not_contains "$ids" "cd/cd-merged-child" "a second mate row whose PR merged leaves Under way"
+  assert_not_contains "$ids" "t2" "a main row that is done is not under way"
+  printf '%s\n' "$p" > "$TMP_ROOT/sm-cover-payload.json"
+  validates "$TMP_ROOT/sm-cover-payload.json" || fail "a payload with held-gate waiting rows did not satisfy the board validator"
+  pass "every held or in-flight second mate task has a row naming its wait"
 }
 
 test_a_round_a_newer_round_superseded_leaves_the_board() {
@@ -2455,7 +2514,8 @@ fm_test_run \
   test_a_question_after_a_merge_stays_and_a_stale_merge_ask_leaves \
   test_announcements_and_time_gates_are_not_calls_and_a_real_question_stays \
   test_page_live_lines_fold_their_links_into_the_mr_card \
-  test_a_secondmate_dated_hold_is_charted_with_its_date \
+  test_a_secondmate_dated_hold_waits_with_its_date \
+  test_every_held_or_in_flight_secondmate_task_has_a_row \
   test_a_round_a_newer_round_superseded_leaves_the_board \
   test_a_numbered_option_question_stays_a_card_when_an_option_says_until \
   test_card_links_are_labelled_by_what_they_point_at \
