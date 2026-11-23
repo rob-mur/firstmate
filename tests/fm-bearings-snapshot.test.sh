@@ -2077,6 +2077,46 @@ test_section_caps_and_expansion_flags() {
   pass "all fleet-sized sections are capped with counted opt-in expansion"
 }
 
+# A held gate (an outside wait or a future date) is the only row naming what
+# its task waits on, so --all-decisions never cuts it at the gate bound, and
+# every gate carries its hold fields for the board. An in-flight row carries
+# the PR or MR it works on, so the board can tell when it has merged.
+test_held_gates_survive_the_bound_and_rows_carry_their_pr() {
+  local home fakebin json
+  home=$(make_home held-gate-bound)
+  cat > "$home/data/backlog.md" <<'EOB'
+## In flight
+
+## Queued
+- [ ] plain-1 - Plain one (repo: firstmate) (kind: ship)
+- [ ] plain-2 - Plain two (repo: firstmate) (kind: ship)
+- [ ] plain-3 - Plain three (repo: firstmate) (kind: ship)
+- [ ] outside-wait - Outside wait (repo: firstmate) (kind: ship) (hold: blocked on DevOps: new CI service) (hold-kind: external)
+- [ ] soak-gate - Soak gate (repo: firstmate) (kind: ship) (hold: soak gate) (hold-kind: external) (hold-until: 2026-11-26)
+
+## Done
+EOB
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_BEARINGS_GATES=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '(.gates | length) == 1' >/dev/null \
+    || fail "the default gate bound did not cut the gates: $json"
+  json=$(FM_BEARINGS_GATES=1 run "$home" "$fakebin" --json --all-decisions)
+  printf '%s' "$json" | jq -e '
+    (.gates | any(.id == "outside-wait" and .hold_kind == "external"))
+    and (.gates | any(.id == "soak-gate" and .hold_until == "2026-11-26"))
+    and ([.gates[] | select((.hold_kind // "") == "" and (.hold_until // "") == "")] | length) == 1
+    and ([.omitted[].surface] | index("gates showing 3 of 5") != null)
+  ' >/dev/null || fail "--all-decisions cut a held gate or lost its hold fields: $json"
+  home=$(make_home in-flight-pr-url); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.id == "ship-task" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/9"))
+    and (.in_flight | any(.id == "scout-x" and .pr_url == null))
+  ' >/dev/null || fail "an in-flight row did not carry its PR: $json"
+  pass "held gates survive the gate bound and in-flight rows carry their PR"
+}
+
 test_pr_repository_cap_and_expansion() {
   local home fakebin json expanded
   home=$(make_home repo-caps); write_large_fixture "$home" 5
@@ -4709,6 +4749,7 @@ fm_test_run \
   test_partial_github_failure_degrades \
   test_perl_fallback_bounds_github_call \
   test_section_caps_and_expansion_flags \
+  test_held_gates_survive_the_bound_and_rows_carry_their_pr \
   test_collapsed_captain_call_deferral_and_landed \
   test_undated_hold_phrasing_and_aging_projection \
   test_blocked_deferred_hold_has_concrete_disclosure \
