@@ -50,7 +50,8 @@
 #     key, or a shared PR/MR URL), and it is dropped when no such card exists;
 #   - an unkeyed status decision whose text names, as a whole word, the task id
 #     of a captain hold in the same home announces that hold, so it is dropped
-#     and the hold card stays the one card for that call.
+#     and the hold card stays the one card for that call; so is a keyed status
+#     decision whose task is that captain-held task, so the call shows once.
 #
 # Mapping (snapshot field -> board section):
 #   decisions_open  -> captains_call: one `decision` card per captain-held task id,
@@ -649,8 +650,17 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
            and ([$s.reason_full, $s.reason, $s.question] | map(strings) | join(" ")
                 | test("(^|[^A-Za-z0-9_-])" + ($id | gsub("(?<c>[^A-Za-z0-9_-])"; "\\\(.c)"))
                        + "($|[^A-Za-z0-9_-])")));
+    # A keyed status decision of a task that is itself captain-held in the same
+    # home asks the call of that hold under another key: it is dropped, not a second
+    # card, and the hold card stays as it is.
+    def on_held_task($s; $h):
+      ($s.source // "") == "status" and ($h.verb // "") == "captain-hold"
+      and (($s.decision_key // "default") != "default")
+      and (($s.owner // "(main)") == ($h.owner // "(main)"))
+      and ((($h.id // "") | split("/") | last) as $id | $id != "" and ($s.task // "") == $id);
     ( [ $asked[] | select((.verb // "") == "captain-hold") ] ) as $asked_holds
-  | ( [ $held[] | select(. as $r | any($asked_holds[]; same_question($r; .) or names_hold($r; .))) | .key ] ) as $folded
+  | ( [ $held[] | select(. as $r | any($asked_holds[]; same_question($r; .) or names_hold($r; .) or on_held_task($r; .)))
+        | .key ] ) as $folded
   | ( [ $asked[] | . as $r
         | if ($folded | index([$r.key])) then empty
           elif ($r.verb // "") == "captain-hold" then
@@ -866,9 +876,17 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                   then .options = [ range(0; $ro | length) as $i | {value: $ro[$i].value, label: $own.options[$i].label} ]
                        | ([ range(0; $ro | length) | select($own.options[.].value == $own.recommend) ][0]) as $ri
                        | if $ri != null then .recommend_value = $ro[$ri].value else . end
-                  else .options = [ $ro[] | . as $o | (($o.label // "") | nz(null)) as $l
+                  # A recorded label that ends in "(recommended)" or "(preferred)"
+                  # marks that option as the card recommendation, and the marker
+                  # leaves the label.
+                  else "[[:space:]]*\\((?i:recommended|preferred)\\)[[:space:].;,]*$" as $mark
+                       | .options = [ $ro[] | . as $o | (($o.label // "") | nz(null)) as $l
                                     | {value: $o.value,
-                                       label: (if $l == null or $l == $o.value then ($o.value | option_words) else $l end)} ] end)
+                                       label: (if $l == null or $l == $o.value then ($o.value | option_words)
+                                               elif ($l | test($mark)) then ($l | sub($mark; "") | nz($l))
+                                               else $l end)} ]
+                       | ([ $ro[] | select((.label // "") | test($mark)) | .value ][0]) as $mv
+                       | if $mv != null then .recommend_value = $mv else . end end)
                  | del(.malformed)
             elif ($d.verb // "") == "captain-hold" and ($ch.free_text != true) then .options_inferred = true
             else . end
