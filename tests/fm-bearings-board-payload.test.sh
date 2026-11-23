@@ -958,7 +958,7 @@ test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids() {
   assert_equals "0" "$(jq '[.. | strings | select(test("corr="))] | length' <<<"$p")" "no correlation token reaches any card or waiting row"
   assert_equals "mate: wait or merge now?" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | .title' <<<"$p")" "a status card is titled by its asking sentence"
   assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | (.about | contains("PR 14 adds the simplest-prompt option") and contains("only document it in the README"))' <<<"$p")" "the full text of the question and its folded twin stays in the body"
-  assert_equals "option-a,option-b,option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | [.options[].value] | join(",")' <<<"$p")" "the card keeps the lettered choices and the twin choices"
+  assert_equals "a,b,option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | [.options[].value] | join(",")' <<<"$p")" "the card keeps the lettered choices and the twin choices"
   assert_equals "Should the rollout start on Monday?" "$(jq -r '.captains_call[] | select(.key == "hold-long") | .question' <<<"$p")" "a long hold reason gets its asking sentence as the heading"
   assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "hold-long") | (.question | length) <= 120 and (.about | length) > 400' <<<"$p")" "the heading stays short while the body keeps the full reason"
   assert_equals "waiting for the upstream release" "$(jq -r '.waiting[] | select(.key == "status.mate.w.default") | .reason' <<<"$p")" "a waiting row reads without its correlation token"
@@ -1488,19 +1488,19 @@ test_a_card_shows_every_option_its_text_refers_to_or_says_it_does_not_list_them(
      reason_full: "Stale gate stops never clear. 1) Merge word for 836. 2) Stale stops. Options: A) keep the design. B) the gate dismisses its own stop. C) a later run approves. Answer with A, B or C."}]' "$TMP_ROOT/refs-base.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
-  assert_equals "option-a,option-b,option-c" "$(card status.cd.gate-merge | jq -r '[.options[].value] | join(",")')" \
+  assert_equals "a,b,c" "$(card status.cd.gate-merge | jq -r '[.options[].value] | join(",")')" \
     "the options A, B and C named only in an earlier line of the same decision are on the card"
   assert_equals "A) Keep the design; 837 prevents new false stops, and the one stale stop needs a single dismissal" \
-    "$(card status.cd.gate-merge | jq -r '.options[] | select(.value == "option-a") | .label')" "a taken-over option keeps its mark and its full text"
+    "$(card status.cd.gate-merge | jq -r '.options[] | select(.value == "a") | .label')" "a taken-over option keeps its mark and its full text"
   assert_equals "from an earlier message on this question" \
-    "$(card status.cd.gate-merge | jq -r '.options[] | select(.value == "option-c") | .hint')" "a taken-over option says it came from an earlier message"
+    "$(card status.cd.gate-merge | jq -r '.options[] | select(.value == "c") | .hint')" "a taken-over option says it came from an earlier message"
   assert_equals "null" "$(card status.cd.gate-merge | jq -c .malformed)" "a card whose options were recovered is not marked"
   assert_equals "This question refers to options A, B and C, which it does not list; answer in your own words." \
     "$(card status.cd.gate-lost | jq -r .malformed)" "a card that refers to options no line lists says so"
   assert_equals "true" "$(card status.cd.gate-lost | jq '.allow_freeform')" "a marked card still takes a free-text answer"
-  assert_equals "0" "$(card status.cd.gate-lost | jq '[.options[].value | select(test("^option-[a-c]$"))] | length')" \
+  assert_equals "0" "$(card status.cd.gate-lost | jq '[.options[].value | select(test("^[a-c]$"))] | length')" \
     "a marked card offers no buttons for the options it cannot show"
-  assert_equals "option-a,option-b,option-c" "$(card status.cd.gate-same | jq -r '[.options[].value | select(test("^option-[a-c]$"))] | join(",")')" \
+  assert_equals "a,b,c" "$(card status.cd.gate-same | jq -r '[.options[].value | select(test("^[a-c]$"))] | join(",")')" \
     "lettered options in the same line beside a numbered list are on the card"
   assert_equals "null" "$(card status.cd.gate-same | jq -c '[.options[] | select(.hint)] | first')" "options from the current line need no hint"
   printf '%s\n' "$p" > "$TMP_ROOT/refs-payload.json"
@@ -1524,11 +1524,11 @@ test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer() {
     "$TMP_ROOT/rec-eq-base.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   card=$(jq -c '.captains_call[] | select(.key == "status.bcr-dec10-grill.grill-bcr-r1")' <<<"$p")
-  assert_equals "option-a|option-b|option-c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" \
+  assert_equals "a|b|c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" \
     "the options A, B and C written as A = ... are the card's buttons: $card"
   assert_equals "Dry-run beta, no writes anywhere, on in prod behind Beta (~6 tickets: flag+upload/parse [APP-5860 rewritten, dummy page dropped], match+notice dry run, outcome CSV, money rows, policy prompt, link prompt)|A + Confirm in dev/stg (one-way doors, stretch)|Skeleton only" \
     "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "each option keeps its full text without the rec mark"
-  assert_equals "option-a" "$(jq -r '.recommend_value // "none"' <<<"$card")" "the option marked rec is the recommendation"
+  assert_equals "a" "$(jq -r '.recommend_value // "none"' <<<"$card")" "the option marked rec is the recommendation"
   assert_equals "bcr-dec10-grill: Q1 what does BCR ship on 10 Dec?" "$(jq -r .title <<<"$card")" "the question heads the card"
   assert_equals "true" "$(jq -r .allow_freeform <<<"$card")" "the card takes a free-text answer"
   jq -e '.about | test("Facts: APP-5860 not built") and (test(" = ") | not)' <<<"$card" >/dev/null \
@@ -1633,7 +1633,7 @@ test_a_sentence_addressed_to_firstmate_never_reaches_the_card() {
   jq -e '[.options[] | .label] == ["Post 1, 2, 3, 4, 6 with request changes", "Post 1-4 and 6-10 (adds the test gaps)", "Post all 12", "Post none"]' <<<"$card" >/dev/null \
     || fail "the MR 879 card did not keep its four options intact: $card"
   for key in status.aegis-879-review.mr879-comments status.runner-fuse.runner-fuse-apply status.cd-forge-arm.captain-hold-cd-forge-arm-lab-1; do
-    assert_equals "option-a" "$(jq -r --arg k "$key" '.captains_call[] | select(.key == $k) | .recommend_value' <<<"$p")" \
+    assert_equals "a" "$(jq -r --arg k "$key" '.captains_call[] | select(.key == $k) | .recommend_value' <<<"$p")" \
       "the (a, recommended) option is the recommendation of $key"
   done
   card=$(jq -c '.captains_call[] | select(.key == "status.sweep.logs")' <<<"$p")
@@ -1677,6 +1677,22 @@ PDM_LINE="needs-decision [key=captain-hold-pdm-registry-ns-1] [at=1795093479]: c
 
 # real_line_card <name> <task> <line>: the card the payload makes from one real
 # status line of <task>, after the payload validated.
+# A lettered question answers as its letters: the card's choice values are
+# a, b, c, d as the question names them, never the parser's option-a.
+MR900_LINE="needs-decision [at=1795442310]: Review of https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/900 is done and nothing is posted (summary: /home/rob/repos/firstmate/data/APP-5999-bcr-flags/review-900-summary.md; 16 held, no crash or data defect, design good, verdict COMMENT). Which held comments should I post as one COMMENT review? (a) recommended: the 13 unique ones, #1-7, #9-13 and #15, dropping duplicates #8, #14 and #16; (b) all 16 as held; (c) only the review-me three, #1-3; (d) none, and instead fix them on the branch myself"
+MR891_LINE="needs-decision [at=1795430298] [key=mr891-comments]: After reading page:understand-mr891 (live on the board, built on the current MR head 6342f52d, with your three earlier answers kept), which of my 37 held review comments should I post on MR 891, where the recommended 9 cover its five small runtime defects plus wrong guard ticket markers, silently dropped status inputs, a missing default-date test and stale guard-ticket steps? (a, recommended) Post the recommended 9: 3, 4, 7, 8, 9, 10, 11, 22, 36. (b) Post none. (c) Post all 37 held comments. https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/891"
+
+test_lettered_options_answer_as_their_letters() {
+  local card
+  card=$(real_line_card letters-mr900 APP-5999-bcr-flags "${MR900_LINE/\]: /] [key=default]: }")
+  assert_equals "a|b|c|d|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "MR 900: letter values and recommendation"
+  assert_equals "All 16 as held" "$(jq -r '.options[] | select(.value == "b") | .label' <<<"$card")" "MR 900: a letter keeps its label"
+  card=$(real_line_card letters-mr891 aegis-891-review "$MR891_LINE")
+  assert_equals "a|b|c|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "MR 891: letter values and recommendation"
+  assert_equals "Post the recommended 9: 3, 4, 7, 8, 9, 10, 11, 22, 36" "$(jq -r '.options[] | select(.value == "a") | .label' <<<"$card")" "MR 891: a letter keeps its label"
+  pass "lettered options answer as their letters, never option-a"
+}
+
 real_line_card() {
   local name=$1 task=$2 line=$3 key reason p
   key=$(sed -n 's/.*\[key=\([^]]*\)\].*/\1/p' <<<"$line")
@@ -1731,12 +1747,12 @@ test_a_long_asking_sentence_is_headed_by_the_clause_that_asks() {
 test_an_a_recommended_colon_option_is_the_recommendation() {
   local card
   card=$(real_line_card rec-mr879 aegis-879-review "$MR879_LINE")
-  assert_equals "option-a" "$(jq -r .recommend_value <<<"$card")" "(a) recommended: is the recommendation"
+  assert_equals "a" "$(jq -r .recommend_value <<<"$card")" "(a) recommended: is the recommendation"
   assert_equals "1,2,3,4 with Approve|1,2,3,4 plus test gaps 6-9|Another list of numbers|none" \
-    "$(jq -r '[.options[] | select(.value | startswith("option-")) | .label] | join("|")' <<<"$card")" \
+    "$(jq -r '[.options[] | select(.value | test("^[a-z]$")) | .label] | join("|")' <<<"$card")" \
     "the labels carry no recommended:"
   card=$(real_line_card rec-deploy immich-runner-dns-bump "$DEPLOY_LINE")
-  assert_equals "option-a" "$(jq -r .recommend_value <<<"$card")" "(a) recommended: is the recommendation"
+  assert_equals "a" "$(jq -r .recommend_value <<<"$card")" "(a) recommended: is the recommendation"
   jq -e '[.options[].label] | (.[0] | startswith("Deploy at the first minute")) and (map(test("recommended"; "i")) | any | not)' \
     <<<"$card" >/dev/null || fail "an option label kept recommended:: $card"
   pass "an (a) recommended: option is the recommendation"
@@ -1768,13 +1784,13 @@ EOF_LINE
 test_the_last_option_ends_at_its_own_words() {
   local card
   card=$(real_line_card last-887 aegis-887-review "$MR887_LINE")
-  assert_equals "Post none" "$(jq -r '.options[] | select(.value == "option-d") | .label' <<<"$card")" "887: option d"
+  assert_equals "Post none" "$(jq -r '.options[] | select(.value == "d") | .label' <<<"$card")" "887: option d"
   jq -e '[.title, .question, .about, .context.reason, (.options[].label)] | map(. // "") | any(test("Firstmate[:,]")) | not' \
     <<<"$card" >/dev/null || fail "a note to firstmate after a link reached the card: $card"
   card=$(real_line_card last-887p aegis-887-review "$MR887_POINTERS_LINE")
-  assert_equals "Post none" "$(jq -r '.options[] | select(.value == "option-d") | .label' <<<"$card")" "887 pointers: option d"
+  assert_equals "Post none" "$(jq -r '.options[] | select(.value == "d") | .label' <<<"$card")" "887 pointers: option d"
   card=$(real_line_card last-888p aegis-888-review "$MR888_POINTERS_LINE")
-  assert_equals "Post nothing" "$(jq -r '.options[] | select(.value == "option-d") | .label' <<<"$card")" "888 pointers: option d"
+  assert_equals "Post nothing" "$(jq -r '.options[] | select(.value == "d") | .label' <<<"$card")" "888 pointers: option d"
   pass "the last option ends at its own words"
 }
 
@@ -1785,7 +1801,7 @@ test_both_recommended_marks_reach_the_card() {
   for name in 887 888; do
     if [ "$name" = 887 ]; then line=$MR887_LINE; else line=$MR888_LINE; fi
     card=$(real_line_card "rec2-$name" "aegis-$name-review" "$line")
-    assert_equals "option-a" "$(jq -r .recommend_value <<<"$card")" "$name: option a is the recommendation"
+    assert_equals "a" "$(jq -r .recommend_value <<<"$card")" "$name: option a is the recommendation"
     jq -e '[.options[].label] | map(test("recommended"; "i")) | any | not' <<<"$card" >/dev/null \
       || fail "$name: an option label kept the recommended mark: $card"
   done
@@ -2101,10 +2117,10 @@ BCR_TEXTS_LINE="needs-decision [key=bcr-ticket-texts] [at=1795103927]: Can I pos
 test_equals_options_and_trailing_links_and_paths_leave_the_about() {
   local card
   card=$(real_line_card bcr-texts bcr-dec10-grill "$BCR_TEXTS_LINE")
-  assert_equals "option-a|option-b|option-c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "texts: option values"
+  assert_equals "a|b|c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "texts: option values"
   assert_equals "Post all as written|Post with edits you write on the page|hold" \
     "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "texts: option labels"
-  assert_equals "option-a" "$(jq -r .recommend_value <<<"$card")" "texts: recommendation"
+  assert_equals "a" "$(jq -r .recommend_value <<<"$card")" "texts: recommendation"
   assert_equals "Can I post these BCR ticket changes to YouTrack? The change creates two tickets, rewrites APP-5861 to APP-5871, renames APP-5868 and moves the links from APP-5860 to the new Confirm ticket." \
     "$(jq -r '[.question, .about] | map(. // "") | map(select(length > 0)) | join(" ")' <<<"$card")" "texts: about"
   assert_equals "APP-5860 APP-5861 APP-5862 APP-5863 APP-5864 APP-5865 APP-5866 APP-5867 APP-5868 APP-5869 APP-5870 APP-5871 APP-6000" \
@@ -2135,7 +2151,7 @@ test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about() {
   card=$(real_line_card cd930-status cd-930-members-key "$CD930_LINE")
   jq -e --arg c "$cmd" --arg g "$guard" '.about | contains($c) and contains($g)' <<<"$card" >/dev/null \
     || fail "status: the about lost the apply command or its guard: $card"
-  assert_equals "option-a|option-b|option-a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "status: options"
+  assert_equals "a|b|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "status: options"
   fresh_homes cd930-hold
   write_snapshot "$TMP_ROOT/cd930-hold-base.json"
   snap="$TMP_ROOT/cd930-hold.json"
@@ -2171,14 +2187,14 @@ MR821_LINE='needs-decision [at=1795104252] [key=default]: Which held !821 review
 test_option_x_colon_marks_are_the_card_options() {
   local card
   card=$(real_line_card mr821 aegis-821-review "$MR821_LINE")
-  assert_equals "option-a|option-b|option-c|option-d" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "821: option values"
+  assert_equals "a|b|c|d" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "821: option values"
   assert_equals "Post a Comment with #3, #4 and #6 to #14, and drop #1, #2 and #5|Post all 14|Post the numbers you list|Post none" \
     "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "821: option labels"
-  assert_equals "option-a" "$(jq -r '.recommend_value // "none"' <<<"$card")" "821: recommendation"
+  assert_equals "a" "$(jq -r '.recommend_value // "none"' <<<"$card")" "821: recommendation"
   jq -e '(.about | endswith("in place if you want them checked. I post nothing until you answer.")) and (.about | test("Option [a-d]") | not)' <<<"$card" >/dev/null \
     || fail "821: the about lost its last sentence or kept an option: $card"
   card=$(real_line_card mr821-caps aegis-821-review "$(sed 's/Option a is my recommendation:/OPTION A IS MY RECOMMENDATION:/; s/Option b:/option B:/' <<<"$MR821_LINE")")
-  assert_equals "option-a|option-b|option-c|option-d|option-a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "821: any case"
+  assert_equals "a|b|c|d|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "821: any case"
   pass "option x colon marks are the card options"
 }
 
@@ -2194,21 +2210,21 @@ AEGIS_REL_LINE='needs-decision [key=default] [at=1795169167]: Ship today'"'"'s r
 test_option_x_parenthesised_recommendation_marks_are_the_card_options() {
   local card
   card=$(real_line_card bcr-r6 bcr-dec10-grill "$BCR_R6_LINE")
-  assert_equals "option-a|option-b|option-c|option-a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "bcr r6: options and recommendation"
+  assert_equals "a|b|c|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "bcr r6: options and recommendation"
   jq -e '(.options[0].label | contains("one ticket of about 3 days")) and (.options[1].label | contains("the changes you choose per question"))
          and (.options[2].label == "As a, but book every payment, even ones a handler already booked by hand")
          and (.question == "Shall APP-5861 be built with the recommended answer (a) to all five questions on page bcr-5861?")' <<<"$card" >/dev/null \
     || fail "bcr r6: the labels or the question are not the reason's: $card"
   card=$(real_line_card aegis-rel aegis-release-mrs "$AEGIS_REL_LINE")
-  assert_equals "option-a|option-b|option-c|option-a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: options and recommendation"
+  assert_equals "a|b|c|a" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: options and recommendation"
   assert_equals "Merge !878 and !898 first, cut a new version and redo staging and UAT today (no prod gain)|Hold today's release for the claim-status set (not achievable today)" \
     "$(jq -r '[.options[1:][].label] | join("|")' <<<"$card")" "aegis release: option labels"
   jq -e '.options[0].label | startswith("After the staging UAT go-ahead, promote 2.64.0 to prod;")' <<<"$card" >/dev/null \
     || fail "aegis release: the recommended label lost its text or kept its mark: $card"
   card=$(real_line_card aegis-rel-pref aegis-release-mrs "$(sed 's/Option A (recommended):/Option A:/; s/Option B:/option b (PREFERRED):/' <<<"$AEGIS_REL_LINE")")
-  assert_equals "option-a|option-b|option-c|option-b" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: (preferred)"
+  assert_equals "a|b|c|b" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: (preferred)"
   card=$(real_line_card aegis-rel-mine aegis-release-mrs "$(sed 's/Option A (recommended):/Option A:/; s/Option C:/Option C (My Recommendation):/' <<<"$AEGIS_REL_LINE")")
-  assert_equals "option-a|option-b|option-c|option-c" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: (my recommendation)"
+  assert_equals "a|b|c|c" "$(jq -r '[.options[].value, .recommend_value] | join("|")' <<<"$card")" "aegis release: (my recommendation)"
   pass "option x parenthesised recommendation marks are the card options"
 }
 
@@ -2221,7 +2237,7 @@ MR898_LINE='needs-decision [key=mr898-gate] [at=1795422660]: The gate found no g
 test_inline_letter_equals_options_are_the_card_options() {
   local card
   card=$(real_line_card mr898 APP-4132-tests-unit-rename "$MR898_LINE")
-  assert_equals "option-a|option-b|option-c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "898: option values"
+  assert_equals "a|b|c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "898: option values"
   assert_equals "Mark ready and merge under the single-reviewer route (re-run the gate once ready to get the official AUTO_APPROVE first)|Fix the gaps first (none found; the only arguable hunk is app/pyrightconfig.json, which is not a test file)|Leave it as Draft" \
     "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "898: option labels"
   card=$(real_line_card eq-tokens eq-tokens 'needs-decision [key=eq-tokens] [at=1795422660]: The gate stopped with key=mr898 at=08:31Z; the log is at https://ci.example.com/job?x=1&y=2 and a=1 b=2 is set, so what next?')
@@ -2232,7 +2248,7 @@ test_inline_letter_equals_options_are_the_card_options() {
 test_inline_bare_letter_options_are_the_card_options() {
   local card
   card=$(real_line_card aegis-848-recheck aegis-848-recheck 'needs-decision [key=default] [at=1795422660]: On aegis MR 848 (https://gitlab.example/app/aegis/-/merge_requests/848), the author fixed your comment-length and test-gap threads but has not replied to or changed anything for your same-tab early-navigation QA gap or your description-rewrite request, so should I a) draft follow-up replies on those two threads (plus the give-up behaviour question) for your approval before anything is posted, b) build the understand page anyway, or c) leave the MR as it is?')
-  assert_equals "option-a|option-b|option-c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "848: option values"
+  assert_equals "a|b|c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "848: option values"
   assert_equals "Draft follow-up replies on those two threads (plus the give-up behaviour question) for your approval before anything is posted|Build the understand page anyway|Leave the MR as it is" \
     "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "848: option labels"
   jq -e '(.question | test("[a-c]\\) ") | not) and (.question | endswith("?"))' <<<"$card" >/dev/null \
@@ -2263,10 +2279,10 @@ test_a_secondmate_decision_is_answerable_from_its_card() {
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
   assert_equals "Main on armed repos only lets the pipeline push, so the re-run must either" "$(card status.pruner.diag | jq -r .question)" "a decision label is not part of the heading"
-  assert_equals "option-a|option-b" "$(card status.pruner.diag | jq -r '[.options[].value] | join("|")')" "the lettered options are the choices"
+  assert_equals "a|b" "$(card status.pruner.diag | jq -r '[.options[].value] | join("|")')" "the lettered options are the choices"
   card status.pruner.diag | jq -e '.about | test("PR 40 stays open") and (test("Captain call") | not)' >/dev/null \
     || fail "the about kept the decision label of the sentence the heading took: $(card status.pruner.diag | jq -r .about)"
-  assert_equals "option-a" "$(card status.pruner.diag | jq -r .recommend_value)" "the option marked recommended is the recommendation"
+  assert_equals "a" "$(card status.pruner.diag | jq -r .recommend_value)" "the option marked recommended is the recommendation"
   assert_equals "Push the seed with the pipeline token, which is never the admin token" "$(card status.pruner.diag | jq -r '.options[0].label')" "the recommendation note is not part of the option label"
   for k in status.pruner.tiers status.pruner.viewer status.pruner.calls; do
     assert_equals '{"options":[],"allow_freeform":false,"question":null}' "$(card "$k" | jq -c '{options, allow_freeform, question}')" "a page-backed decision shows only its page link"
@@ -2417,4 +2433,5 @@ fm_test_run \
   test_option_x_colon_marks_are_the_card_options \
   test_option_x_parenthesised_recommendation_marks_are_the_card_options \
   test_inline_letter_equals_options_are_the_card_options \
-  test_inline_bare_letter_options_are_the_card_options
+  test_inline_bare_letter_options_are_the_card_options \
+  test_lettered_options_answer_as_their_letters
