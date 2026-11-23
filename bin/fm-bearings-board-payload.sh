@@ -501,7 +501,11 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # It drops each URL with the word before it, except a link its own kind word
   # leads, which shows as its number ("deploy X (PR 133)?").
   # An asking sentence too long to show whole that ends in a clause which asks
-  # ("..., so how should I deploy X?") is cut to that clause, whole; one that
+  # ("..., so how should I deploy X?") is cut to that clause, whole.
+  # A comma-led relative clause (", which ...", ", who ...", ", that ...") only
+  # qualifies the clause before it, so it is never that asking clause; a too-long
+  # sentence ending in one is cut to the main clause before it ("Shall I merge
+  # PR 29, which makes ...?" reads "Shall I merge PR 29?"). One that
   # ends in a parenthesis drops that parenthesis whole ("Which comments should
   # go on MR 887 (verdict: ...)?" reads "... on MR 887?"), and a cut never
   # ends inside a parenthesis that closes right before the "?".
@@ -518,9 +522,16 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?](?: (?=[?]))?"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
       | if length > $n and endswith("?") then
-          ([match("(?:[,;]|[[:space:]]-) (?:(?:so|and|but|then|now|or) )?(?<q>(?:how|what|which|who|when|where|why|whether|should|shall|can|could|will|would|do|does|did|is|are|may|must|might) [^,;]*[?])$"; "i")][0]
+          ([match("(?:,(?! (?:which|who|that) )|;|[[:space:]]-) (?:(?:so|and|but|then|now|or) )?(?<q>(?:how|what|which|who|when|where|why|whether|should|shall|can|could|will|would|do|does|did|is|are|may|must|might) [^,;]*[?])$"; "i")][0]
            | .captures[0].string // null) as $c
           | if $c != null and ($c | length) <= $n then $c | cap else . end
+        else . end
+      | if length > $n and endswith("?") then
+          . as $s
+          | ([ match(", (?=(?:which|who|that) )"; "gi").offset
+               | select(($s[:.] | [scan("[(]")] | length) == ($s[:.] | [scan("[)]")] | length))
+               | select($s[. + 2:] | gsub("\\([^()]*\\)"; "") | test("[,;]") | not) ] | min) as $o
+          | if $o != null and $o > 0 then $s[:$o] + "?" else . end
         else . end
       | if length > $n and test("[^[:space:]][[:space:]]*\\([^()]*\\)[?]$") then
           (sub("[[:space:]]*\\([^()]*\\)[?]$"; "") + "?") as $a

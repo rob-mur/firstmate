@@ -1846,6 +1846,20 @@ test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary() {
   pass "a too long asking sentence is cut at a clause boundary"
 }
 
+FOS29_LINE="needs-decision [key=merge-pr-29] [at=1795100000]: Shall I merge fos-rulings-research PR 29 (https://github.com/rob-mur/fos-rulings-research/pull/29), which makes its main run judge the same 27 tests the nightly eval judges (all 8 checks green)? (a, recommended) merge it. (b) hold it."
+
+# A trailing ", which ..." relative clause qualifies the clause before it, so a
+# heading cut keeps that main clause and never asks the relative clause.
+test_a_trailing_which_clause_is_never_the_question() {
+  local card
+  card=$(real_line_card which-29 fos-merge-pr-29 "$FOS29_LINE")
+  assert_equals "fos-merge-pr-29: Shall I merge fos-rulings-research PR 29?" "$(jq -r .title <<<"$card")" "29: title"
+  assert_equals "null" "$(jq -r .question <<<"$card")" "29: no second question beside the title"
+  jq -e '.about | contains("PR 29, which makes its main run judge")' <<<"$card" >/dev/null \
+    || fail "29: the about lost the relative clause the heading cut: $(jq -r .about <<<"$card")"
+  pass "a trailing which clause is never the question"
+}
+
 # A YouTrack link that ends a reason after its options is a card link labelled
 # by its issue id, never about text.
 test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link() {
@@ -2151,6 +2165,7 @@ fm_test_run \
   test_a_link_the_text_already_names_shows_no_label_in_parentheses \
   test_a_comment_link_reads_as_a_comment \
   test_a_too_long_asking_sentence_is_cut_at_a_clause_boundary \
+  test_a_trailing_which_clause_is_never_the_question \
   test_a_reason_ending_on_a_youtrack_link_keeps_it_as_a_link \
   test_equals_options_and_trailing_links_and_paths_leave_the_about \
   test_an_apply_guard_after_a_quoted_shell_command_stays_in_the_about \
