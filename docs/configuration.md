@@ -2692,6 +2692,18 @@ Firstmate passes it to `bin/fm-brief.sh --pr manual` at intake the same way it p
 The generated brief then has the worker pass `--skip pr,ci` on every `no-mistakes axi run`, write the PR title and body itself, open or update the PR with `gh-axi`, and wait for the PR's checks; `bin/fm-dod-lib.sh` owns that text.
 The token is the thin registry form of no-mistakes' own keep-text option, [kunchenguid/no-mistakes#1648](https://github.com/kunchenguid/no-mistakes/issues/1648), and is meant to map onto it once that exists.
 
+## After-merge action (data/projects.md after-merge= token)
+
+A project with no `after-merge=` token keeps today's behavior: nothing runs after a merge and cleanup is not gated.
+A project whose merged change must also reach a local checkout before it is in effect, such as a dotfiles repository that a configuration switch reads, declares one declarative step, never a shell command.
+`after-merge=ff:<absolute path>@<remote>/<branch>` fast-forwards that checkout to the remote branch, and the optional `after-merge-note=<text>` is a short instruction firstmate relays to the captain once the step has run.
+Bracket tokens cannot hold spaces, so both values are percent-encoded, for example `after-merge=ff:/home/me/repos/dotfiles@origin/main after-merge-note=run%20snrs`.
+`bin/fm-project-mode.sh`'s header owns the grammar, encoding, and refusals, and `bin/fm-project-mode.sh --after-merge <name>` reads it back.
+
+`bin/fm-pr-merge.sh` runs the step after a merge it confirmed and `bin/fm-merge-local.sh` after a local landing, both through `bin/fm-after-merge.sh`, which records the result in the task record.
+The step stops without changing the checkout when it is on another branch, has uncommitted changes, or has diverged, and it never forces, resets, or stashes.
+`bin/fm-teardown.sh` refuses to clean up a merged ship task of such a project, including one merged outside firstmate that its merge monitoring saw, until the step is recorded done, and its refusal names the commands to retry the step or to record it done by hand; `bin/fm-after-merge.sh`'s header owns those modes.
+
 ## GitHub Enterprise hosts (config/github-hosts)
 
 `config/github-hosts` is an optional local, gitignored file naming the GitHub Enterprise hosts whose pull request URLs this home accepts, one lowercase hostname per line, such as `leadsonline.ghe.com`.

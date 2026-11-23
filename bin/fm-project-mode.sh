@@ -11,6 +11,9 @@
 # default output stays the same two words for every project, bound or not.
 # With --pr it prints one word: the project's registered PR-text posture,
 # auto|manual, "auto" when the project registers none.
+# With --after-merge it prints the project's declared after-merge action as one
+# tab-separated line "ff<TAB><checkout><TAB><remote><TAB><branch><TAB><note>",
+# or nothing when the project declares none (bin/fm-after-merge.sh runs it).
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode,
@@ -34,9 +37,11 @@
 #   - <name> [<mode> forge=forgejo] - <desc> (added <date>)          -> <mode> <yolo>, --forge forgejo
 #   - <name> [direct-PR forge=external] - <desc> (added <date>)      -> direct-PR off, --forge external
 #   - <name> [no-mistakes pr=manual] - <desc> (added <date>)         -> no-mistakes off, --pr manual
+#   - <name> [direct-PR after-merge=ff:<path>@<remote>/<branch> after-merge-note=<text>] - <desc>
+#                                                                    -> --after-merge ff ...
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
-#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>, and
-#   pr=<value> are recognized by their own shape wherever they appear, and whichever token is
+#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>,
+#   pr=<value>, after-merge=<action>, and after-merge-note=<text> are recognized by their own shape wherever they appear, and whichever token is
 #   left over is the mode. <prefix> must not contain a space; an empty override
 #   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
 #   legacy "fm/<task-id>".
@@ -99,6 +104,26 @@
 #   nothing on stdout, exit status 3, the token named. --branch-prefix and
 #   --forge do not make these checks.
 #
+# after-merge (orthogonal) = a step firstmate owes after this project's task
+#   lands, declared because a project's own finishing steps otherwise belong to
+#   nobody: the worker's instructions end before the merge, and landing is
+#   generic. The one action is `ff:<path>@<remote>/<branch>`: fast-forward the
+#   local checkout at the absolute <path>, which must be on <branch>, to
+#   <remote>/<branch> after a fetch, and stop without changing it when it has
+#   uncommitted tracked changes, is on another branch, or has diverged (never a
+#   force, reset, or stash). The optional after-merge-note=<text> is a short
+#   note relayed to the captain once the action has run, such as a command
+#   only they can run. Bracket tokens cannot hold a space, so both values are
+#   percent-encoded: %20 is a space, %25 a percent sign, %5D a closing bracket,
+#   and any %XX hex pair decodes to that byte; a backslash or control character
+#   is refused. <path> is split from its target at the LAST "@", and <remote>
+#   from <branch> at the first "/". A malformed action, an unknown action kind,
+#   or a note without an action is REFUSED by --after-merge only: nothing on
+#   stdout, exit status 3, the token named. The other output forms ignore both
+#   tokens, so declaring one never changes a project's posture.
+#   bin/fm-after-merge.sh runs the action and records its result, and
+#   bin/fm-teardown.sh refuses cleanup until it has recorded done.
+#
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
 # refusal, on the captain's decision of 2026-09-15: a Gerrit Code-Review+2 is a
 # positive attributed claim that a named human approved, read by colleagues and
@@ -128,7 +153,7 @@
 # to the forge binding, so it prints even when the forge token is malformed;
 # every path that reads the forge binding (default, --forge, and spawn's
 # forge-agreement check) still refuses.
-# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>
+# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr|--after-merge] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,17 +165,20 @@ RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
 WANT_PR=0
+WANT_AFTER_MERGE=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch-prefix) BRANCH_PREFIX_QUERY=1; shift ;;
   --forge) WANT_FORGE=1; shift ;;
   --pr) WANT_PR=1; shift ;;
+  --after-merge) WANT_AFTER_MERGE=1; shift ;;
 esac
-NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr|--after-merge] <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
+  if [ "$WANT_AFTER_MERGE" -eq 1 ]; then :
+  elif [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
   elif [ "$WANT_FORGE" -eq 1 ]; then echo none
   elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
@@ -205,6 +233,8 @@ parsed=$(awk -v n="$NAME" '
         if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); continue }
         if (a[j] ~ /^forge=/) { forge = a[j]; continue }
         if (a[j] ~ /^pr=/) { pr = a[j]; continue }
+        if (a[j] ~ /^after-merge=/) { print "aftermerge", a[j]; continue }
+        if (a[j] ~ /^after-merge-note=/) { print "amnote", a[j]; continue }
         if (a[j] ~ /^[^=]+=/) {
           key = substr(a[j], 1, index(a[j], "=") - 1);
           e = dist(key, "forge");
@@ -223,7 +253,8 @@ parsed=$(awk -v n="$NAME" '
 
 if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
+  if [ "$WANT_AFTER_MERGE" -eq 1 ]; then :
+  elif [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
   elif [ "$WANT_FORGE" -eq 1 ]; then echo none
   elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
@@ -231,8 +262,12 @@ if [ -z "$parsed" ]; then
 fi
 
 posture=
+after_merge=
+after_merge_note=
 while IFS=' ' read -r kind rest; do
   case "$kind" in
+    aftermerge) after_merge=$rest ;;
+    amnote) after_merge_note=$rest ;;
     near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, or forge=external" >&2 ;;
     posture) posture=$rest ;;
   esac
@@ -251,6 +286,52 @@ case "$mode" in
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off; branch=fm/ ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
+
+# Decode one percent-encoded after-merge value (see the header). Prints the
+# decoded text, or fails on a backslash, a stray "%", or a control character.
+after_merge_decode() {  # <value>
+  local v=$1 out
+  case "$v" in *\\*) return 1 ;; esac
+  if printf '%s' "$v" | LC_ALL=C grep -Eq '%($|.$|[^0-9A-Fa-f]|.[^0-9A-Fa-f])'; then
+    return 1
+  fi
+  out=$(printf '%b' "${v//%/\\x}") || return 1
+  case "$out" in *[[:cntrl:]]*) return 1 ;; esac
+  printf '%s' "$out"
+}
+after_merge_refuse() {  # <token> <why>
+  echo "refused: after-merge token \"$1\" registered for $NAME in $REG $2; the accepted form is after-merge=ff:<absolute-path>@<remote>/<branch> with an optional after-merge-note=<text>, both percent-encoded (%20 is a space); correct the registry entry" >&2
+  exit 3
+}
+if [ "$WANT_AFTER_MERGE" -eq 1 ]; then
+  if [ -z "$after_merge" ]; then
+    [ -z "$after_merge_note" ] || after_merge_refuse "$after_merge_note" "is a note without an after-merge action"
+    exit 0
+  fi
+  am_value=${after_merge#after-merge=}
+  case "$am_value" in
+    ff:*) am_value=${am_value#ff:} ;;
+    *) after_merge_refuse "$after_merge" "names an unknown action; the only action is ff" ;;
+  esac
+  case "$am_value" in *@*/*) ;; *) after_merge_refuse "$after_merge" "has no @<remote>/<branch> target" ;; esac
+  am_path=${am_value%@*}
+  am_target=${am_value##*@}
+  am_remote=${am_target%%/*}
+  am_branch=${am_target#*/}
+  am_path=$(after_merge_decode "$am_path") || after_merge_refuse "$after_merge" "has a malformed encoding"
+  case "$am_path" in /*) ;; *) after_merge_refuse "$after_merge" "names a checkout that is not an absolute path" ;; esac
+  [ -n "$am_remote" ] && [ -n "$am_branch" ] || after_merge_refuse "$after_merge" "has an empty remote or branch"
+  git check-ref-format --branch "$am_branch" >/dev/null 2>&1 \
+    || after_merge_refuse "$after_merge" "names an invalid branch"
+  case "$am_remote" in *[!A-Za-z0-9._-]*) after_merge_refuse "$after_merge" "names an invalid remote" ;; esac
+  am_note=
+  if [ -n "$after_merge_note" ]; then
+    am_note=$(after_merge_decode "${after_merge_note#after-merge-note=}") \
+      || after_merge_refuse "$after_merge_note" "has a malformed encoding"
+  fi
+  printf 'ff\t%s\t%s\t%s\t%s\n' "$am_path" "$am_remote" "$am_branch" "$am_note"
+  exit 0
+fi
 if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
   echo "$branch"
   exit 0

@@ -2177,3 +2177,9 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+# The project's declared after-merge action runs once the task's own PR has
+# landed; bin/fm-after-merge.sh owns it, prints its own actionable line on a
+# failure, and records the result that bin/fm-teardown.sh requires.
+if [ "$IS_EXTRA" != true ] && ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-after-merge.sh" "$ID"; then
+  printf 'actionable: merged %s but its project after-merge action did not complete; cleanup stays refused until it is recorded done\n' "$URL" >&2
+fi
