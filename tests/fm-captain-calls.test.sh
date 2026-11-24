@@ -453,6 +453,77 @@ test_mate_keyless_line_does_not_shadow_a_keyed_call() {
   pass "a keyless mate line never drops the mate's keyed call, and an own keyless call stays"
 }
 
+where_firstmate() {  # <json> <key>  -> the corr of a with_firstmate[] entry, or "absent"
+  printf '%s\n' "$1" | jq -r --arg k "$2" '([.with_firstmate[]? | select(.key == $k) | .corr][0]) // "absent"'
+}
+
+# The runner-image mate replied to a marked request from main with a keyless
+# "needs-decision [corr=419fc60d0fbfec7c]" line and held its task with a reason
+# that waits on main's answer to that request. The board showed both as cards
+# for the captain; both are firstmate's.
+RI_CORR=419fc60d0fbfec7c
+test_mate_corr_reply_is_with_firstmate_not_a_call() {
+  local home out
+  home=$(make_mate_home mate-corr-reply)
+  printf 'needs-decision [corr=%s] [at=%s]: Store collector cold-store fallback scoped, nothing changed on the cluster. Recommend option A. Details and options: /srv/mm/data/gc/report.md (via-helper)\n' \
+    "$RI_CORR" "$LATER" > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" mm.default absent "a mate reply to a marked request from main"
+  assert_equals "$RI_CORR" "$(where_firstmate "$out" mm.default)" "the reply is with firstmate, with its corr"
+
+  # The bare token and the older note-head shape are replies too.
+  printf 'needs-decision corr=%s [at=%s]: Which window?\nneeds-decision [key=gc-window] [at=%s]: corr=%s Which window, again?\n' \
+    "$RI_CORR" "$LATER" "$LATER" "$RI_CORR" > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" mm.default absent "a bare corr reply"
+  expect_where "$out" mm.gc-window absent "a note-head corr reply"
+  assert_equals "$RI_CORR,$RI_CORR" \
+    "$(where_firstmate "$out" mm.default),$(where_firstmate "$out" mm.gc-window)" "both replies are with firstmate"
+  pass "a mate needs-decision that answers a marked request (corr) is with firstmate, not a captain call"
+}
+
+test_mate_hold_waiting_on_main_is_with_firstmate() {
+  local home out reason
+  reason="Waiting for the main firstmate to approve option A and its live rollout (corr=$RI_CORR)"
+  # A local mate: its backlog row holds the full reason.
+  home=$(make_mate_home mate-hold-on-main)
+  printf 'needs-decision [key=captain-hold-gc-quiet-1] [at=%s]: captain hold gc-quiet: %s\n' \
+    "$LATER" "$reason" > "$home/state/mm.status"
+  printf '## Queued\n\n- [ ] gc-quiet - Collect at a quiet hour (hold: %s) (hold-kind: captain)\n\n## Done\n' \
+    "$reason" > "$home/mm-home/data/backlog.md"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" mm.captain-hold-gc-quiet-1 absent "a mate hold waiting on main"
+  assert_equals "$RI_CORR" "$(where_firstmate "$out" mm.captain-hold-gc-quiet-1)" "the hold is with firstmate"
+  assert_equals "gc-quiet" \
+    "$(printf '%s\n' "$out" | jq -r '.with_firstmate[] | select(.key == "mm.captain-hold-gc-quiet-1") | .task')" \
+    "the entry names the held task"
+
+  # With no backlog row (a remote mate, or the row gone), the status line says it.
+  printf '## Queued\n\n## Done\n' > "$home/mm-home/data/backlog.md"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" mm.captain-hold-gc-quiet-1 absent "a mate hold waiting on main, status line only"
+  assert_equals "$RI_CORR" "$(where_firstmate "$out" mm.captain-hold-gc-quiet-1)" "the status-only hold is with firstmate"
+  pass "a mate captain hold whose reason carries a corr token is with firstmate, not a captain call"
+}
+
+test_mate_captain_decisions_without_corr_stay_calls() {
+  local home out
+  home=$(make_mate_home mate-real-calls)
+  {
+    printf 'needs-decision [at=%s]: Should the mate rotate its runner token?\n' "$LATER"
+    printf 'needs-decision [key=captain-hold-gc-pick-1] [at=%s]: captain hold gc-pick: Collect at 03:00 or 05:00?\n' "$LATER"
+    printf 'needs-decision [key=cache-size] [at=%s]: Grow the cache, as corr=%s asked, or keep it?\n' "$LATER" "$RI_CORR"
+  } > "$home/state/mm.status"
+  printf '## Queued\n\n- [ ] gc-pick - Pick the hour (hold: Collect at 03:00 or 05:00?) (hold-kind: captain)\n\n## Done\n' \
+    > "$home/mm-home/data/backlog.md"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" mm.default calls "a keyless mate question with no corr"
+  expect_where "$out" mm.captain-hold-gc-pick-1 calls "a mate hold for the captain"
+  expect_where "$out" mm.cache-size calls "a corr named in the question prose"
+  assert_equals 0 "$(printf '%s\n' "$out" | jq '.with_firstmate | length')" "nothing is with firstmate"
+  pass "mate needs-decision lines and holds with no corr reply marker stay captain calls"
+}
+
 test_mate_backlog_hold_options_are_the_call_options() {
   local home out
   home=$(make_mate_home mate-backlog-options)
@@ -835,6 +906,9 @@ fm_test_run \
   test_inline_lettered_options_leave_the_question \
   test_mate_inline_recommended_option_is_the_recommend \
   test_mate_keyless_line_does_not_shadow_a_keyed_call \
+  test_mate_corr_reply_is_with_firstmate_not_a_call \
+  test_mate_hold_waiting_on_main_is_with_firstmate \
+  test_mate_captain_decisions_without_corr_stay_calls \
   test_mate_backlog_hold_options_are_the_call_options \
   test_mate_backlog_option_letter_tags_leave_the_labels \
   test_mate_backlog_option_uppercase_letter_tags_leave_the_labels \
