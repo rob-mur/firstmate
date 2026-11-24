@@ -1075,6 +1075,28 @@ test_options_marked_after_their_text_are_the_card_choices() {
   pass "options marked after their text are the card choices, with the recommendation kept"
 }
 
+# A last option followed by " \u2014 " and the links the question cites ends
+# at the dash, so the link list never joins its label.
+test_a_last_option_ends_at_a_dash_before_links() {
+  local snap="$TMP_ROOT/dash-links.json" p card reason
+  fresh_homes dash-links
+  write_snapshot "$TMP_ROOT/dash-links-base.json"
+  reason="Will you review MR 125 then MR 126, and who posts the set -eo pipefail comment drafted in data/pinocchio-125-understand/report.md? a) the captain posts it (recommended) b) this lane posts it as a draft note $(printf '\u2014') MR 125: https://gitlab.descartesunderwriting.com/descartes-underwriting/app/pinocchio/-/merge_requests/125 MR 126: https://gitlab.descartesunderwriting.com/descartes-underwriting/app/pinocchio/-/merge_requests/126 page: page:understand-mr125 report: data/pinocchio-125-understand/report.md"
+  jq --arg r "$reason" '.decisions_open = [
+        {id: "pinocchio-125-understand", key: "status.pinocchio-125-understand.mr125-review", task: "pinocchio-125-understand", decision_key: "mr125-review", source: "status", verb: "needs-decision", title: "pinocchio-125-understand",
+         reason: $r, owner: "(main)"}]' \
+    "$TMP_ROOT/dash-links-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card=$(jq -c '.captains_call[] | select(.key == "status.pinocchio-125-understand.mr125-review")' <<<"$p")
+  assert_equals "a:The captain posts it|b:This lane posts it as a draft note" \
+    "$(jq -r '[.options[] | select(.value != "reconcile") | "\(.value):\(.label)"] | join("|")' <<<"$card")" \
+    "the link list after the dash joined the last option"
+  assert_equals "a" "$(jq -r .recommend_value <<<"$card")" "the recommended option is not the recommendation"
+  printf '%s\n' "$p" > "$TMP_ROOT/dash-links-payload.json"
+  validates "$TMP_ROOT/dash-links-payload.json" || fail "a payload whose last option ends at a dash did not validate"
+  pass "a last option ends at a dash that links follow"
+}
+
 test_a_recorded_option_marked_recommended_is_the_card_recommendation() {
   local snap="$TMP_ROOT/rec-label.json" p
   fresh_homes rec-label
@@ -2751,6 +2773,7 @@ fm_test_run \
   test_a_keyed_worker_question_on_a_held_task_does_not_make_a_second_card \
   test_a_past_tense_worker_option_keeps_its_verb \
   test_options_marked_after_their_text_are_the_card_choices \
+  test_a_last_option_ends_at_a_dash_before_links \
   test_a_recorded_option_marked_recommended_is_the_card_recommendation \
   test_an_a_recommended_hold_with_recorded_labels_is_the_recommendation \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
