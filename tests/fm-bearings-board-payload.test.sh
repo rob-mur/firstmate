@@ -483,6 +483,32 @@ test_a_hold_with_lettered_slug_options_keeps_explanations_and_lead_in() {
   pass "a hold's lettered slug options keep their explanations and a lead-in question keeps its subject"
 }
 
+# A question that opens with a verbless asking word ("What next for X, where Y
+# names?") keeps its lead-in, so a comma-led "where ..." clause before the
+# "?" is neither taken as the question nor cut away.
+test_a_question_that_opens_what_next_keeps_its_comma_led_clause() {
+  local snap p url reason
+  snap="$TMP_ROOT/snap-comma-lead-in.json"
+  url="https://forgejo.example/rob/fos-rulings-research/issues/4"
+  reason="What next for the FOS rulings steer experiments after the forced-choice run, where each steer's list of conclusions seems to act as a burden of proof on the side it names? Recommend a: ..."
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq --arg r "$reason" --arg url "$url" '.decisions_open = [
+        {id: "fos-rulings-research.captain-hold-fos-after-fourth-experiment-1",
+         key: "fos-rulings-research.captain-hold-fos-after-fourth-experiment-1",
+         verb: "captain-hold", owner: "fos-rulings-research",
+         title_full: "FOS rulings: after the fourth experiment", reason_full: $r,
+         choices: {options: [], links: [{target: $url, label: "experiment report"}],
+                   free_text: true, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/comma-lead-in.json"
+  validates "$TMP_ROOT/comma-lead-in.json" || fail "a payload with a comma-led question clause did not validate"
+  assert_equals "What next for the FOS rulings steer experiments after the forced-choice run, where each steer's list of conclusions seems to act as a burden of proof on the side it names?" \
+    "$(jq -r '.captains_call[] | select(.key == "fos-rulings-research.captain-hold-fos-after-fourth-experiment-1") | .question' <<<"$p")" \
+    "a \"What next\" question lost its lead-in or its comma-led clause"
+  pass "a question that opens \"What next\" keeps its lead-in and its comma-led clause"
+}
+
 # A hold with no recorded options, or with no link, is refused by key naming
 # what to add; a declared free-text question with --no-link builds.
 test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add() {
@@ -2552,6 +2578,7 @@ fm_test_run \
   test_a_hold_with_recorded_options_and_links_puts_them_on_its_card \
   test_a_hold_with_bare_recorded_options_shows_words_not_raw_values \
   test_a_hold_with_lettered_slug_options_keeps_explanations_and_lead_in \
+  test_a_question_that_opens_what_next_keeps_its_comma_led_clause \
   test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
   test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
