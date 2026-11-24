@@ -388,6 +388,13 @@ fm_afk_launch_enter() {
   fi
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
+  # Away with a phone channel: the board link goes to the phone once per away
+  # period (bin/fm-phone-channel.sh "THE BOARD LINK"); a failed send never
+  # undoes the entry.
+  if [ "$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$FM_AFK_LAUNCH_STATE" "$FM_AFK_LAUNCH_DIR/fm-phone-channel.sh" board-link 2>/dev/null)" = sent ]; then
+    printf 'The board link was sent to your phone channel.\n'
+  fi
+  return 0
 }
 
 # The command run inside the created terminal. Real launch runs the shared
