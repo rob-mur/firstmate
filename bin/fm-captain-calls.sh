@@ -52,8 +52,9 @@
 # inline_letter_options) has them as its options, and its question is the lead
 # up to them, ending in "?". An option the question marks recommended
 # ("a) one (recommended) b) two") is the call's recommend. A recorded option
-# whose label ends in "(recommended)" or "(preferred)" is the recommend too,
-# and the marker leaves the label.
+# whose label ends in "(recommended)" or "(preferred)", or opens with a
+# "(a, recommended)" tag, is the recommend too. The marker and any leading
+# "(a)" or "(a, recommended)" tag leave the label.
 #
 # Settled: a call that is not a decision and is already settled - every linked
 # PR/MR merged or closed, or the captain already answered it - is not a call.
@@ -371,12 +372,15 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
       | if $p == null then .
         else . + {question: $p.question, options: $p.options}
              + (if $p.recommend == null then {} else {recommend: $p.recommend} end) end end;
-  # A recorded option whose label ends in "(recommended)" or "(preferred)" is
-  # the recommendation, and the marker leaves the label.
+  # A recorded option whose label ends in "(recommended)" or "(preferred)", or
+  # opens with a "(a, recommended)" tag, is the recommendation. A leading "(a)"
+  # or "(a, recommended)" tag and a trailing marker both leave the label.
   def recommended_option:
     "[[:space:]]*\\((?i:recommended|preferred)\\)[[:space:].;,]*$" as $mark
-    | ([.options[] | select(.label | test($mark)) | .value][0]) as $mv
-    | .options = [.options[] | if (.label | test($mark)) then .label = (.label | sub($mark; "")) else . end]
+    | "^[[:space:]]*\\([A-Za-z0-9]{1,2}(?<r>[[:space:]]*[,;:][[:space:]]*(?i:recommended|preferred|rec))?\\)[[:space:]]*" as $tag
+    | def rec_tagged: test($tag) and ((capture($tag).r // "") != "");
+    ([.options[] | select((.label | test($mark)) or (.label | rec_tagged)) | .value][0]) as $mv
+    | .options = [.options[] | .label = (.label | sub($tag; "") | sub($mark; ""))]
     | if .recommend == null and $mv != null then .recommend = $mv else . end
     | .options = [.options[] | if .label == "" then .label = .value else . end]
     | .recommend = (.recommend // null);
