@@ -485,8 +485,17 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # A URL holding a placeholder ("https://host/v1/clientIds/<CLIENT_ID>:x") is
   # an address to fill in, not a link: it stays whole in the text and the part
   # before the placeholder never becomes a link.
-  | def card_urls:
-      scan("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]\"()]*")
+  # A URL given to a command ("tea login add --url https://host", "--url=...",
+  # or anywhere in a `code span`) is an argument, not a link: it stays as
+  # written in the text and never becomes a card link.
+  | def command_argument_before:
+      test("(?:^|[[:space:]])--?[A-Za-z][A-Za-z0-9-]*(?:[[:space:]]+|=)$")
+      or (([scan("`")] | length) % 2 == 1);
+    def card_urls:
+      . as $t
+      | match("(?:https://|http://dev-1\\.tailf848b0\\.ts\\.net:4387)[^[:space:]\"()]*"; "g")
+      | select($t[:.offset] | command_argument_before | not)
+      | .string
       | select(test("<[A-Za-z_][A-Za-z0-9_-]*>") | not)
       | sub("[<>].*$"; "") | sub("[.,;:!?]+$"; "");
     def link_label($u; $t):
