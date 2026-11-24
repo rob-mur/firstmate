@@ -29,7 +29,7 @@
 #          standalone.
 # open     Register the page and ask the board to refresh, which lists it and
 #          shows it in place. Refused while the folder has no page.html, because
-#          the board loads each page frame once and never reloads it. Prints the
+#          the board loads the page as soon as the captain opens it. Prints the
 #          folder like dir. Opening an already registered page keeps its folder
 #          and answers, sets the new title, and makes it live again. Exit 3 when
 #          this home has no board. Each --replaces names a standalone Lavish
@@ -125,11 +125,12 @@
 # ({id,title,opened,state,replaces,task}) plus inbox/, inbox/handled/ and
 # rung/ (one file per action key whose owning task route told, naming it).
 #
-# One refresh policy covers the whole board app: no frame ever reloads. The
-# board and each page poll their own data file and patch in place; the board
-# never re-points or reloads a page frame. A page therefore follows the
-# data-file pattern its own skill documents: page.html is written once and only
-# its data file changes.
+# One refresh policy covers the whole board app: the board and each page poll
+# their own data file and patch in place. The board loads a page frame only
+# while the captain has that page open and blanks it when they leave, so a
+# page reloads each time it is opened and never runs unseen. A page therefore
+# follows the data-file pattern its own skill documents: page.html is written
+# once and only its data file changes.
 #
 # A secondmate home has no board of its own. When it is bound to its parent
 # home over a local route (.fm-secondmate-parent) and that home has a board,
@@ -253,7 +254,7 @@ cmd_open() {
   done
   [ -n "$title" ] || die "open needs --title"
   dir=$(page_dir "$id") || exit
-  [ -f "$dir/page.html" ] || die "write $dir/page.html before open; the board loads a page frame once"
+  [ -f "$dir/page.html" ] || die "write $dir/page.html before open; the board loads it as soon as the captain opens it"
   mkdir -p "$(inbox "$id")/handled" || die "cannot create the inbox for $id"
   # shellcheck disable=SC2016 # jq program text, not shell expansion.
   write_json "$(record "$id")" \
