@@ -2036,6 +2036,35 @@ test_a_link_label_never_doubles_its_kind_word() {
   pass "a link label never doubles its kind word"
 }
 
+# A kind word written in full or in any case before a link ("merge request
+# <url>", "mr <url>") is replaced with the link by its one label in the heading
+# and the body. A plain link reads as its label in the body, and the heading
+# keeps only a link its kind word leads.
+test_a_kind_word_before_a_link_reads_as_its_label() {
+  local mr=https://gitlab.example.com/grp/proj/-/merge_requests/883 pr=https://github.com/acme/app/pull/77
+  local lead url want heading card n=0
+  while IFS='|' read -r lead url want heading; do
+    n=$((n + 1))
+    heading=${heading:-"$want "}
+    card=$(real_line_card "kind-word-$n" kind-word "needs-decision [key=k] [at=1795094034]: Shall I merge ${lead}${url} now? It is green, see ${lead}${url}.")
+    assert_equals "kind-word: Shall I merge ${heading# }now?" "$(jq -r .title <<<"$card")" "the heading of '${lead}<url>' reads ${heading}"
+    if [[ -n $lead ]]; then
+      assert_equals "Shall I merge $want now? It is green, see $want." "$(jq -r .about <<<"$card")" "the body of '${lead}<url>' reads $want"
+    else
+      assert_equals "It is green, see $want." "$(jq -r .about <<<"$card")" "the body of a plain <url> reads $want"
+    fi
+  done <<EOF
+MR |$mr|MR 883|
+mr |$mr|MR 883|
+merge request |$mr|MR 883|
+Merge Request |$mr|MR 883|
+PR |$pr|PR 77|
+pull request |$pr|PR 77|
+|$mr|MR 883| 
+EOF
+  pass "a kind word before a link reads as the link's one label"
+}
+
 # The real keyless cd-992 line of the cd home ("... How to proceed? (a) ...").
 # As a status card its title names the task and the asking sentence, so the
 # question lives in the title and the card carries no second one. As a mate
@@ -2847,6 +2876,7 @@ fm_test_run \
   test_a_sentence_addressed_to_firstmate_never_reaches_the_card \
   test_a_link_label_right_before_a_question_mark_keeps_no_space \
   test_a_link_label_never_doubles_its_kind_word \
+  test_a_kind_word_before_a_link_reads_as_its_label \
   test_a_long_asking_sentence_is_headed_by_the_clause_that_asks \
   test_a_how_to_proceed_question_is_in_the_title_or_the_question \
   test_an_a_recommended_colon_option_is_the_recommendation \
