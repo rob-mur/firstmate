@@ -2643,6 +2643,20 @@ test_an_evidence_path_in_a_mate_hold_is_a_card_link() {
   pass "an Evidence: path in a mate hold links its file, calls.md and report.md alike"
 }
 
+# A recorded label that opens with its own option letter ("A: ...") shows
+# without it, so the card does not write the letter twice.
+test_an_uppercase_letter_tag_leaves_a_recorded_label() {
+  local p
+  p=$(cd_mate_hold_payload) || fail "the generator failed"
+  assert_equals "a=you make one unrestricted rob token once and swap it into tea; no code change|b=tea uses a rob-bot token, which forge-arm already adds to every armed repo; check merging as rob-bot first|c=keep a restricted token and remake it for every new repo" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-forge-arm-login-access") | [.options[] | "\(.value)=\(.label)"] | join("|")' <<<"$p")" \
+    "an A:/B:/C: tag stayed on a recorded label"
+  assert_equals "a" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-forge-arm-login-access") | .recommend_value' <<<"$p")" \
+    "the recommended option lost its mark"
+  pass "an uppercase tag of its own letter leaves a recorded label"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_open_mrs_no_task_covers_become_information_rows \
@@ -2737,4 +2751,5 @@ fm_test_run \
   test_inline_letter_equals_options_are_the_card_options \
   test_inline_bare_letter_options_are_the_card_options \
   test_lettered_options_answer_as_their_letters \
-  test_an_evidence_path_in_a_mate_hold_is_a_card_link
+  test_an_evidence_path_in_a_mate_hold_is_a_card_link \
+  test_an_uppercase_letter_tag_leaves_a_recorded_label

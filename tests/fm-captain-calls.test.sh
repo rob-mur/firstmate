@@ -641,6 +641,22 @@ test_evidence_report_needs_an_evidence_tail() {
   pass "only an Evidence: <path> tail names a report"
 }
 
+# The cd-forge-arm-login-access card showed "A: you make ...", "B: tea uses
+# ..." and "C: keep ..." under values a, b and c: the letter showed twice.
+test_mate_backlog_option_uppercase_letter_tags_leave_the_labels() {
+  local home out
+  home=$(make_mate_home mate-backlog-upper-tags)
+  printf 'needs-decision [key=captain-hold-t5-1] [at=%s]: captain hold t5: How should tea reach new repos?\n' \
+    "$LATER" > "$home/state/mm.status"
+  printf '## Queued\n\n- [ ] t5 - Tea access (hold: how should tea reach new repos?) (hold-kind: captain)\n  Captain hold option: a=A: one unrestricted token (recommended)\n  Captain hold option: b=B: a rob-bot token\n  Captain hold option: c=C: remake a restricted token\n  Captain hold option: d=Dry run first\n\n## Done\n' \
+    > "$home/mm-home/data/backlog.md"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  assert_equals "a|a=one unrestricted token,b=a rob-bot token,c=remake a restricted token,d=Dry run first" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-t5-1") | "\(.recommend)|\([.options[] | "\(.value)=\(.label)"] | join(","))"')" \
+    "an uppercase tag of the option's own letter leaves each label"
+  pass "a recorded option's uppercase letter tag leaves its label"
+}
+
 test_cd_calls_named_by_housekeeping_steers_stay_calls() {
   local out key
   out=$(run_calls "$FIXTURE" "$FIXTURE/prs-fos-merged.tsv") || fail "fm-captain-calls failed"
@@ -821,6 +837,7 @@ fm_test_run \
   test_mate_keyless_line_does_not_shadow_a_keyed_call \
   test_mate_backlog_hold_options_are_the_call_options \
   test_mate_backlog_option_letter_tags_leave_the_labels \
+  test_mate_backlog_option_uppercase_letter_tags_leave_the_labels \
   test_mate_inline_options_keep_trailing_prose_and_evidence_report \
   test_mate_long_hold_shows_its_full_text \
   test_mate_hold_evidence_tail_is_always_its_report \

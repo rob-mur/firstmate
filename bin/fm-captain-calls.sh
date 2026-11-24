@@ -387,13 +387,21 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
              + (if $p.recommend == null then {} else {recommend: $p.recommend} end) end end;
   # A recorded option whose label ends in "(recommended)" or "(preferred)", or
   # opens with a "(a, recommended)" tag, is the recommendation. A leading "(a)"
-  # or "(a, recommended)" tag and a trailing marker both leave the label.
+  # or "(a, recommended)" tag, an "A:" tag of its own letter, and a trailing
+  # marker all leave the label.
+  # A label that opens with its own option letter as a bare tag ("A: ...",
+  # "B) ...") under that letter value shows without it, as "(a)" does.
+  def own_letter_untagged($v):
+    ($v | tostring) as $v
+    | if ($v | test("^[A-Za-z]$"))
+      then sub("^[[:space:]]*(?:" + ($v | ascii_upcase) + "|" + ($v | ascii_downcase) + ")[:).][[:space:]]+"; "")
+      else . end;
   def recommended_option:
     "[[:space:]]*\\((?i:recommended|preferred)\\)[[:space:].;,]*$" as $mark
     | "^[[:space:]]*\\([A-Za-z0-9]{1,2}(?<r>[[:space:]]*[,;:][[:space:]]*(?i:recommended|preferred|rec))?\\)[[:space:]]*" as $tag
     | def rec_tagged: test($tag) and ((capture($tag).r // "") != "");
     ([.options[] | select((.label | test($mark)) or (.label | rec_tagged)) | .value][0]) as $mv
-    | .options = [.options[] | .label = (.label | sub($tag; "") | sub($mark; ""))]
+    | .options = [.options[] | .value as $v | .label = (.label | sub($tag; "") | sub($mark; "") | own_letter_untagged($v))]
     | if .recommend == null and $mv != null then .recommend = $mv else . end
     | .options = [.options[] | if .label == "" then .label = .value else . end]
     | .recommend = (.recommend // null);
