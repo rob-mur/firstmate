@@ -41,6 +41,17 @@
 #     A keyless line (the fold's "default" key) that asks the same held task or
 #     the same question as a keyed open call of the same mate is that call
 #     again: it is listed in skipped[], so the keyed call shows once.
+#     A secondmate key that waits on main, not the captain, is not a call and
+#     is listed in with_firstmate[] instead. The rule reads the fleet's own
+#     correlation token ("corr=<16 hex>", the id of a marked request from main
+#     that the mate's reply echoes), never free prose:
+#       - a reply: the line that opened the key carries the token before its
+#         first colon, bracketed or bare, or as the first word of its note
+#         (bin/fm-classify-lib.sh status_decision_opened_corr);
+#       - a hold waiting on main: a "captain hold <task>:" key whose hold
+#         reason (the mate backlog row's, else the status line's) carries the
+#         token as a whole word.
+#     A token named anywhere else in a question's prose does not count.
 #   - an open needs-decision key in the status log state/<task>.status of a
 #     live worker of this home: a task with a state/<task>.meta record that is
 #     not a registered secondmate (a finished task's leftover log has no meta
@@ -90,6 +101,8 @@
 #             evidence {settled_by, prs[{url,state}], text} and close_with),
 #   skipped[] {key, home, task, why} deferred holds (main or secondmate, also
 #             with title and question) and captain-answered keys,
+#   with_firstmate[] {key, home, task, title, question, corr, why} secondmate
+#             keys that wait on main (above), shown with firstmate for that home,
 #   homes[]   {id, remote, status_log ("read" or "missing")} for every registered mate,
 #   workers[] the ids of the live workers whose status logs were read.
 # Each call:
@@ -133,6 +146,8 @@ home's live workers. Read-only.
               settled them (linked PRs/MRs all merged or closed, or already
               answered) and how main closes them; nothing is closed here
   skipped[]   deferred holds and answered decision keys not yet closed
+  with_firstmate[]  secondmate keys that reply to, or wait on, a marked
+              request from main (a corr token): not captain calls
   homes[]     every registered secondmate and whether its status log was read
   workers[]   the live workers whose status logs were read
 
@@ -236,22 +251,24 @@ MAIN_JSON=$(backlog_hold_records "$BACKLOG") || {
   echo "fm-captain-calls: cannot parse $BACKLOG" >&2; exit 1; }
 
 # --- secondmate decision keys -----------------------------------------------
-# Lines: "<home>\t<remote>\t<status read|missing>\t<answered-id>\t<key>\t<epoch>\t<keyed>\t<note>",
+# Lines: "<home>\t<remote>\t<status read|missing>\t<answered-id>\t<key>\t<epoch>\t<keyed>\t<corr>\t<note>",
 # <keyed> 1 when the line that opened the key states it, 0 for a keyless line
-# (the fold names it "default").
+# (the fold names it "default"); <corr> the correlation token of that line when
+# it is a reply to a marked request from main (bin/fm-classify-lib.sh
+# status_decision_opened_corr), else empty.
 # The status-log fold takes seconds on a long log, so each mate is read in the
 # background into its own numbered file and the files are joined in registry order.
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-captain-calls.XXXXXX") || exit 1
 trap 'rm -rf -- "$WORK"' EXIT
 
 mate_rows_one() {  # <id> <remote> [<kind: secondmate|crew>]
-  local id=$1 remote=$2 kind=${3:-secondmate} f open line key verb note opened answered rest keyed
+  local id=$1 remote=$2 kind=${3:-secondmate} f open line key verb note opened answered rest keyed corr
   f="$STATE/$id.status"
   if ! { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; }; then
-    printf '%s\t%s\tmissing\t\t\t\t\t\n' "$id" "$remote"
+    printf '%s\t%s\tmissing\t\t\t\t\t\t\n' "$id" "$remote"
     return 0
   fi
-  printf '%s\t%s\tread\t\t\t\t\t\n' "$id" "$remote"
+  printf '%s\t%s\tread\t\t\t\t\t\t\n' "$id" "$remote"
   open=$(status_open_decisions "$f" "$kind" | awk -F'\t' '$2 == "needs-decision"')
   [ -n "$open" ] || return 0
   while IFS= read -r line; do
@@ -266,7 +283,8 @@ mate_rows_one() {  # <id> <remote> [<kind: secondmate|crew>]
     opened=$(status_decision_opened_epoch "$f" "$key" 2>/dev/null) || opened=''
     keyed=1
     [ "$key" != default ] || status_decision_opened_keyed "$f" default || keyed=0
-    printf '%s\t%s\tcall\t%s\t%s\t%s\t%s\t%s\n' "$id" "$remote" "$answered" "$key" "$opened" "$keyed" "$note"
+    corr=$(status_decision_opened_corr "$f" "$key" 2>/dev/null) || corr=''
+    printf '%s\t%s\tcall\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$remote" "$answered" "$key" "$opened" "$keyed" "$corr" "$note"
   done <<EOF
 $(printf '%s\n' "$open" | status_open_decisions_tag_answered "$id" "$f")
 EOF
@@ -357,7 +375,7 @@ UNTIL_JSON=$(mate_until_rows | jq -R -n '[inputs | split("\t") | {mate: .[0], ta
 MATE_JSON=$(mate_rows | jq -R -n '
   [inputs | split("\t")
    | {home: .[0], worker: (.[1] == "worker"), remote: (.[1] == "1"), kind: .[2], answered: .[3], key: .[4],
-      opened: .[5], keyed: (.[6] == "1"), note: (.[7:] | join("\t"))}]')
+      opened: .[5], keyed: (.[6] == "1"), corr: .[7], note: (.[8:] | join("\t"))}]')
 
 # --- assemble the calls before the PR lookups --------------------------------
 # A call is a decision unless the shared board question rules read it as a
@@ -450,9 +468,23 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
         raised_at: iso(.opened), answered,
         # A hold reason known only from a status line as long as the channel
         # bound may have been cut there with no marker: the call is cut short.
-        cut_short: ($h != null and $row == null and ($h.q | utf8bytelength) >= $note_max)}
+        cut_short: ($h != null and $row == null and ($h.q | utf8bytelength) >= $note_max),
+        # A key opened by a reply to a marked request from main (its opening
+        # line carries the correlation token) is for firstmate to read, and so
+        # is a captain hold whose reason carries one: the mate holds it for
+        # the answer from main to that request, not for the captain.
+        reply_corr: (if .corr == "" then null else .corr end),
+        hold_corr: (if $h == null then null
+                    else ((($row.hold_reason // "") + " " + $h.q)
+                          | [scan("(?<![A-Za-z0-9_=])corr=([0-9A-Fa-f]{16})(?![0-9A-Za-z])") | .[0]][0]) end)}
      | inline_options | recommended_option | evidence_report
-     | .report = (.report // $said_report) | classify]) as $mate_calls
+     | .report = (.report // $said_report) | classify]) as $mate_all
+  | [$mate_all[] | select(.reply_corr == null and .hold_corr == null) | del(.reply_corr, .hold_corr)] as $mate_calls
+  | [$mate_all[] | select(.reply_corr != null or .hold_corr != null)
+     | {key, home, task, title, question, corr: (.reply_corr // .hold_corr),
+        why: (if .reply_corr != null
+              then "a reply to the marked request corr=" + .reply_corr + " from main; firstmate answers it"
+              else "a hold waiting on the answer from main to the marked request corr=" + .hold_corr end)}] as $with_firstmate
   | def deferred: .hold_until != null and .hold_until > $today;
   # A live worker key on a task that is itself held for the captain asks the
   # same call: the hold is the one call, so the worker key is skipped.
@@ -480,6 +512,7 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
                + [$mate_calls[] | select(.answered == "" and (deferred | not) and shadowed)
                   | {key, home, task, title, question,
                      why: "a keyless line asking a keyed open call of the same mate; the keyed call is the one call"}]),
+     with_firstmate: $with_firstmate,
      homes: [$mates[] | select(.kind != "call" and (.worker | not)) | {id: .home, remote, status_log: .kind}],
      workers: [$mates[] | select(.kind != "call" and .worker) | .home]}')
 
@@ -574,4 +607,4 @@ printf '%s\n' "$CALLS_JSON" | jq --argjson states "$PR_STATES" --arg check "$PR_
      skipped: (.skipped
                + [$answered[] | select(.decision)
                   | {key, home, task, why: ("answered by the captain in " + .answered + "; waiting for " + closer + " to close it")}]),
-     homes, workers}'
+     with_firstmate, homes, workers}'
