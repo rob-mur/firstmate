@@ -419,17 +419,19 @@ test_every_open_captain_hold_has_exactly_one_board_row() {
     --repo sample --option yes=Yes --option no=No --no-link --until 2099-01-01 >/dev/null || fail "dated hold failed"
   in_home "$home" env FM_BEARINGS_DECISIONS=2 "$ROOT/bin/fm-bearings-board-payload.sh" \
     > "$home/payload.json" || fail "payload failed"
-  keys=$(jq -r '[(.captains_call[]?, .waiting[]?) | .key | select(test("call"))] | sort | join(",")' "$home/payload.json")
+  keys=$(jq -r '[.captains_call[]? | .key | select(test("call"))] | sort | join(",")' "$home/payload.json")
   assert_equals "call-1,call-2,call-3" "$keys" "every open undated captain hold must show exactly once as a call"
-  # A call the captain deferred to a date sits in Charted Next with that date,
-  # never as a call card and never twice (docs/captain-hold-lifecycle.md).
-  assert_equals "1" "$(jq '[.charted[]? | select(.id == "dated-call")] | length' "$home/payload.json")" \
-    "a dated captain hold must be charted exactly once"
-  jq -e '.charted[] | select(.id == "dated-call") | .reason | test("until 2099-01-01")' "$home/payload.json" >/dev/null \
-    || fail "the charted dated hold does not show its date"
-  assert_equals "0" "$(jq '[.charted[]? | select(.id | test("^call-"))] | length' "$home/payload.json")" \
-    "an undated captain hold was charted as a gate instead of shown"
-  pass "every open captain hold has exactly one board row past the decision cap, a dated one charted with its date"
+  # A call the captain deferred to a date waits on that date: one Waiting row
+  # naming it, never a call card and never charted (bin/fm-bearings-board-payload.sh).
+  assert_equals "1" "$(jq '[.waiting[]? | select(.key == "dated-call")] | length' "$home/payload.json")" \
+    "a dated captain hold must be one waiting row"
+  jq -e '.waiting[] | select(.key == "dated-call") | .reason | test("until 2099-01-01")' "$home/payload.json" >/dev/null \
+    || fail "the waiting dated hold does not show its date"
+  assert_equals "0" "$(jq '[.charted[]? | select(.id | test("call"))] | length' "$home/payload.json")" \
+    "a captain hold was charted as a gate instead of shown"
+  assert_equals "0" "$(jq '[.waiting[]? | select(.key | test("^call-"))] | length' "$home/payload.json")" \
+    "an undated captain hold waits instead of showing as a call"
+  pass "every open captain hold has exactly one board row past the decision cap, a dated one waiting with its date"
 }
 
 test_a_failed_build_is_logged_and_not_retried_until_state_changes() {
