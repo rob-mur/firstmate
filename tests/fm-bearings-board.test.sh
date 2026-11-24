@@ -1354,6 +1354,33 @@ test_build_accepts_explicit_decisions_and_in_person_actions() {
   pass "build accepts an explicit question card, an open question answered in free text, and an in-person action card"
 }
 
+# A question that offers lettered "(a)"/"(b)" choices the option reader could
+# not read is held back naming them, not shown with only the reconcile choice;
+# marks in a sentence that does not ask are references, not choices.
+test_build_flags_a_card_whose_lettered_choices_were_not_read() {
+  local home data out
+  home=$(make_home unread-letter-marks)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"status.lane.pick","type":"decision","repo":null,
+    "title":"lane","question":"Go with (a) or (b)?","from_status":true,
+    "allow_freeform":true,"context":{"task":"lane","reason":"Go with (a, recommended) or (b)? See the report."},
+    "options":[]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" status.lane.pick "options (the question offers lettered (a)/(b) choices but the card offers no options" \
+    "a status card whose lettered choices became no options"
+
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"status.lane.pick","type":"decision","repo":null,
+    "title":"lane","question":"Ship it now?","from_status":true,
+    "allow_freeform":true,"context":{"task":"lane","reason":"It was fixed in step (a) or step (b). Ship it now?"},
+    "options":[]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "a card whose lettered marks only refer back did not build: $out"
+  assert_not_contains "$out" "undecided-card: status.lane.pick" "a card whose lettered marks only refer back was held back: $out"
+  pass "the board holds back a question whose lettered choices were not read, not one that only refers back"
+}
+
 # A card whose reason lists two or more "Option x:" marks but which offers no
 # options, or only a default yes/no, is a reason the option reader could not
 # read: it is held back naming the marks, even as a worker status card, so the
@@ -1740,6 +1767,7 @@ test_build_flags_a_card_naming_a_merged_or_closed_mr
 test_build_retries_once_when_a_binary_vanishes
 test_build_does_not_retry_an_ordinary_failure
 test_build_flags_a_card_whose_option_marks_were_not_read
+test_build_flags_a_card_whose_lettered_choices_were_not_read
 test_a_page_about_a_task_links_its_card_and_context_in_place
 test_a_linked_page_token_leaves_the_card_text
 test_a_page_its_task_status_names_links_the_hold_card
