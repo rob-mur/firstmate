@@ -23,8 +23,9 @@
 # the queue (bin/fm-wake-lib.sh: worker status, PR and MR state, checks,
 # heartbeats), each captain hold placed, answered, or reconciled, and each board
 # reconcile request recorded (bin/fm-captain-hold.sh), each steer recorded in a
-# task inbox (bin/fm-send.sh), each task cleanup (bin/fm-teardown.sh), and each
-# main wake drain (bin/fm-wake-drain.sh).
+# task inbox (bin/fm-send.sh), each task cleanup (bin/fm-teardown.sh), each
+# main wake drain (bin/fm-wake-drain.sh), and each home summary publication whose
+# content moved (bin/fm-home-summary-refresh.sh).
 #
 # --kick-decision is --kick for a worker's status command (bin/fm-brief.sh): it
 # kicks only when the newest line of <status-file> is a needs-decision or
