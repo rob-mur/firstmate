@@ -466,11 +466,13 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # names by kind and number ("issue 942 (<url>)", "PR 938 (<url>)") drops its
   # parenthesis, and a link to a comment reads "Comment on issue 932". A
   # YouTrack issue link reads by its bare id ("APP-5837").
-  # The run of bare URLs and absolute file paths (each maybe with a "(note)")
-  # that ends a reason after its last sentence is the card links, not its
-  # prose: trailing_cited cuts it from the text, its URLs become links as any
-  # other, and each path becomes a `{path, label}` link labelled by its file
-  # name and note ("youtrack-changes.md (Round 5)"), after the web links.
+  # The run of bare URLs and absolute file paths (each maybe with a "(note)",
+  # and maybe led by "Evidence:") that ends a reason after its last sentence
+  # is the card links, not its prose: trailing_cited cuts it from the text,
+  # its URLs become links as any other, and each path becomes a `{path, label}`
+  # link labelled by its file name and note ("youtrack-changes.md (Round 5)"),
+  # after the web links. An "Evidence: <path>" tail links whatever file it
+  # names (".../calls.md" as well as ".../report.md"), in any home.
   # A URL holding a placeholder ("https://host/v1/clientIds/<CLIENT_ID>:x") is
   # an address to fill in, not a link: it stays whole in the text and the part
   # before the placeholder never becomes a link.
@@ -513,7 +515,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
     def labelled_urls: label_urls(true);
     def cited_item: "(?<url>https?://[^[:space:]<>\"()]+)|(?<path>/[\\w.@~+-]+(?:/[\\w.@~+-]+)+)(?:[[:space:]]+\\((?<note>[^()]*)\\))?";
     def trailing_cited_at:
-      [ match("(?<=[.?!])(?:[[:space:]]+(?:" + cited_item + "))+[[:space:]]*$") ][0].offset;
+      [ match("(?<=[.?!])(?:[[:space:]]+(?:Evidence:[[:space:]]+)?(?:" + cited_item + "))+[[:space:]]*$") ][0].offset;
     def trailing_cited: trailing_cited_at as $o | if $o == null then . else .[:$o] end;
     def cited_paths:
       trailing_cited_at as $o
