@@ -1941,6 +1941,34 @@ test_a_link_label_never_doubles_its_kind_word() {
   pass "a link label never doubles its kind word"
 }
 
+# The real keyless cd-992 line of the cd home ("... How to proceed? (a) ...").
+# As a status card its title names the task and the asking sentence, so the
+# question lives in the title and the card carries no second one. As a mate
+# hold whose title does not ask, the same text gives the card its question.
+CD992_LINE="needs-decision [at=1795527005]: PR https://forgejo.clarob.uk/rob/continuous-delivery/pulls/993 fails ci:acceptance spec reach (unreached cd-builtins/src/spec_reach.rs:272, the refusal text line; no frozen scenario drives the no SF: record refusal, and a new scenario must land in its own spec MR first). How to proceed? (a) I raise a separate spec-only PR adding a frozen scenario that runs cd-spec-reach on a coverage report missing a file's SF: record, then rebase #993 on it after it merges; (b) hold #993 and leave the scenario to the captain; (c) close #993."
+
+test_a_how_to_proceed_question_is_in_the_title_or_the_question() {
+  local card reason p
+  card=$(real_line_card how-cd992 cd-992-spec-reach-allow-list-hint "${CD992_LINE/\]: /] [key=default]: }")
+  assert_equals "cd-992-spec-reach-allow-list-hint: How to proceed?" "$(jq -r .title <<<"$card")" "status card: the title asks"
+  assert_equals "null" "$(jq -r .question <<<"$card")" "status card: no second question beside the title"
+  assert_equals "a|b|c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "status card: the lettered options"
+  reason=${CD992_LINE#*]: }
+  fresh_homes how-cd992-hold
+  write_snapshot "$TMP_ROOT/how-cd992-hold-base.json"
+  jq --arg r "$reason" '.decisions_open = [
+        {id: "cd-992-spec-reach-allow-list-hint", key: "cd.captain-hold.cd-992-spec-reach-allow-list-hint",
+         verb: "captain-hold", title: "Spec reach allow-list hint", owner: "cd", reason: $r}]' \
+    "$TMP_ROOT/how-cd992-hold-base.json" > "$TMP_ROOT/how-cd992-hold.json"
+  p=$(FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$TMP_ROOT/how-cd992-hold.json") || fail "the generator failed on the cd-992 hold"
+  card=$(jq -c '.captains_call[0]' <<<"$p")
+  assert_equals "How to proceed?" "$(jq -r '.question // "undefined"' <<<"$card")" "mate hold: the card asks its question"
+  jq -e '.about | startswith("PR 993 fails ci:acceptance spec reach") and (contains("How to proceed?") | not)' <<<"$card" >/dev/null \
+    || fail "mate hold: the about does not hold only the context before the question: $card"
+  assert_equals "a|b|c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "mate hold: the lettered options"
+  pass "a How to proceed? question is in the title or the question, never neither"
+}
+
 # A long asking sentence that ends in a clause which asks ("..., so how should I
 # deploy X?") is headed by that clause, whole, not by its truncated start.
 test_a_long_asking_sentence_is_headed_by_the_clause_that_asks() {
@@ -2633,6 +2661,7 @@ fm_test_run \
   test_a_link_label_right_before_a_question_mark_keeps_no_space \
   test_a_link_label_never_doubles_its_kind_word \
   test_a_long_asking_sentence_is_headed_by_the_clause_that_asks \
+  test_a_how_to_proceed_question_is_in_the_title_or_the_question \
   test_an_a_recommended_colon_option_is_the_recommendation \
   test_the_last_option_ends_at_its_own_words \
   test_both_recommended_marks_reach_the_card \

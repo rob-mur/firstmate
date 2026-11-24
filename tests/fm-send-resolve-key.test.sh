@@ -126,6 +126,49 @@ drain_out() {  # <home>
   FM_STATE_OVERRIDE="$1/state" "$DRAIN" 2>/dev/null
 }
 
+# The real keyless cd-992 line of the cd secondmate home, answered at 13:30:58Z.
+# The close is self-announced, so no watcher wake republishes the home summary
+# the parent board reads; the answer send itself republishes it, so the
+# decision leaves the parent at once. A home that publishes no summary still
+# gets none.
+CD992_LINE="needs-decision [at=1795527005]: PR https://forgejo.clarob.uk/rob/continuous-delivery/pulls/993 fails ci:acceptance spec reach (unreached cd-builtins/src/spec_reach.rs:272, the refusal text line; no frozen scenario drives the no SF: record refusal, and a new scenario must land in its own spec MR first). How to proceed? (a) I raise a separate spec-only PR adding a frozen scenario that runs cd-spec-reach on a coverage report missing a file's SF: record, then rebase #993 on it after it merges; (b) hold #993 and leave the scenario to the captain; (c) close #993."
+CD992_ANSWER="Go with (a). Raise a separate spec-only PR that adds the frozen scenario."
+
+summary_open_ids() {  # <home>
+  jq -r '[.decisions_open[]?.id] | join(",")' "$1/state/home-summary.json" 2>/dev/null
+}
+
+test_answer_send_republishes_the_home_summary() {
+  local dir fb log home bare rc i open=x
+  dir="$TMP_ROOT/republish"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home republish)
+  fm_write_meta "$home/state/cd-992-spec-reach-allow-list-hint.meta" "window=sess:fm-t1" "kind=ship"
+  printf '%s\n' "$CD992_LINE" > "$home/state/cd-992-spec-reach-allow-list-hint.status"
+  FM_ROOT_OVERRIDE="$home" FM_HOME="$home" "$ROOT/bin/fm-home-summary-refresh.sh" \
+    || fail "precondition: the home summary did not publish"
+  assert_equals "cd-992-spec-reach-allow-list-hint" "$(summary_open_ids "$home")" \
+    "precondition: the published summary lists the open decision"
+
+  run_send "$fb" "$home" "$log" cd-992-spec-reach-allow-list-hint --resolve-key default "$CD992_ANSWER"; rc=$?
+  expect_code 0 "$rc" "the answer send should succeed"
+  for i in $(seq 1 200); do
+    open=$(summary_open_ids "$home")
+    [ -z "$open" ] && break
+    command sleep 0.1
+  done
+  assert_equals "" "$open" "the answer send did not republish the summary without the decision"
+
+  bare=$(setup_home republish-bare)
+  fm_write_meta "$bare/state/cd-992-spec-reach-allow-list-hint.meta" "window=sess:fm-t1" "kind=ship"
+  printf '%s\n' "$CD992_LINE" > "$bare/state/cd-992-spec-reach-allow-list-hint.status"
+  run_send "$fb" "$bare" "$log" cd-992-spec-reach-allow-list-hint --resolve-key default "$CD992_ANSWER"; rc=$?
+  expect_code 0 "$rc" "the answer send in a home without a summary should succeed"
+  command sleep 1
+  [ ! -e "$bare/state/home-summary.json" ] || fail "a home that publishes no summary got one"
+  pass "fm-send --resolve-key: the answer republishes the home summary without the decision"
+}
+
 test_answer_send_closes_open_decision() {
   local dir fb log home rc out
   dir="$TMP_ROOT/closes"; mkdir -p "$dir"
@@ -1257,6 +1300,7 @@ test_refusal_keyed_resend_keeps_the_accepted_keys() {
 }
 
 test_answer_send_closes_open_decision
+test_answer_send_republishes_the_home_summary
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
 test_listed_key_closes_a_trailing_token_blocker
