@@ -96,7 +96,7 @@ Each live page gets a tab in the board header; the captain opens it in place and
 A card link to a Lavish page opens the matching registered page in place too, and a card whose page is not registered says it is not in the board yet; the board never links out to a Lavish session, and the `build` header owns how a link finds its page.
 A decision answered on a page the board does not have shows its question, says its choices are on that page, and takes a free-text answer, so it is still answered from the board; the `build` header owns that fallback.
 "End this page" ends only that page; ending the board's Lavish session ends every page.
-One refresh policy covers the whole app: no frame ever reloads, and the board and each page poll their own data file and patch in place.
+One refresh policy covers the whole app: the board and each page poll their own data file and patch in place, and the board loads a page only while the captain has it open, so a page not in view runs nothing and reloads when opened again.
 A page's actions ride the board's Lavish session as rows tagged `page`, and the process-event runner routes them to that page's agent before publishing the result, so a board result holding only routed page actions raises no wake.
 Lavish keeps a queued page action only in the browser tab that queued it until the captain sends it, so the board shows a page action Lavish did not confirm as an error with "Queue again", and one still unsent as a notice with "Send to agent" and a mark on the page's tab.
 The page relay queues a form the captain changed before anything is sent, and the board flags a changed form it could not queue with the same notice and tab mark; the `wait` text in `bin/fm-board-page.sh` owns that contract.

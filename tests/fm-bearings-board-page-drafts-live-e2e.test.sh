@@ -3,8 +3,7 @@
 # captain's unsent input in a page shown inside the bearings board survives
 # everything that can redraw or reload that page.
 #
-# Why this file exists: a board page's frame is loaded once and never reloaded
-# by the board, yet the captain still lost a page full of typed answers. Any
+# Why this file exists: the captain lost a page full of typed answers. Any
 # change to the board file makes Lavish reload the board and every page frame
 # in it, and a page's own script may draw its form again when its worker moves
 # it on; both start the form empty. The DOM shims cannot see either, because
