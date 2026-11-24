@@ -483,6 +483,38 @@ test_mate_backlog_option_letter_tags_leave_the_labels() {
   pass "a recorded option's leading letter tag leaves its label and keeps its recommendation"
 }
 
+# The pdm-oss-history-name card lost the instruction after its options and the
+# "Evidence: <path>" tail that names its report.
+test_mate_inline_options_keep_trailing_prose_and_evidence_report() {
+  local home out card report=/home/m/data/pdm-oss-history-name/report.md
+  home=$(make_mate_home mate-inline-tail)
+  printf 'needs-decision [key=captain-hold-t4-1] [at=%s]: captain hold t4: Which name should the history page use? a) Chronicle b) Ledger c) Another name. Write the new name with your letter, with no Proton in it. Evidence: %s\n' \
+    "$LATER" "$report" > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  card=$(printf '%s\n' "$out" | jq -c '.calls[] | select(.key == "mm.captain-hold-t4-1")')
+  [ -n "$card" ] || fail "the history-name question is not a call"
+  assert_equals "Which name should the history page use? Write the new name with your letter, with no Proton in it." \
+    "$(printf '%s\n' "$card" | jq -r '.question')" "the prose after the options stays on the question"
+  assert_equals "a=Chronicle,b=Ledger,c=Another name" \
+    "$(printf '%s\n' "$card" | jq -r '[.options[] | "\(.value)=\(.label)"] | join(",")')" \
+    "the inline options are the call's options"
+  assert_equals "$report" "$(printf '%s\n' "$card" | jq -r '.report')" \
+    "the Evidence: path is the call's report"
+  pass "a question's prose after its options stays, and its Evidence: path is its report"
+}
+
+test_evidence_report_needs_an_evidence_tail() {
+  local home out
+  home=$(make_mate_home mate-no-evidence)
+  printf 'needs-decision [key=captain-hold-t5-1] [at=%s]: captain hold t5: Ship it? a) Yes b) No. The evidence is in /tmp/x.md for now.\n' \
+    "$LATER" > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  assert_equals "null|Ship it? The evidence is in /tmp/x.md for now." \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-t5-1") | "\(.report)|\(.question)"')" \
+    "a path not led by an Evidence: tail is no report"
+  pass "only an Evidence: <path> tail names a report"
+}
+
 test_cd_calls_named_by_housekeeping_steers_stay_calls() {
   local out key
   out=$(run_calls "$FIXTURE" "$FIXTURE/prs-fos-merged.tsv") || fail "fm-captain-calls failed"
@@ -663,6 +695,8 @@ fm_test_run \
   test_mate_keyless_line_does_not_shadow_a_keyed_call \
   test_mate_backlog_hold_options_are_the_call_options \
   test_mate_backlog_option_letter_tags_leave_the_labels \
+  test_mate_inline_options_keep_trailing_prose_and_evidence_report \
+  test_evidence_report_needs_an_evidence_tail \
   test_cd_calls_named_by_housekeeping_steers_stay_calls \
   test_cd_870_version_file_is_a_call_with_its_open_pr \
   test_captain_hold_key_names_its_task_and_question \
