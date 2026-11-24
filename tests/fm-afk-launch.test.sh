@@ -106,6 +106,40 @@ unit_enter_records_the_posture_in_one_step_without_a_daemon() {
   rm -rf "$st"
 }
 
+# Away entry with a phone channel sends the board link once per away period;
+# a refresh of the same period never resends it (bin/fm-phone-channel.sh
+# "THE BOARD LINK"). The channel and the board URL are stubs.
+unit_enter_sends_the_board_link_once_with_a_phone_channel() {
+  local st cfg out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-board-link.XXXXXX")
+  mkdir -p "$st/state" "$st/config"
+  cfg="$st/config"
+  : > "$cfg/supervision-host-off"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/phone.args"\n' "$st" > "$st/phone.sh"
+  printf '#!/bin/sh\nprintf "https://lavish.example/session/abc\\n"\n' > "$st/board-url.sh"
+  chmod +x "$st/phone.sh" "$st/board-url.sh"
+  printf 'name: Telegram\ncommand: %s\n' "$st/phone.sh" > "$cfg/phone-channel"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" FM_PHONE_BOARD_URL_CMD="$st/board-url.sh" FM_HOME="$st" \
+    FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'merge the fix when green' 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -F 'The board link was sent to your phone channel.' >/dev/null \
+    && [ "$(grep -c 'Firstmate board: https://lavish.example/session/abc' "$st/phone.args" 2>/dev/null)" = 1 ]; then
+    pass "enter: away entry with a phone channel sends the board link once and says so"
+  else
+    fail "enter: the board link was not sent once on away entry (rc=$rc): $out"
+  fi
+  out=$(FM_CONFIG_OVERRIDE="$cfg" FM_PHONE_BOARD_URL_CMD="$st/board-url.sh" FM_HOME="$st" \
+    FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'merge the fix when green' 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -F 'board link was sent' >/dev/null \
+    && [ "$(grep -c 'Firstmate board:' "$st/phone.args" 2>/dev/null)" = 1 ]; then
+    pass "enter: a refresh in the same away period does not resend the board link"
+  else
+    fail "enter: a refresh resent the board link (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
 # No launch path waits for a separate go: the retired two-step subcommands are
 # refused by name and write nothing, so no caller can stage a mandate that then
 # waits on a human response before it binds.
@@ -1899,6 +1933,7 @@ e2e_rex() {
 unit_clear_stale
 unit_per_task_markers_session_scoped
 unit_enter_records_the_posture_in_one_step_without_a_daemon
+unit_enter_sends_the_board_link_once_with_a_phone_channel
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker

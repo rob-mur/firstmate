@@ -837,6 +837,65 @@ test_phone_away_outcome_sends_only_under_a_phone_away_record() {
   pass "away-outcome sends only while an away record names the phone channel"
 }
 
+test_phone_board_link_goes_once_per_away_period_and_on_a_phone_signal() {
+  local home stub out rc
+  home=$(make_home phone-board-link)
+  stub=$(write_phone_stub "$home")
+  printf '#!/bin/sh\nprintf "reopened: yes\\n" >&2\nprintf "https://lavish.example/session/abc\\n"\n' > "$home/board-url.sh"
+  chmod +x "$home/board-url.sh"
+  export FM_PHONE_BOARD_URL_CMD="$home/board-url.sh"
+
+  out=$(phone "$home" board-link) || fail "board-link with no channel failed"
+  assert_contains "$out" 'skipped' 'no channel and no away period skips'
+  set +e
+  phone "$home" board-link --signal 'send me the board link on my phone' 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a phone signal with no channel did not exit 3 (rc=$rc)"
+
+  write_phone_config "$home" 'name: Telegram' "command: $stub"
+  out=$(phone "$home" board-link) || fail "board-link with no away record failed"
+  assert_contains "$out" 'skipped' 'no away period skips'
+  FM_AFK_MODE=quiet contract "$home" enter >/dev/null 2>&1 || fail "quiet entry failed"
+  out=$(phone "$home" board-link) || fail "board-link under quiet failed"
+  assert_contains "$out" 'skipped' 'quiet mode skips'
+  [ ! -e "$home/phone.args" ] || fail "board-link sent without an away period"
+
+  contract "$home" enter --words 'go' >/dev/null 2>&1 || fail "away entry failed"
+  [ "$(phone "$home" board-link)" = sent ] || fail "board-link did not send in a new away period"
+  [ "$(cat "$home/phone.args")" = 'Firstmate board: https://lavish.example/session/abc' ] \
+    || fail "board-link sent the wrong line: $(cat "$home/phone.args")"
+  contract "$home" enter >/dev/null 2>&1 || fail "refresh failed"
+  contract "$home" enter --words 'new words' >/dev/null 2>&1 || fail "new words failed"
+  out=$(phone "$home" board-link) || fail "repeat board-link failed"
+  assert_contains "$out" 'already sent this away period' 'a refresh or new words never resend'
+  [ "$(wc -l < "$home/phone.args" | tr -d ' ')" = 1 ] || fail "board-link resent in the same away period"
+
+  printf '1\n' > "$home/state/phone-board-link.sent"
+  [ "$(phone "$home" board-link)" = sent ] || fail "a later away period did not send"
+
+  set +e
+  phone "$home" board-link --signal 'update the board please' 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 4 ] || fail "a message naming no phone phrase did not exit 4 (rc=$rc)"
+  [ "$(phone "$home" board-link --signal 'Send me the board link ON MY PHONE')" = sent ] \
+    || fail "a phone signal did not send after the away-period link"
+  [ "$(wc -l < "$home/phone.args" | tr -d ' ')" = 3 ] || fail "expected three board-link sends"
+
+  printf '#!/bin/sh\nexit 1\n' > "$home/board-url.sh"
+  printf '1\n' > "$home/state/phone-board-link.sent"
+  set +e
+  phone "$home" board-link 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "a failed board URL did not exit 1 (rc=$rc)"
+  [ "$(cat "$home/state/phone-board-link.sent")" = 1 ] || fail "a failed send was recorded as sent"
+  assert_contains "$(cat "$home/state/phone-channel.log")" 'no board URL' 'the missing URL is logged'
+  unset FM_PHONE_BOARD_URL_CMD
+  pass "the board link goes to the phone once per away period and on a phone signal, never on a refresh"
+}
+
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
@@ -864,3 +923,4 @@ test_refresh_says_when_the_phone_channel_no_longer_matches_the_record
 test_quiet_entry_never_records_the_phone_channel
 test_phone_send_is_one_bounded_redacted_line
 test_phone_away_outcome_sends_only_under_a_phone_away_record
+test_phone_board_link_goes_once_per_away_period_and_on_a_phone_signal
