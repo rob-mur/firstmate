@@ -37,6 +37,12 @@
 # holds for a reason sentence that asks (carries a `?`) and marks two or more
 # choices "(a)", "(b)" ... in order, a mark optionally followed by ", ..." such
 # as "(a, recommended)": the card is named rather than shown with no choices.
+# A card that offers options and whose shown background (`about`) still lists
+# its choices as bare lowercase "a) ... b) ..." marks, at least two running a,
+# b, ... in order (option_parse_by("inline-letter") in
+# bin/fm-bearings-question-lib.sh, the reader inline_letter_options uses),
+# would print its options twice, so it is named: its owner re-posts it without
+# the list in the reason. A single "a)" in ordinary prose is no list.
 # A card also lists each link once: two spellings of its `links` urls and
 # `pr_url` that differ only by trailing slashes or a `#fragment`, or one url
 # repeated within `links`, name the card. A `pr_url` repeated exactly in
@@ -66,7 +72,8 @@
 # fm_bearings_undecided_cards <data.json> [<link-states.json>]: print one
 # `<key>: <problem>` line per Captain's Call card in an fm-bearings-board.v1
 # payload that fails the rule, <problem> being `missing <field> (<why>)[, ...]`,
-# `duplicate link (<url> ...)` and/or `names <url>, already merged|closed`
+# `options given twice (...)`, `duplicate link (<url> ...)` and/or
+# `names <url>, already merged|closed`
 # (from the link states fm_bearings_card_link_states printed), joined by `; `.
 #
 # fm_bearings_status_decision_problem <task> <key> <note>: check one worker
@@ -85,6 +92,8 @@
 # failed), which a caller must not read as a verdict.
 
 FM_BEARINGS_CARD_CHECK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=bin/fm-bearings-question-lib.sh
+. "$FM_BEARINGS_CARD_CHECK_DIR/fm-bearings-question-lib.sh"
 
 # The PR/MR-shaped urls in a payload's Captain's Call cards' `links`, merge
 # cards aside, normalised as link_norm does in fm_bearings_undecided_cards.
@@ -127,7 +136,8 @@ EOF
 fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
   local states='{}'
   if [ -n "${2:-}" ]; then states=$(cat -- "$2") || return 1; fi
-  jq -r --argjson states "$states" '
+  # shellcheck disable=SC2016  # jq program text.
+  jq -r --argjson states "$states" "$FM_BEARINGS_QUESTION_JQ_DEFS"'
     def text: if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end;
     def asks: text | contains("?");
     def link_norm: sub("#.*$"; "") | sub("/+$"; "");
@@ -181,7 +191,10 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
          else empty end),
         (if ($raised | not) and ($linked | not)
          then "link (no link: re-hold with --link <url|page:id> or --no-link)" else empty end) ] as $missing
+    | ((.options | length) > 0
+       and ((.about // "") | strings | option_parse_by("inline-letter")) != null) as $twice
     | [ (if ($missing | length) > 0 then "missing \($missing | join(", "))" else empty end),
+        (if $twice then "options given twice (the background lists lettered a) b) choices as well as the card options: re-post without the list in the reason)" else empty end),
         ($dups[] | "duplicate link (\(.) is listed more than once: keep one)"),
         $over[] ]
     | select(length > 0)
