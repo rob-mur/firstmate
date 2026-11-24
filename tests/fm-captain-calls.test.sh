@@ -408,6 +408,65 @@ test_inline_lettered_options_leave_the_question() {
   pass "a question's inline a), b), c) become its options and leave the question"
 }
 
+# A second mate with one registered local home, for the mate call tests below.
+make_mate_home() {  # <name>
+  local home
+  home=$(make_home "$1")
+  printf -- '- mm - mate work (home: %s/mm-home; scope: mate work; projects: m; added 2026-11-01)\n' "$home" \
+    > "$home/data/secondmates.md"
+  mkdir -p "$home/mm-home/data"
+  printf '## Queued\n\n## Done\n' > "$home/mm-home/data/backlog.md"
+  printf '%s\n' "$home"
+}
+
+test_mate_inline_recommended_option_is_the_recommend() {
+  local home out
+  home=$(make_mate_home mate-inline-recommend)
+  printf 'needs-decision [key=captain-hold-t1-1] [at=%s]: captain hold t1: Pick a) one (recommended) b) two?\n' \
+    "$LATER" > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  assert_equals "a|a=one,b=two" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-t1-1") | "\(.recommend)|\([.options[] | "\(.value)=\(.label)"] | join(","))"')" \
+    "the option marked (recommended) is the recommend and the marker leaves its label"
+  pass "a mate question's inline (recommended) option is its recommend"
+}
+
+test_mate_keyless_line_does_not_shadow_a_keyed_call() {
+  local home out
+  home=$(make_mate_home mate-keyless)
+  {
+    printf 'needs-decision [key=captain-hold-t1-1] [at=%s]: captain hold t1: Pick a) one b) two?\n' "$BEFORE"
+    printf 'needs-decision [at=%s]: captain hold t1: Pick a) one b) two?\n' "$LATER"
+  } > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" mm.captain-hold-t1-1 calls "the keyed mate call"
+  expect_where "$out" mm.default skipped "a keyless repeat of the keyed mate call"
+
+  home=$(make_mate_home mate-keyless-own)
+  {
+    printf 'needs-decision [key=captain-hold-t1-1] [at=%s]: captain hold t1: Pick a) one b) two?\n' "$BEFORE"
+    printf 'needs-decision [at=%s]: Should the mate rotate its runner token?\n' "$LATER"
+  } > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  expect_where "$out" mm.captain-hold-t1-1 calls "the keyed mate call"
+  expect_where "$out" mm.default calls "a keyless mate call of its own"
+  pass "a keyless mate line never drops the mate's keyed call, and an own keyless call stays"
+}
+
+test_mate_backlog_hold_options_are_the_call_options() {
+  local home out
+  home=$(make_mate_home mate-backlog-options)
+  printf 'needs-decision [key=captain-hold-t2-1] [at=%s]: captain hold t2: Which way?\n' \
+    "$LATER" > "$home/state/mm.status"
+  printf '## Queued\n\n- [ ] t2 - Way (hold: which way) (hold-kind: captain)\n  Captain hold option: x=Go left (recommended)\n  Captain hold option: y=Go right\n\n## Done\n' \
+    > "$home/mm-home/data/backlog.md"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  assert_equals "x|x=Go left,y=Go right" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-t2-1") | "\(.recommend)|\([.options[] | "\(.value)=\(.label)"] | join(","))"')" \
+    "the mate backlog's hold options are the call's options, with its recommend"
+  pass "a mate backlog's Captain hold option lines are the call's options"
+}
+
 test_cd_calls_named_by_housekeeping_steers_stay_calls() {
   local out key
   out=$(run_calls "$FIXTURE" "$FIXTURE/prs-fos-merged.tsv") || fail "fm-captain-calls failed"
@@ -584,6 +643,9 @@ fm_test_run \
   test_a_re_held_task_shows_only_its_current_options \
   test_a_worker_key_on_a_held_task_is_not_a_second_call \
   test_inline_lettered_options_leave_the_question \
+  test_mate_inline_recommended_option_is_the_recommend \
+  test_mate_keyless_line_does_not_shadow_a_keyed_call \
+  test_mate_backlog_hold_options_are_the_call_options \
   test_cd_calls_named_by_housekeeping_steers_stay_calls \
   test_cd_870_version_file_is_a_call_with_its_open_pr \
   test_captain_hold_key_names_its_task_and_question \
