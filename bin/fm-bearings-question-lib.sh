@@ -186,10 +186,14 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
     else . end;
   def option_parse_by($kind):
     . as $q
-    # The last option ends at its sentence end (before a capital, a link or a
-    # path), else before a bare link no "at", "on", "in", "see" or "via" leads.
+    # The last option ends at a " \u2014 " (em dash) that a link follows, as in
+    # "b) post it as a draft \u2014 MR 125: https://...", then at its sentence end
+    # (before a capital, a link or a path), else before a bare link no "at",
+    # "on", "in", "see" or "via" leads.
     | def cut_last:
-        ([match("[.!?](?=[[:space:]]+(?:[A-Z]|https?://|/))").offset][0]) as $o
+        ([match("[[:space:]]+\u2014[[:space:]].*https?://").offset][0]) as $d
+        | (if $d == null then . else .[:$d] end)
+        | ([match("[.!?](?=[[:space:]]+(?:[A-Z]|https?://|/))").offset][0]) as $o
         | if $o != null then .[:($o + 1)]
           else ([match("(?<w>[^[:space:]]*)(?<s>[[:space:]]+)https?://"; "g")
               | select(.captures[0].string | test("^(?:at|on|in|see|via)$"; "i") | not)
