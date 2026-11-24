@@ -16,7 +16,10 @@
 # (bin/fm-bearings-board.sh owns how).
 #
 # --kick records a refresh request and starts this script detached, returning at
-# once. In a secondmate home with no board it forwards the request once to the
+# once. The detached refresher only serves a request still recorded when it
+# starts (--serve-pending, internal to --kick): one a running pass already
+# served needs no second pass, and a refresher the scheduler starts late would
+# otherwise take its own snapshot of whatever moved since. In a secondmate home with no board it forwards the request once to the
 # parent home named by a local-route .fm-secondmate-parent record, because the
 # parent board shows that home's decisions; any other home without a board makes
 # it a no-op. It is the hook for every fleet state change: each wake appended to
@@ -166,7 +169,7 @@ kick() {
     exit 0
   fi
   mkdir -p "$STATE" 2>/dev/null && : >"$PENDING" 2>/dev/null || exit 0
-  ( nohup "$0" >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
+  ( nohup "$0" --serve-pending >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
   exit 0
 }
 
@@ -183,8 +186,10 @@ newest_line_asks_captain() {  # <status-file>
 }
 
 FORCE=0
+SERVE_PENDING=0
 case "${1:-}" in
   --force) FORCE=1 ;;
+  --serve-pending) SERVE_PENDING=1 ;;
   --kick) kick ;;
   --kick-decision)
     [ "$#" -eq 2 ] || { echo "fm-board-refresh: --kick-decision needs one status file" >&2; exit 2; }
@@ -199,7 +204,13 @@ esac
 [ -f "$BOARD" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 mkdir -p "$STATE" || exit 0
-: >"$PENDING" || exit 0
+# A direct call is itself a request; a kicked refresher serves only the one its
+# kick recorded, if no running pass has served it yet.
+if [ "$SERVE_PENDING" = 1 ]; then
+  [ -f "$PENDING" ] || exit 0
+else
+  : >"$PENDING" || exit 0
+fi
 
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
