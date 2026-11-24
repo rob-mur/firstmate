@@ -755,6 +755,7 @@ Blank lines and `#` comments are ignored, and any other line, a repeated directi
 An away entry that finds the channel configured records it and names it in the entry announcement and read-back.
 While that away record stands, each non-silent outcome the away session stores with the captain verdict is also sent to the command as one line, `Firstmate needs you: <summary>`: decisions, review-ready PRs, blockers, and credential needs.
 The outcome is stored before the send, so a failed or slow send never loses it, and it still waits for the captain's return.
+That away entry also sends the bearings board's stable link once, `Firstmate board: <url>`, and never again in the same away period, whatever rebuilds the board; a captain message saying they are on their phone sends it on request.
 An absent file keeps the hold-for-return announcement that says no phone channel is configured; a malformed one keeps that announcement and entry prints what is wrong.
 A refresh leaves the record untouched, so an entry says when the channel no longer matches it; entering `/afk` again with words picks the change up.
 Quiet mode never uses the channel.
