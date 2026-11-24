@@ -483,6 +483,132 @@ test_mate_backlog_option_letter_tags_leave_the_labels() {
   pass "a recorded option's leading letter tag leaves its label and keeps its recommendation"
 }
 
+# The cd-987-path-filter-calls card stopped mid-word at '"{src,envs}/**" are
+# rej': the parent channel cuts a hold note to its bound with no marker, and the
+# card took its question from that line. The row in the mate's backlog holds
+# the full reason, so the card shows all five calls and the answer to the
+# captain's enforcement question. The row names the design doc in each of its
+# three paragraphs, and the reason links it too: the card links it once. With
+# no row to read, a line as long as the bound is a call cut short.
+CD987_DESIGN=https://forgejo.clarob.uk/rob/continuous-delivery/issues/987#issuecomment-35848
+cd987_reason() {
+  cat <<'CD987'
+Path filter design (#987, design section 4): which answer do you choose for each of the five calls below? Answer with one line like "1a 2a 3a 4a 5a". Each example uses workload-pruner, whose slow GPU stage (non-functional-requirements, NFR) should skip on a docs-only push to main.
+1. Option name for the files a stage depends on. Recommended: 1a.
+ 1a reads: in devenv.nix you write cd-pipeline.verbs.non-functional-requirements.reads = [ "src/**" "envs/**" "Cargo.lock" ]; a push that changes only README.md skips NFR; a push that changes src/main.rs runs it, and the run fails if NFR opened a file outside that list.
+ 1b paths: the same list, written ...non-functional-requirements.paths = [ ... ]; same behaviour, but people read it as a GitHub-style trigger and expect !negation to work.
+ 1c changedPaths: ...non-functional-requirements.changedPaths = [ ... ]; same behaviour, name describes the push, not the stage.
+ 1d runsWhenChanged: ...non-functional-requirements.runsWhenChanged = [ ... ]; same behaviour, reads as a rule rather than a list of files.
+2. Glob syntax inside that list. Recommended: 2a.
+ 2a strict glob.rs: "src/**" and "envs/*.py" work; "!docs/**" and "{src,envs}/**" are rejected when devenv builds, so you write two entries instead.
+ 2b git pathspec: ":(glob)src/**" and ":(exclude)docs/**" work; every entry carries git's prefix syntax.
+ 2c GitHub/minimatch: "src/**", "!src/docs/**" and "{src,envs}/**" all work; once adopters use ! and braces we cannot remove them.
+3. What the forge shows for NFR on a docs-only push. Recommended: 3a.
+ 3a forge skipped: the commit shows NFR as grey skipped; end-of-run prints "non-functional-requirements: skipped by path filter, base <sha>, 0 of 3 changed files matched" and stays green; a skip for any other reason (failed upstream) turns end-of-run red.
+ 3b no-op success: NFR shows a green tick although it judged nothing; release notes cannot tell it apart from a real pass.
+ 3c run and fail: NFR shows red on every docs-only push, so the filter is useless.
+ 3d extra status: NFR shows skipped plus a separate ci:nfr-skipped status; needs the pipeline to write to the forge, which #47 forbids today.
+4. NFR opens a file the list leaves out, e.g. scripts/voxtype-request.sh when reads has only src/** and envs/**. Recommended: 4a.
+ 4a fail: that run goes red and names scripts/voxtype-request.sh; you add it to reads and push again. workload-pruner would go red on its first filtered run until it adds scripts/voxtype-request.sh, host/** and results/NOTES.md.
+ 4b warn first: that run stays green with a warning in the log; a later release turns the warning red, which breaks adopters who ignored it.
+5. Input name in the shared main workflow (generated for you; you only see it if you read the workflow). Recommended: 5a.
+ 5a <job>-reads: the generated caller passes non-functional-requirements-reads: '["src/**","envs/**"]', next to the existing non-functional-requirements-runs-on.
+ 5b one JSON input: the caller passes path-filters: '{"non-functional-requirements":["src/**","envs/**"]}' covering every job.
+Your question: how is "the run fails if NFR opened a file outside that list" enforced?
+ What observes the files: on every run of NFR that is not skipped, the pipeline's own NFR job starts a file-open tracer (inotify IN_OPEN watching the whole checkout, recursively) before the stage command runs, and stops it after. The adopter writes nothing for this.
+ Where the check runs: in that same NFR job on the GPU runner, as a step after the stage command. It keeps only files git tracks (git ls-files), drops .git/, .ci/ and .devenv/, then checks each one against the reads list plus the pipeline's fixed always-run set (devenv.nix and the pipeline's own files).
+ What the failure looks like: the NFR job goes red with a line like "non-functional-requirements read scripts/voxtype-request.sh, which is not in cd-pipeline.verbs.non-functional-requirements.reads; add it or a glob that covers it". The run never marks the commit releasable. If the tracer cannot start or drops events (inotify queue overflow), the job also goes red; it never passes unchecked.
+ Why a skip is safe: any change to the reads list changes devenv.nix, so that push always runs NFR under the tracer. After that, NFR can only start reading a new file because a file it already reads changed, and that change is in the list, so that run is traced too.
+ Limits: reads that are not file opens inside the checkout (network, GPU driver, files outside the repo) are not seen; a scheduled unfiltered run and a manual run button cover those. Before building, a test run on the GPU host must confirm inotify sees reads through the sandbox bind mount (measurement M5). If it does not, the tracer becomes fanotify or strace; the check and the failure stay the same.
+Design: https://forgejo.clarob.uk/rob/continuous-delivery/issues/987#issuecomment-35848
+CD987
+}
+
+test_mate_long_hold_shows_its_full_text() {
+  local home out card reason line
+  # shellcheck source=bin/fm-hold-reason-lib.sh
+  . "$ROOT/bin/fm-hold-reason-lib.sh"
+  # shellcheck source=bin/fm-parent-channel-lib.sh
+  . "$ROOT/bin/fm-parent-channel-lib.sh"
+  reason=$(cd987_reason)
+  line="needs-decision [key=captain-hold-cd-987-path-filter-calls-1] [at=$LATER]: captain hold cd-987-path-filter-calls: $(fm_parent_channel_clean_note "$reason")"
+  case "$line" in *'"{src,envs}/**" are rej') ;; *) fail "the fixture line is not cut where the live line was" ;; esac
+
+  home=$(make_mate_home mate-long-hold)
+  printf '%s\n' "$line" > "$home/state/mm.status"
+  {
+    printf '## Queued\n\n'
+    printf -- '- [ ] cd-987-path-filter-calls - #987 path filter design: five calls (repo: continuous-delivery) (kind: captain) (hold: %s) (hold-kind: captain)\n' \
+      "$(fm_hold_reason_encode "$reason")"
+    printf '  Captain hold set: 2026-11-24T13:03:31Z\n  Captain hold free text: yes\n  Captain hold link: %s design doc\n\n' "$CD987_DESIGN"
+    printf '  Captain hold free text: yes\n  Captain hold link: %s design doc\n\n' "$CD987_DESIGN"
+    printf '  Captain hold origin: cd-987-path-filter-design\n  Captain hold free text: yes\n  Captain hold link: %s design doc\n\n' "$CD987_DESIGN"
+    printf '## Done\n'
+  } > "$home/mm-home/data/backlog.md"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  card=$(printf '%s\n' "$out" | jq -c '.calls[] | select(.key == "mm.captain-hold-cd-987-path-filter-calls-1")')
+  [ -n "$card" ] || fail "the cd-987 hold is not a call"
+  assert_equals "$reason" "$(printf '%s\n' "$card" | jq -r '.question')" "the question is the row's full hold reason"
+  assert_contains "$(printf '%s\n' "$card" | jq -r '.question')" ' 5b one JSON input: ' "call 5 is on the card"
+  assert_contains "$(printf '%s\n' "$card" | jq -r '.question')" ' What observes the files: ' "the enforcement answer is on the card"
+  assert_equals "$CD987_DESIGN|design doc" \
+    "$(printf '%s\n' "$card" | jq -r '[.links[] | "\(.url)|\(.label)"] | join(",")')" \
+    "the design doc is linked once, with its label"
+  assert_equals false "$(printf '%s\n' "$card" | jq -r '.cut_short')" "a call read from its row is not cut short"
+
+  home=$(make_mate_home mate-long-hold-no-row)
+  {
+    printf '%s\n' "$line"
+    printf 'needs-decision [key=captain-hold-t5-1] [at=%s]: captain hold t5: Ship it?\n' "$LATER"
+  } > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  assert_equals true \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-cd-987-path-filter-calls-1") | .cut_short')" \
+    "a call known only from a line as long as the channel bound is cut short, and stays a call"
+  assert_equals false \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-t5-1") | .cut_short')" \
+    "a short line is not cut short"
+  pass "a mate hold card shows its full hold text and design link once; a cut line alone is cut short"
+}
+
+# The real cd-987-stage-calls holds of the cd secondmate home: first held at
+# 13:33:15Z, re-held at 13:34:14Z with the question first. Each ends in an
+# "Evidence: data/<task>/report.md" tail (a new line before it in the row), so
+# each version of the call has that report, and the tail is never question text.
+CD987_STAGE_EVIDENCE=data/cd-987-skippable-stages/report.md
+CD987_STAGE_FIRST='Path filter for #987, four more calls: 6 which stages may skip (only NFR on main passes the analysis), 7 the format of the reads input in the generated workflow, 8 ship now on Forgejo 16 despite a known queue-stall report, 9 add nightly and manual unfiltered runs. Answer with one line like "6a 7a 8a 9a" (recommended all a). Options and the skip analysis for every pipeline part are in the report.'
+CD987_STAGE_REHELD='Path filter (#987): which answer do you choose for each of calls 6 to 9? Answer with one line like "6a 7a 8a 9a" (recommended all a). 6 which stages may skip (only NFR on main passes the analysis), 7 the format of the reads input in the generated workflow, 8 ship now on Forgejo 16 despite a reported queue stall, 9 add nightly and manual unfiltered runs. Options and the skip analysis are in the report.'
+
+test_mate_hold_evidence_tail_is_always_its_report() {
+  local home out reason
+  # shellcheck source=bin/fm-hold-reason-lib.sh
+  . "$ROOT/bin/fm-hold-reason-lib.sh"
+  home=$(make_mate_home mate-stage-first)
+  printf 'needs-decision [key=captain-hold-cd-987-stage-calls-1] [at=%s]: captain hold cd-987-stage-calls: %s Evidence: %s\n' \
+    "$LATER" "$CD987_STAGE_FIRST" "$CD987_STAGE_EVIDENCE" > "$home/state/mm.status"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  assert_equals "$CD987_STAGE_EVIDENCE|$CD987_STAGE_FIRST" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-cd-987-stage-calls-1") | "\(.report)|\(.question)"')" \
+    "the first hold, known from its line, has the report and no Evidence: text"
+
+  home=$(make_mate_home mate-stage-reheld)
+  reason=$(printf '%s\nEvidence: %s' "$CD987_STAGE_REHELD" "$CD987_STAGE_EVIDENCE")
+  printf 'needs-decision [key=captain-hold-cd-987-stage-calls-1] [at=%s]: captain hold cd-987-stage-calls: %s Evidence: %s\n' \
+    "$LATER" "$CD987_STAGE_REHELD" "$CD987_STAGE_EVIDENCE" > "$home/state/mm.status"
+  {
+    printf '## Queued\n\n'
+    printf -- '- [ ] cd-987-stage-calls - #987 path filter: four more calls (answer like 6a 7a 8a 9a) (repo: continuous-delivery) (kind: captain) (hold: %s) (hold-kind: captain)\n' \
+      "$(fm_hold_reason_encode "$reason")"
+    printf '  Captain hold set: 2026-11-24T13:34:14Z\n  Captain hold origin: cd-987-skippable-stages\n  Captain hold free text: yes\n  Captain hold link: %s design doc\n\n' "$CD987_DESIGN"
+    printf '## Done\n'
+  } > "$home/mm-home/data/backlog.md"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  assert_equals "$CD987_STAGE_EVIDENCE|$CD987_STAGE_REHELD" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-cd-987-stage-calls-1") | "\(.report)|\(.question)"')" \
+    "the re-held call, read from its row, has the report and no Evidence: text"
+  pass "a mate hold's Evidence: data/<task>/report.md tail is its report in every version"
+}
+
 # The pdm-oss-history-name card lost the instruction after its options and the
 # "Evidence: <path>" tail that names its report.
 test_mate_inline_options_keep_trailing_prose_and_evidence_report() {
@@ -696,6 +822,8 @@ fm_test_run \
   test_mate_backlog_hold_options_are_the_call_options \
   test_mate_backlog_option_letter_tags_leave_the_labels \
   test_mate_inline_options_keep_trailing_prose_and_evidence_report \
+  test_mate_long_hold_shows_its_full_text \
+  test_mate_hold_evidence_tail_is_always_its_report \
   test_evidence_report_needs_an_evidence_tail \
   test_cd_calls_named_by_housekeeping_steers_stay_calls \
   test_cd_870_version_file_is_a_call_with_its_open_pr \
