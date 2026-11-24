@@ -338,6 +338,37 @@ test_lavish_axi_is_found_without_it_on_path_or_retried_later() {
   pass "lavish-axi is found where an earlier refresh saw it, and a refresh without it is retried later"
 }
 
+# A kick starts its refresher detached, and under load the scheduler may start it
+# only after a running pass has already served the request. That late refresher
+# carries whatever environment the kick had, so it must not file a request of its
+# own and take a snapshot of what moved since. A fake nohup holds the kicked
+# refresher back until the gate opens, which makes that late start certain.
+test_a_kick_a_running_pass_already_served_takes_no_late_snapshot() {
+  local home real i=0
+  home=$(make_home late-kick)
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  real=$(command -v nohup) || fail "nohup not found"
+  cat > "$home/fakebin/nohup" <<SH
+#!/usr/bin/env bash
+while [ ! -e "$home/gate" ] && [ "\$SECONDS" -lt 30 ]; do sleep 0.05; done
+"$real" "\$@"
+: > "$home/late-done"
+SH
+  chmod +x "$home/fakebin/nohup"
+  counted_refresh "$home" --kick || fail "the kick failed"
+  # The running pass serves the kick's request; nothing moved, so no snapshot.
+  counted_refresh "$home" || fail "the refresh serving the kick failed"
+  assert_equals "0" "$(payload_runs "$home")" "an unchanged fleet took a snapshot"
+  [ ! -e "$home/state/.board-refresh.pending" ] || fail "the kick's request was left unserved"
+  add_task "$home" t1
+  : > "$home/gate"
+  while [ ! -e "$home/late-done" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
+  [ -e "$home/late-done" ] || fail "the late refresher never ran"
+  assert_equals "0" "$(payload_runs "$home")" "a late refresher took a snapshot for a request already served"
+  pass "a kick a running pass already served takes no late snapshot"
+}
+
 # A home on the tasks-axi backend, so captain holds go through the real owner.
 make_hold_home() {  # <name>
   local home
@@ -1025,6 +1056,7 @@ fm_test_run \
   test_an_unchanged_fleet_takes_no_snapshot_until_its_live_inputs_age \
   test_every_kind_of_input_change_refreshes_the_board \
   test_lavish_axi_is_found_without_it_on_path_or_retried_later \
+  test_a_kick_a_running_pass_already_served_takes_no_late_snapshot \
   test_a_captain_hold_and_its_answer_rebuild_the_board \
   test_every_open_captain_hold_has_exactly_one_board_row \
   test_a_marked_steer_that_hands_a_decision_to_its_worker_moves_the_card_to_waiting \
