@@ -78,7 +78,11 @@
 # before the colon ("Option a (recommended): ...", also "(preferred)" or "(my
 # recommendation)", any case). Then inline lowercase
 # "a=one, b=two, c=three?" marks: "a=" opens a word and each later mark
-# follows ", ". Markers must run 1, 2, 3 or a, b, c
+# follows ", ". Then lowercase marks that follow their options and close the
+# question ("... yourself (a, recommended) or have it posted (b)?"): the first
+# option opens at its clause start (after the sentence start or the last ",",
+# ";" or ":" before its mark), each later one after the previous mark, and a
+# "?" must follow the last mark. Markers must run 1, 2, 3 or a, b, c
 # from the first, at least two; the last option ends at its sentence end; a
 # reason with no such list parses to null. Values are option-<n> or
 # option-<letter>. A label is the full option text, never shortened, with URLs
@@ -217,6 +221,32 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
             + ([ $o[] | select(.rec) | .value ][0] | if . == null then {} else {recommend: .} end)
             | if all(.options[]; .label | length > 0) then . else null end
           end;
+      # Marks that follow their options: the first option opens its clause (after
+      # the sentence start or the last ",", ";" or ":" before its mark), each
+      # later one opens after the previous mark and a leading "," or "or", and
+      # a "?" must close the run, so a mark that only refers back is no option.
+      def from_trailing($ms):
+        run($ms) as $r
+        | if ($r | length) < 2 then null
+          else ($r[-1].offset + $r[-1].length) as $e
+            | $q[:$r[0].offset] as $pre
+            | ([ $pre | match("[.!?][[:space:]]+"; "g") | .offset + .length ] | max // 0) as $ss
+            | (([ $pre[$ss:] | match("[,;:][[:space:]]+"; "g") | .offset + .length ] | max // 0) + $ss) as $cs
+            | if ($q[$e:] | test("^[[:space:]]*[?]") | not) then null
+              else
+                [ range(0; $r | length) as $i
+                  | {value: $r[$i].value, rec: $r[$i].rec,
+                     text: (if $i == 0 then $q[$cs:$r[0].offset]
+                            else $q[($r[$i - 1].offset + $r[$i - 1].length):$r[$i].offset] end)} ] as $o
+                | {lead: $q[:$cs], tail: ($q[$e:] | sub("^[[:space:]]*[?]"; "")),
+                   options: [ $o[] | {value, label: (.text
+                     | sub("^[[:space:],;]*(?:(?:or|and|then|either)[[:space:]]+)?"; "")
+                     | sub("^(?i:(?:will|would|shall|should|can|could|do) (?:you|I|we) (?:want (?:me|us) to |like (?:me|us) to )?)"; "")
+                     | choice_label | captain_terms | phrase_cap)} ]}
+                + ([ $o[] | select(.rec) | .value ][0] | if . == null then {} else {recommend: .} end)
+                | if all(.options[]; .label | length > 0) then . else null end
+              end
+          end;
       def from_list:
         ([ $q | match("(?<![[:alnum:]])(?:[Oo]ptions|[Cc]hoices|[Dd]ecision)[[:space:]]*:[[:space:]]*"; "g") ][0]) as $m
         | if $m == null then null
@@ -249,6 +279,9 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
         # "a=one, b=two, c=three?": "a=" opens a word and each later mark follows
         # ", ", so key=, at=, a URL query (?a=1&b=2) and "a=1 b=2" are no marks.
         // from_marks(marks("(?:(?<![^[:space:]])(?=a=)|(?<=, ))(?<k>[a-z])=(?=[^[:space:]=])"; "letter"))
+        # "... yourself (a, recommended) or have this lane post it (b)?": each
+        # option ends at its mark.
+        // from_trailing(marks("(?<![[:alnum:]])\\((?<k>[a-z])" + $rec + "\\)(?=[[:space:]]*(?:[,;]|or[[:space:]]|[?]))"; "letter"))
       elif $kind == "inline-letter" then
         from_marks(marks("(?<![^[:space:]:;,])(?<k>[a-z])\\)(?=[[:space:]])"; "letter"))
       else from_list end;
