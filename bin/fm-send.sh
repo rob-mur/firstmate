@@ -193,6 +193,10 @@
 # open-decision ledger fm-wake-drain folds lives in this home's own state dir
 # (a remote mate's escalations reach it through the parent-replies ingest);
 # only the answer message crosses the backend or remote transport.
+# A home that publishes state/home-summary.json (bin/fm-home-summary-refresh.sh)
+# republishes it after a delivered close, detached and best-effort, because the
+# close is a self-announced append that wakes no watcher; a secondmate's parent
+# board then drops the answered decision without waiting for the next refresh.
 #
 # Answering a decision is the gate-answer path and is main-owned while
 # attended: when any named key is an open needs-decision or a captain-held task
@@ -940,6 +944,21 @@ fm_send_close_resolved_keys() { # <answer-text>
     esac
     i=$((i + 1))
   done
+  fm_send_republish_home_summary
+}
+
+# A close is a self-announced append, so it never wakes this home's watcher,
+# and the watcher republishes state/home-summary.json only on a wake or its
+# interval. A home that publishes that summary (a secondmate home's parent
+# reads its open decisions from it) republishes it now, detached and
+# best-effort, so the answered decision leaves the parent board at once and
+# the send's result and time are unchanged. The refresh lock makes it wait for
+# an in-flight refresh rather than skip, so a summary computed before the
+# close never stands as the last one.
+fm_send_republish_home_summary() {
+  [ -f "$STATE/home-summary.json" ] || return 0
+  FM_HOME="$FM_HOME" FM_HOME_SUMMARY_IF_IDLE=0 \
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
 }
 
 # Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed
