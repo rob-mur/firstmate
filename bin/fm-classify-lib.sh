@@ -1116,6 +1116,50 @@ status_decision_opened_keyed() {  # <status-file> <key>
   return "$keyed"
 }
 
+# The correlation token a status line carries as its reply marker: a whole
+# "corr=<16 hex>" word before the line's first colon, bracketed ("[corr=...]",
+# as bin/fm-secondmate-report.sh writes it) or bare (as fm-pending-reply-lib
+# writes it), or the first word of its note (the older reply shape). Prints the
+# hex and returns 0, or returns 1 when the line carries none there. A token
+# elsewhere in the note is prose and does not count.
+_fm_status_line_corr() {  # <status-line>
+  local u head word note
+  _fm_status_unstamped "$1" u
+  case "$u" in *:*) ;; *) return 1 ;; esac
+  head=${u%%:*}
+  head=${head//\[/ }
+  head=${head//\]/ }
+  head=${head#"${head%%[![:space:]]*}"}
+  while [ -n "$head" ]; do
+    word=${head%%[[:space:]]*}
+    head=${head#"$word"}
+    head=${head#"${head%%[![:space:]]*}"}
+    _fm_classify_is_corr_token "$word" && { printf '%s\n' "${word#corr=}"; return 0; }
+  done
+  status_line_note "$1" note
+  word=${note%%[[:space:]]*}
+  _fm_classify_is_corr_token "$word" && { printf '%s\n' "${word#corr=}"; return 0; }
+  return 1
+}
+
+# The correlation token of the line that opened decision <key> in the log - the
+# newest needs-decision/blocked line folding to it, as above - when that line
+# is a reply to a marked request (see _fm_status_line_corr). Prints the hex and
+# returns 0, or returns 1 when the opener carries none.
+status_decision_opened_corr() {  # <status-file> <key>
+  local f=$1 want=$2 line verb key corr=''
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb "$line" verb
+    case "$verb" in needs-decision|blocked) ;; *) continue ;; esac
+    key=$(_fm_decision_key "$line") || continue
+    [ "$key" = "$want" ] || continue
+    corr=$(_fm_status_line_corr "$line") || corr=''
+  done < "$f"
+  [ -n "$corr" ] || return 1
+  printf '%s\n' "$corr"
+}
+
 # Tag each line of an open-decision set ("<key>\t<verb>\t<note>" on stdin, as
 # status_open_decisions prints) for task <task> with the captain call that
 # already answered it: prints "<answered-task-id>\t<line>", with an empty first
