@@ -10,7 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Claude session settings](#claude-session-settings-configclaude-session-settingsjson), [Claude crew settings](#claude-crew-settings-configclaude-crew-settingsjson), [Claude secondmate settings](#claude-secondmate-settings-configclaude-secondmate-settingsjson), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [several Codex accounts](#several-codex-accounts-configcodex-accounts), [per-spawn MCP servers](#per-spawn-mcp-servers-configmcp-serversjson), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), [stow guard](#stow-guard-configstow-guard), and [chat ask guard](#chat-ask-guard-configchat-ask-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
@@ -1430,6 +1430,20 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
+
+## Chat ask guard (config/chat-ask-guard)
+
+The Claude Stop hook `bin/fm-chat-ask-guard.sh` keeps a captain ask in chat from ending the turn without a card on the captain's board.
+It is on by default in a plain Claude primary checkout of this home, and it stays silent in a crew worktree and in a marked secondmate home.
+When the final message of a turn asks the captain for something, and the turn held no card with `bin/fm-captain-hold.sh` and the message names no open board call, the hook blocks the turn end once.
+Its block message quotes the ask and gives the exact `bin/fm-captain-hold.sh hold` command to run.
+A message names an open board call when it carries that call's task id, a URL the call carries, or an MR, PR, or issue number the call names.
+The exact reply `Captain, shipshape.` and a message that only reports, relays, or asks a rhetorical question pass.
+The hook blocks at most once for each captain prompt, so the session can end the turn on the next stop when an open card already covers the ask.
+A hook error does not block the turn, and the hook never records a card itself.
+To turn it off, put `off` as the first line of the optional local, gitignored `config/chat-ask-guard`, which is per home and is not inherited.
+Blank lines and lines that start with `#` are ignored.
+The script header owns the ask heuristic, the coverage match, the state file, and the block message.
 
 ## Stow guard (config/stow-guard)
 
