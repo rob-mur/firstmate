@@ -25,6 +25,21 @@
 # non-silent captain-verdict outcome: the outcome is stored first, so a failed
 # or slow send never loses it, and the return brief still lists it.
 #
+# THE BOARD LINK. `board-link` sends `Firstmate board: <url>`, the URL being
+# what bin/fm-bearings-board.sh `url` prints (the stable board link, reopened if
+# the captain ended it; FM_PHONE_BOARD_URL_CMD replaces that command, for
+# tests). bin/fm-afk-launch.sh `enter` calls it with no signal after an away
+# entry: it sends only while an away record with `reach_channels: phone`
+# stands, and only once per away period, keyed by the record's entered_epoch
+# in state/phone-board-link.sent, which a refresh or new words keep, so no
+# re-entry or board rebuild sends it again. A captain chat message is an "on
+# my phone" signal only when it contains one of these phrases, case-insensitive:
+# "on my phone", "to my phone", "from my phone", "on my mobile". Firstmate
+# passes such a message as --signal (the bearings board reference owns that
+# step); a signal is the captain asking, so it sends whether or not an away
+# period stands or the link already went, and a message that matches no phrase
+# sends nothing (exit 4).
+#
 # WHAT IS SENT. One line: newlines collapsed, likely credentials (token
 # prefixes, key=value secrets, URL user info, private-key blocks) redacted, and
 # cut to FM_PHONE_CHANNEL_MAX_CHARS (default 300) while keeping the first
@@ -46,6 +61,11 @@
 #     Send `Firstmate needs you: <summary>` only while an away record with
 #     `reach_channels: phone` stands; otherwise do nothing and exit 0. Exit as
 #     `send` does when it sends.
+#   fm-phone-channel.sh board-link [--signal <captain message>]
+#     Send the board link as THE BOARD LINK above describes. Prints `sent` or
+#     `skipped<TAB><why>` and exits 0; exits 1 when the board URL or the send
+#     fails, 3 when the channel is absent or malformed (signal only), and 4
+#     when the --signal message names no phone phrase.
 set -u
 
 FM_PHONE_CHANNEL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -214,6 +234,63 @@ fm_phone_channel_away_outcome() {  # <summary>
   fm_phone_channel_send "Firstmate needs you: $1"
 }
 
+# Whether a captain message is an "on my phone" signal (THE BOARD LINK).
+fm_phone_channel_phone_signal() {  # <message>
+  local text
+  text=$(printf '%s' "$1" | tr '[:upper:]\n' '[:lower:] ' | tr -s ' ')
+  case "$text" in
+    *'on my phone'*|*'to my phone'*|*'from my phone'*|*'on my mobile'*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_phone_channel_board_link() {  # [--signal <message>]
+  local signal=0 message='' record epoch='' marker url rc
+  if [ "$#" -gt 0 ]; then signal=1; message=$2; fi
+  marker="$FM_PHONE_CHANNEL_STATE/phone-board-link.sent"
+  # shellcheck source=bin/fm-afk-contract.sh
+  . "$FM_PHONE_CHANNEL_DIR/fm-afk-contract.sh" || return 1
+  record=$(fm_afk_contract_path "$FM_PHONE_CHANNEL_STATE")
+  if fm_afk_contract_away_present "$FM_PHONE_CHANNEL_STATE" \
+    && [ "$(fm_afk_contract_read_field "$record" reach_channels)" = phone ]; then
+    epoch=$(fm_afk_contract_read_field "$record" entered_epoch)
+  fi
+  if [ "$signal" -eq 1 ]; then
+    fm_phone_channel_phone_signal "$message" || {
+      printf 'fm-phone-channel: the message names no phone phrase; nothing sent\n' >&2
+      return 4
+    }
+  else
+    [ -n "$epoch" ] || { printf 'skipped\tno away period with the phone channel\n'; return 0; }
+    if [ "$(cat "$marker" 2>/dev/null)" = "$epoch" ]; then
+      printf 'skipped\talready sent this away period\n'
+      return 0
+    fi
+  fi
+  fm_phone_channel_load
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 1 ] && FM_PHONE_CHANNEL_WHY='config/phone-channel is absent'
+    [ "$signal" -eq 1 ] || { printf 'skipped\t%s\n' "$FM_PHONE_CHANNEL_WHY"; return 0; }
+    printf 'fm-phone-channel: %s; nothing sent\n' "$FM_PHONE_CHANNEL_WHY" >&2
+    return 3
+  fi
+  if [ -n "${FM_PHONE_BOARD_URL_CMD:-}" ]; then
+    url=$($FM_PHONE_BOARD_URL_CMD 2>/dev/null </dev/null) || url=''
+  else
+    url=$(FM_HOME="$FM_HOME" "$FM_PHONE_CHANNEL_DIR/fm-bearings-board.sh" url 2>/dev/null </dev/null) || url=''
+  fi
+  url=$(printf '%s\n' "$url" | grep -E '^https?://' | tail -n 1)
+  if [ -z "$url" ]; then
+    fm_phone_channel_log_failure 'no board URL (bin/fm-bearings-board.sh url failed)'
+    printf 'fm-phone-channel: no board URL to send; nothing sent\n' >&2
+    return 1
+  fi
+  fm_phone_channel_send "Firstmate board: $url" || return $?
+  [ -z "$epoch" ] || printf '%s\n' "$epoch" > "$marker" 2>/dev/null || true
+  printf 'sent\n'
+}
+
 fm_phone_channel_main() {
   local cmd=${1:-} rc summary=''
   [ "$#" -eq 0 ] || shift
@@ -245,6 +322,13 @@ fm_phone_channel_main() {
       done
       [ -n "$summary" ] || { fm_phone_channel_usage >&2; return 2; }
       fm_phone_channel_away_outcome "$summary" ;;
+    board-link)
+      case "$#" in
+        0) fm_phone_channel_board_link ;;
+        2) [ "$1" = --signal ] || { fm_phone_channel_usage >&2; return 2; }
+           fm_phone_channel_board_link --signal "$2" ;;
+        *) fm_phone_channel_usage >&2; return 2 ;;
+      esac ;;
     -h|--help|help) fm_phone_channel_usage ;;
     *) fm_phone_channel_usage >&2; return 2 ;;
   esac

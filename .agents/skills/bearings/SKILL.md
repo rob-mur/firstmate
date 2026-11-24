@@ -3,7 +3,7 @@ name: bearings
 description: >-
   Generate a "pick up where I left off" fleet digest.
   Use when the captain invokes /bearings (plain, file, or lavish) or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Also use on a contributions check wake, when filing work linked to an upstream issue, on a procevent lavish wake whose source id is the bearings board's, and when the captain asks for the bearings board link.
+  Also use on a contributions check wake, when filing work linked to an upstream issue, on a procevent lavish wake whose source id is the bearings board's, and when the captain asks for the bearings board link or says they are on their phone.
 user-invocable: true
 metadata:
   internal: true
@@ -38,7 +38,7 @@ Load a reference with `cat` through Bash (for example `cat .agents/skills/bearin
 | --- | --- |
 | `references/digest.md` | Every `/bearings` invocation: the gather command, the secondmate reconcile request, composing the digest, and the file-mode report. |
 | `references/chat-contract.md` | Every `/bearings` invocation, before writing the reply: the four sections, empty-states, rules, and report tone. |
-| `references/lavish-board.md` | `/bearings lavish`, a `procevent lavish` wake whose source id is the bearings board's, or a request for the board link: payload rules, board wake routing, the stored task priority and where firstmate reads it, pages shown in place inside the board, the merge-click ruling. |
+| `references/lavish-board.md` | `/bearings lavish`, a `procevent lavish` wake whose source id is the bearings board's, a request for the board link, or the captain saying they are on their phone: payload rules, board wake routing, the stored task priority and where firstmate reads it, pages shown in place inside the board, the merge-click ruling. |
 | `references/contributions.md` | A `check: contributions` wake, or filing work linked to an upstream issue. |
 
 A contribution wake or linked-issue filing goes directly to `references/contributions.md`; the digest procedure applies to Bearings invocations only.
