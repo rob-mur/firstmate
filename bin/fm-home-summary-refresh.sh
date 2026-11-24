@@ -13,6 +13,10 @@
 # temporary file on the state directory's filesystem, then renames it over the
 # ledger. After a failed, interrupted, or killed refresh, the ledger path holds
 # either the prior complete document or the new complete document, never torn output.
+# A publication whose content moved, ignoring the stamps every publication
+# renews, kicks the board (`fm-board-refresh.sh --kick`, which a secondmate home
+# forwards to its parent's board), so a decision answered or a hold closed here
+# leaves the board at its next pass rather than one rebuild later.
 # A home-local refresh lock serializes concurrent triggers so an older in-flight
 # summary cannot overwrite one computed after a later status change. The shared
 # timeout owner bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT
@@ -100,7 +104,7 @@ home_summary_fail() {
 }
 
 home_summary_refresh_once() {
-  local producer_rc producer_error
+  local producer_rc producer_error summary_moved
   if ! mkdir -p "$STATE" 2>/dev/null; then
     home_summary_fail "state directory is unavailable: $STATE"
     return 1
@@ -177,6 +181,11 @@ home_summary_refresh_once() {
     home_summary_fail "could not set the publication file mode"
     return 1
   fi
+  summary_moved=1
+  if [ -f "$LEDGER" ] && cmp -s <(home_summary_unstamped "$LEDGER") \
+    <(home_summary_unstamped "$HOME_SUMMARY_TMP"); then
+    summary_moved=0
+  fi
   if ! mv -f -- "$HOME_SUMMARY_TMP" "$LEDGER" 2>/dev/null; then
     home_summary_fail "atomic ledger replacement failed: $LEDGER"
     return 1
@@ -185,7 +194,19 @@ home_summary_refresh_once() {
   fm_lock_release "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=0
   trap - EXIT HUP INT TERM
+  if [ "$summary_moved" -eq 1 ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-board-refresh.sh" --kick >/dev/null 2>&1 || true
+  fi
   return 0
+}
+
+# A summary less the stamps every publication renews, the same set the board's
+# input signature ignores (bin/fm-board-refresh.sh).
+home_summary_unstamped() {  # <ledger>
+  jq -S 'walk(if type == "object"
+    then del(.generated, .generated_epoch, .observed_at, .age_seconds, .valid_until)
+    else . end)' "$1" 2>/dev/null
 }
 
 home_summary_log_failure() {

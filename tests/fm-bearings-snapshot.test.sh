@@ -4575,6 +4575,31 @@ test_only_a_marked_steer_or_the_hold_mirror_hands_a_card_off() {
   pass "only a steer marked with the key, never wait wording, or the hold mirror hands a call off"
 }
 
+test_a_steer_that_moves_while_it_is_read_is_skipped_quietly() {
+  local home fakebin json err real_find
+  home=$(make_home handoff-vanish); write_defect_steer_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  write_steer_record "$home/state" mate 401 2026-11-18T09:00:00Z "cd-810-infra-home" \
+    "The captain chose option two; go ahead and ship it."
+  # The worker takes a steer between the listing and the read: the listing
+  # names a message that is gone, ahead of every file that is still there.
+  real_find=$(command -v find)
+  cat > "$fakebin/find" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'.inbox/*.msg'*) printf '%s\0' "\$1/mate.inbox/566.msg" ;;
+esac
+exec "$real_find" "\$@"
+SH
+  chmod +x "$fakebin/find"
+  err="$home/vanish.err"
+  json=$(run "$home" "$fakebin" --json 2>"$err") || fail "the snapshot failed when a listed steer vanished: $(cat "$err")"
+  ! grep -q 'awk' "$err" || fail "a vanished steer made awk complain: $(cat "$err")"
+  assert_equals "cd-810-infra-home" "$(handed_defect_holds "$json")" \
+    "the steers after a vanished one were not read"
+  pass "a steer that moves away between listing and reading is skipped without awk noise"
+}
+
 test_a_hold_gains_the_pr_link_its_home_recorded() {
   local home fakebin json
   home=$(make_home hold-pr-link); write_fixture "$home"
@@ -4775,6 +4800,7 @@ fm_test_run \
   test_a_reconciled_re_hold_raises_the_card_again \
   test_a_steer_that_only_names_a_key_never_hands_its_card_off \
   test_only_a_marked_steer_or_the_hold_mirror_hands_a_card_off \
+  test_a_steer_that_moves_while_it_is_read_is_skipped_quietly \
   test_a_hold_gains_the_pr_link_its_home_recorded \
   test_a_no_link_hold_does_not_take_its_origins_pr \
   test_a_mate_question_takes_only_its_own_repos_pr_link \
