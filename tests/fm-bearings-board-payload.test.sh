@@ -2593,6 +2593,56 @@ test_open_mrs_no_task_covers_become_information_rows() {
   pass "uncovered open MRs are validated information rows with their URL and state"
 }
 
+# The cd secondmate holds cd-732-calls and cd-forge-arm-login-access, each
+# ending in an "Evidence: <path>" line under its mate home's data directory: one
+# names a calls.md, the other a report.md.
+CD732_REASON=$(printf '%s\n%s' 'CD self-hosting (#732): which answer for calls 10 and 11? Pick one option per call (recommended 10a 11a), or type a line like "10a 11a".' \
+  'Evidence: /home/rob/.treehouse/firstmate-8a8811/6/firstmate/data/cd-732-cd-runs-own-callees/calls.md')
+FORGE_ARM_REASON=$(printf '%s\n%s' "Firstmate's tea login is a rob token limited to the repos chosen when it was made on 2026-11-03, so it cannot see bearings-board, forge-ops or firstmate-settings, and Forgejo has no way for forge-arm to extend it. How should tea reach new repos? For A, at the link: new token for rob, repository access All, scopes write:repository, write:issue, read:user; replace the tea login (tea login delete forgejo.clarob.uk, then tea login add --name forgejo.clarob.uk --url https://forgejo.clarob.uk --token <new>); delete the old token." \
+  'Evidence: /home/rob/.treehouse/firstmate-8a8811/6/firstmate/data/cd-forge-arm-login-access/report.md')
+
+# The two cd holds as the snapshot shows them, owned by the cd home.
+cd_mate_hold_payload() {
+  local snap="$TMP_ROOT/cd-mate-holds.json"
+  write_snapshot "$TMP_ROOT/cd-mate-holds-base.json"
+  jq --arg r1 "$CD732_REASON" --arg r2 "$FORGE_ARM_REASON" '.decisions_open = [
+      {id: "cd/cd-732-calls", key: "cd-732-calls", verb: "captain-hold", owner: "cd",
+       title_full: "#732 S9: CD-only release jobs and credentials (calls 10-11)", reason_full: $r1,
+       choices: {options: [], links: [{target: "https://forgejo.clarob.uk/rob/continuous-delivery/issues/732", label: ""}],
+                 free_text: true, no_link: false}},
+      {id: "cd/cd-forge-arm-login-access", key: "cd-forge-arm-login-access", verb: "captain-hold", owner: "cd",
+       title_full: "forge-arm grants the firstmate login access to an armed repo", reason_full: $r2,
+       choices: {options: [{value: "a", label: "A: you make one unrestricted rob token once and swap it into tea; no code change (recommended)"},
+                           {value: "b", label: "B: tea uses a rob-bot token, which forge-arm already adds to every armed repo; check merging as rob-bot first"},
+                           {value: "c", label: "C: keep a restricted token and remake it for every new repo"}],
+                 links: [{target: "https://forgejo.clarob.uk/user/settings/applications", label: "Forgejo access tokens"}],
+                 free_text: true, no_link: false}}]' \
+    "$TMP_ROOT/cd-mate-holds-base.json" > "$snap"
+  "$GEN" --snapshot "$snap"
+}
+
+# An "Evidence: <path>" tail links the file it names, whatever its name, and
+# leaves the about.
+test_an_evidence_path_in_a_mate_hold_is_a_card_link() {
+  local p
+  p=$(cd_mate_hold_payload) || fail "the generator failed"
+  assert_equals "/home/rob/.treehouse/firstmate-8a8811/6/firstmate/data/cd-732-cd-runs-own-callees/calls.md" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-732-calls") | [.links[] | .path // empty] | join("|")' <<<"$p")" \
+    "the calls.md Evidence path is not a link on its card"
+  assert_equals "/home/rob/.treehouse/firstmate-8a8811/6/firstmate/data/cd-forge-arm-login-access/report.md" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-forge-arm-login-access") | [.links[] | .path // empty] | join("|")' <<<"$p")" \
+    "the report.md Evidence path is not a link on its card"
+  assert_equals "Issue 732|calls.md" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-732-calls") | [.links[].label] | join("|")' <<<"$p")" \
+    "the calls.md card does not keep its issue link first"
+  assert_equals "" \
+    "$(jq -r '[.captains_call[] | ((.question // "") + (.about // "")) | select(test("Evidence:"))] | join("|")' <<<"$p")" \
+    "an Evidence: tail stayed in the card text"
+  printf '%s\n' "$p" > "$TMP_ROOT/cd-mate-holds-payload.json"
+  validates "$TMP_ROOT/cd-mate-holds-payload.json" || fail "the payload with Evidence path links did not validate"
+  pass "an Evidence: path in a mate hold links its file, calls.md and report.md alike"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_open_mrs_no_task_covers_become_information_rows \
@@ -2686,4 +2736,5 @@ fm_test_run \
   test_option_x_parenthesised_recommendation_marks_are_the_card_options \
   test_inline_letter_equals_options_are_the_card_options \
   test_inline_bare_letter_options_are_the_card_options \
-  test_lettered_options_answer_as_their_letters
+  test_lettered_options_answer_as_their_letters \
+  test_an_evidence_path_in_a_mate_hold_is_a_card_link
