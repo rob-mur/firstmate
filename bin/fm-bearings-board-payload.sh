@@ -367,6 +367,15 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   def option_words:
     {"cleared-merge": "Cleared to merge", "changes-needed": "Changes requested"}[.]
     // (gsub("[-_.]+"; " ") | sub("^ +"; "") | sub(" +$"; "") | cap);
+  # A recorded label that opens with its own option letter as a tag ("A: ...",
+  # "(B) ...", "c) ...") under that letter value shows without it, so the
+  # letter the card already shows is not written twice.
+  def untagged($v):
+    ($v | tostring) as $v
+    | if ($v | test("^[A-Za-z]$"))
+      then sub("^[[:space:]]*(?:\\((?:" + ($v | ascii_upcase) + "|" + ($v | ascii_downcase) + ")\\)|(?:"
+               + ($v | ascii_upcase) + "|" + ($v | ascii_downcase) + ")[:).])[[:space:]]+"; "")
+      else . end;
   def pr_for($id; $contrib; $recorded):
     ( ([$contrib[] | select(.task == $id) | .url][0])
       // ([$recorded[] | select(.id == $id) | .url][0]) ) as $u
@@ -899,13 +908,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                        | if $ri != null then .recommend_value = $ro[$ri].value else . end
                   # A recorded label that ends in "(recommended)" or "(preferred)"
                   # marks that option as the card recommendation, and the marker
-                  # leaves the label.
+                  # leaves the label, as does a leading tag of its own letter.
                   else "[[:space:]]*\\((?i:recommended|preferred)\\)[[:space:].;,]*$" as $mark
                        | .options = [ $ro[] | . as $o | (($o.label // "") | nz(null)) as $l
                                     | {value: $o.value,
                                        label: (if $l == null or $l == $o.value then ($o.value | option_words)
                                                elif ($l | test($mark)) then ($l | sub($mark; "") | nz($l))
-                                               else $l end)} ]
+                                               else $l end
+                                               | untagged($o.value) | nz($l))} ]
                        | ([ $ro[] | select((.label // "") | test($mark)) | .value ][0]) as $mv
                        | if $mv != null then .recommend_value = $mv else . end end)
                  | del(.malformed)
