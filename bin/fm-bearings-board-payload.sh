@@ -524,6 +524,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # ("..., so how should I deploy X?") is cut to that clause, whole, unless the
   # clause before it is a lead-in it completes ("when X is seen, should the run
   # go red?"), which keeps its subject.
+  # A question that opens with a verbless asking word ("What next for X, where
+  # Y names?") needs the clause after its comma to say what it asks, so no
+  # clause cut below applies to it and a heading keeps it whole.
   # A comma-led relative clause (", which ...", ", who ...", ", that ...") only
   # qualifies the clause before it, so it is never that asking clause; a too-long
   # sentence ending in one is cut to the main clause before it ("Shall I merge
@@ -543,7 +546,8 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | (sentences[0] // .)
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?](?: (?=[?]))?"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
-      | if length > $n and endswith("?") then
+      | test("^(?:so )?what (?:next|now|then)(?![[:alnum:]])"; "i") as $elliptic
+      | if length > $n and endswith("?") and ($elliptic | not) then
           . as $s
           | [match("(?:,(?! (?:which|who|that) )|;|[[:space:]]-) (?:(?:so|and|but|then|now|or) )?(?<q>(?:how|what|which|who|when|where|why|whether|should|shall|can|could|will|would|do|does|did|is|are|may|must|might) [^,;]*[?])$"; "i")][0] as $m
           | ($m.captures[0].string // null) as $c
@@ -552,7 +556,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                              | test("^(?:when|whenever|if|once|after|before|unless|until|while|since|because|although|though|given|as soon as|in case|where|wherever)[[:space:]]"; "i"))) as $lead_in
           | if $c != null and ($c | length) <= $n and ($lead_in | not) then $c | cap else . end
         else . end
-      | if length > $n and endswith("?") then
+      | if length > $n and endswith("?") and ($elliptic | not) then
           . as $s
           | ([ match(", (?=(?:which|who|that) )"; "gi").offset
                | select(($s[:.] | [scan("[(]")] | length) == ($s[:.] | [scan("[)]")] | length))
@@ -567,7 +571,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
            and (gsub("[[:space:]]+\\([^()]*\\)(?=[,;:]? )"; "") | length <= $n) then
           gsub("[[:space:]]+\\([^()]*\\)(?=[,;:]? )"; "")
         else . end
-      | if length > $n and endswith("?") then
+      | if length > $n and endswith("?") and ($elliptic | not) then
           . as $s
           | ([ match("(?:, (?=(?:with|while|which|since|because|so|but|then|unless|before|after|given|where|when|if|although|though|as|now that) )|; | - )"; "gi").offset
                | select(. + 1 <= $n and . >= ($n / 2))
