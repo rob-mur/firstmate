@@ -1603,6 +1603,34 @@ test_hold_and_answer_republish_the_home_summary() {
   pass "hold and answer republish the home summary and never fail on a refresh error"
 }
 
+test_batch_answers_and_reconcile_republish_the_home_summary() {
+  local home summary
+  home=$(make_home summary-close-paths)
+  summary="$home/state/home-summary.json"
+  run_captain "$home" hold batch-call --title "Choose the batch option" \
+    --reason "batch choice pending" --repo sample >/dev/null || fail "batch hold failed"
+  run_captain "$home" hold moot-call --title "Ship the old release?" \
+    --reason "old release pending" --repo sample >/dev/null || fail "moot hold failed"
+  grep -q 'batch-call' "$summary" || fail "the held call was not in the published summary"
+
+  # A board or steer answer arrives as a keyed batch; the summary a secondmate's
+  # parent board reads must drop the call at once, not at the next timed publish.
+  printf '%s\t%s\t\n' batch-call 'option one' \
+    | run_captain "$home" answers --source "summary fixture" >/dev/null \
+    || fail "batch answer failed"
+  ! grep -q 'batch-call' "$summary" \
+    || fail "a batch answer left the closed call in the published summary"
+
+  request_reconciles "$home" board-src moot-call || fail "could not file the reconcile request"
+  printf 'A newer release shipped, so the question is moot.\n' > "$home/evidence.txt"
+  grep -q 'moot-call' "$summary" || fail "the reconcile fixture started without the open call"
+  run_captain "$home" reconcile close moot-call --evidence-file "$home/evidence.txt" >/dev/null \
+    || fail "reconcile close failed"
+  ! grep -q 'moot-call' "$summary" \
+    || fail "a reconciled close left the closed call in the published summary"
+  pass "a batch answer and a reconciled close republish the home summary"
+}
+
 test_secondmate_reconcile_publishes_before_request_retirement() {
   local parent mate channel evidence out show rc request
   parent=$(make_home reconcile-parent-channel)
@@ -3073,6 +3101,7 @@ test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_answer_closes_the_mates_own_task_key
 test_hold_and_answer_republish_the_home_summary
+test_batch_answers_and_reconcile_republish_the_home_summary
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake

@@ -1245,3 +1245,45 @@ case "$report_out" in
     ;;
 esac
 pass "repeated publication failure is reported at session start until it clears"
+
+KICK_HOME="$TMP_ROOT/kick-home"
+mkdir -p "$KICK_HOME/state" "$KICK_HOME/data" "$KICK_HOME/config" \
+  "$KICK_HOME/projects" "$KICK_HOME/bin"
+printf '# Seeded Firstmate home\n' > "$KICK_HOME/AGENTS.md"
+printf 'kick\n' > "$KICK_HOME/.fm-secondmate-home"
+cat > "$KICK_HOME/data/backlog.md" <<'EOF2'
+## In flight
+
+## Queued
+
+## Done
+EOF2
+# The home's own board refresher stands in for the real one and records each
+# kick, so the parent board a real kick would reach is not needed.
+KICK_LOG="$TMP_ROOT/kick.log"
+cat > "$KICK_HOME/bin/fm-board-refresh.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$KICK_LOG"
+SH
+chmod +x "$KICK_HOME/bin/fm-board-refresh.sh"
+kick_count() { local n; n=$(grep -cx -- '--kick' "$KICK_LOG" 2>/dev/null) || true; printf '%s\n' "${n:-0}"; }
+run_kick_writer() {  # <now> <epoch>
+  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$KICK_HOME" \
+    FM_SNAPSHOT_NOW="$1" FM_SNAPSHOT_NOW_EPOCH="$2" "$WRITER"
+}
+run_kick_writer "$NOW_ONE" "$EPOCH_ONE" || fail "could not publish the kick fixture's first ledger"
+[ "$(kick_count)" = 1 ] || fail "a first publication did not kick the board: $(kick_count)"
+run_kick_writer "$NOW_TWO" "$EPOCH_TWO" || fail "could not republish the unchanged kick fixture"
+[ "$(kick_count)" = 1 ] \
+  || fail "a publication that only renewed its stamps kicked the board: $(kick_count)"
+cat > "$KICK_HOME/data/backlog.md" <<'EOF2'
+## In flight
+
+## Queued
+- [ ] kick-task - A newly queued task (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Done
+EOF2
+run_kick_writer "$NOW_THREE" "$EPOCH_THREE" || fail "could not publish the changed kick fixture"
+[ "$(kick_count)" = 2 ] || fail "a publication whose content moved did not kick the board: $(kick_count)"
+pass "a publication kicks the board only when its content moved"
