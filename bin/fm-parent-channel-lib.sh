@@ -145,10 +145,15 @@ fm_parent_channel_outbound_status() {  # <home> <state>
   printf '%s\n' "$destination"
 }
 
+# The byte bound of one cleaned note. A note cut at this bound carries no
+# marker, so a reader of the channel (bin/fm-captain-calls.sh) takes a note
+# this long as possibly cut short.
+FM_PARENT_CHANNEL_NOTE_MAX=1200
+
 # Fold <text> onto one bounded line, so a note copied from a child ledger or a
 # hold reason cannot break the channel's line framing.
 fm_parent_channel_clean_note() {  # <text>
-  printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
+  printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-"$FM_PARENT_CHANNEL_NOTE_MAX"
 }
 
 # Append <line> once, using fm-classify-lib.sh's retry contract. Time-insensitive:

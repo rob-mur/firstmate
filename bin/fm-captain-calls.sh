@@ -28,8 +28,16 @@
 #     listed in skipped[] until the mate closes it (or in to_close[], below,
 #     when it is not a decision). Nothing else hands a call off: a steer that
 #     names the key, a duplicate key the mate resolved, or a merged PR does not
-#     close it. A keyed call whose task is such a held row in the local mate's
-#     backlog takes that row's "Captain hold option:" lines as its options.
+#     close it. A keyed call whose task is an open captain-hold row in the
+#     local mate's backlog takes that row as the hold's record: its question is
+#     the row's full hold reason (the status line holds it cut to the parent
+#     channel's bound, bin/fm-parent-channel-lib.sh FM_PARENT_CHANNEL_NOTE_MAX),
+#     its options are the row's "Captain hold option:" lines, and its links are
+#     the row's "Captain hold link:" lines and the URLs of the reason and the
+#     status line, each URL once. A "captain hold <task>:" call with no such row
+#     (a remote mate, or a row gone) whose text is as long as that bound may
+#     have been cut there with no marker: it stays a call with cut_short true,
+#     so a board shows it as broken rather than short.
 #     A keyless line (the fold's "default" key) that asks the same held task or
 #     the same question as a keyed open call of the same mate is that call
 #     again: it is listed in skipped[], so the keyed call shows once.
@@ -97,6 +105,7 @@
 #   or null), free_text, no_link,
 #   links[{url,label}], report (the local path an "Evidence: <path>" tail
 #   names, or null), blocked_by[], hold_until, raised_at (UTC ISO or null),
+#   cut_short (true when the question may have been cut short; see above),
 #   prs[{url,state}]  state is merged, closed, open or unknown
 #
 # Exit 0 with the JSON; exit 1 when the backlog cannot be read; exit 2 on usage.
@@ -155,6 +164,8 @@ command -v jq >/dev/null 2>&1 || { echo "fm-captain-calls: jq is required" >&2; 
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-bearings-question-lib.sh
 . "$SCRIPT_DIR/fm-bearings-question-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
 TODAY=$(date -u +%Y-%m-%d)
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -316,11 +327,12 @@ mate_until_rows() {
   done < "$REGISTRY"
 }
 
-# A local secondmate's own captain holds that record options, read-only from
-# its data/backlog.md with the main-hold parse: one {mate, id, options} object
-# per held row with "Captain hold option:" lines in its current hold. A remote
-# mate's backlog is not on this machine, so its calls keep only inline options.
-mate_hold_options() {
+# A local secondmate's own captain holds, read-only from its data/backlog.md
+# with the main-hold parse: one {mate, id, hold_reason, options, links} object
+# per held row, with the full hold reason and the options and links of its
+# current hold. A remote mate's backlog is not on this machine, so its calls
+# keep only what their status line says.
+mate_hold_rows() {
   local line b
   [ -f "$REGISTRY" ] && [ -r "$REGISTRY" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -330,13 +342,13 @@ mate_hold_options() {
     b="$SECONDMATE_REGISTRY_HOME/data/backlog.md"
     [ -f "$b" ] && [ -r "$b" ] || continue
     backlog_hold_records "$b" 2>/dev/null | jq -c --arg mate "$SECONDMATE_REGISTRY_ID" \
-      '.records[] | select((.options | length) > 0) | {mate: $mate, id, options}' 2>/dev/null
+      '.records[] | {mate: $mate, id, hold_reason, options, links}' 2>/dev/null
   done < "$REGISTRY"
 }
 
 # shellcheck disable=SC2016  # jq program text.
-MATE_OPTIONS_JSON=$(mate_hold_options | jq -s '.') || MATE_OPTIONS_JSON='[]'
-[ -n "$MATE_OPTIONS_JSON" ] || MATE_OPTIONS_JSON='[]'
+MATE_HOLDS_JSON=$(mate_hold_rows | jq -s '.') || MATE_HOLDS_JSON='[]'
+[ -n "$MATE_HOLDS_JSON" ] || MATE_HOLDS_JSON='[]'
 
 # shellcheck disable=SC2016  # jq program text.
 UNTIL_JSON=$(mate_until_rows | jq -R -n '[inputs | split("\t") | {mate: .[0], task: .[1], until: .[2]}]')
@@ -354,7 +366,7 @@ MATE_JSON=$(mate_rows | jq -R -n '
 # (".../-/merge_requests/880") or the noun "merge request" never makes a merge ask.
 # shellcheck disable=SC2016  # jq program text.
 CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --argjson until "$UNTIL_JSON" \
-  --argjson mate_options "$MATE_OPTIONS_JSON" \
+  --argjson mate_holds "$MATE_HOLDS_JSON" --argjson note_max "$FM_PARENT_CHANNEL_NOTE_MAX" \
   --arg today "$TODAY" --arg pr_re "$PR_URL_RE" "$FM_BEARINGS_QUESTION_JQ_DEFS"'
   def urls_in: [scan("https?://[^[:space:]<>\"()]+") | sub("[.,;:?!]+$"; "")];
   def pr_urls_in: [.[] | select(test("^" + $pr_re + "$"))] | unique;
@@ -398,26 +410,41 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
         links: ([.links[] | {url, label}] + ([(.hold_reason | urls_in[]), (.rest | urls_in[])]
                           | map({url: ., label: ""}))
                 | unique_by(.url)),
-        blocked_by, hold_until, raised_at: .hold_set} | inline_options | recommended_option | evidence_report | classify]) as $holds
+        blocked_by, hold_until, raised_at: .hold_set, cut_short: false}
+     | inline_options | recommended_option | evidence_report | classify]) as $holds
   | ([$mates[] | select(.kind == "call" and .worker)
      | {key: (.home + "." + .key), source: "main-worker", home: "main", task: .home,
         decision_key: .key, title: .home, repo: null,
         question: .note, options: [], free_text: true, no_link: false,
         links: ([.note | urls_in[]] | unique | map({url: ., label: ""})),
-        blocked_by: [], hold_until: null, raised_at: iso(.opened), answered} | inline_options | recommended_option | evidence_report | classify]) as $worker_calls
+        blocked_by: [], hold_until: null, raised_at: iso(.opened), answered, cut_short: false}
+     | inline_options | recommended_option | evidence_report | classify]) as $worker_calls
   | ([$mates[] | select(.kind == "call" and (.worker | not))
      | (.note | capture("^captain hold (?<t>[A-Za-z0-9._-]+):[[:space:]]*(?<q>.*)$")? // null) as $h
      | .home as $mate
-     # A hold that the backlog of the mate records with options gives the call those options.
-     | ([$mate_options[] | select($h != null and .mate == $mate and .id == $h.t) | .options][0] // []) as $opts
+     # The held row of the task in the own backlog of the mate, when there is one, is
+     # the record of the hold: its full reason is the question (the status line
+     # holds the reason cut to the bound of the parent channel) and its options and
+     # links are those of the call, each link once.
+     | ([$mate_holds[] | select($h != null and .mate == $mate and .id == $h.t)][0] // null) as $row
+     | ($h.q // .note) as $said
+     | ({question: $said} | evidence_report | .report) as $said_report
      | {key: (.home + "." + .key), source: "secondmate", home, remote, task: ($h.t // null),
         decision_key: .key, keyed, title: ($h.t // .key), repo: null,
-        question: ($h.q // .note), options: [$opts[] | {value, label}], free_text: true, no_link: false,
-        links: ([.note | urls_in[]] | unique | map({url: ., label: ""})),
+        question: ($row.hold_reason // $said),
+        options: [($row.options // [])[] | {value, label}], free_text: true, no_link: false,
+        links: ([($row.links // [])[] | {url, label}]
+                + ([(($row.hold_reason // "") | urls_in[]), (.note | urls_in[])] | map({url: ., label: ""}))
+                | unique_by(.url)),
         blocked_by: [],
         hold_until: (if $h == null then null
                      else ([$until[] | select(.mate == $mate and .task == $h.t) | .until][0] // null) end),
-        raised_at: iso(.opened), answered} | inline_options | recommended_option | evidence_report | classify]) as $mate_calls
+        raised_at: iso(.opened), answered,
+        # A hold reason known only from a status line as long as the channel
+        # bound may have been cut there with no marker: the call is cut short.
+        cut_short: ($h != null and $row == null and ($h.q | utf8bytelength) >= $note_max)}
+     | inline_options | recommended_option | evidence_report
+     | .report = (.report // $said_report) | classify]) as $mate_calls
   | def deferred: .hold_until != null and .hold_until > $today;
   # A live worker key on a task that is itself held for the captain asks the
   # same call: the hold is the one call, so the worker key is skipped.
