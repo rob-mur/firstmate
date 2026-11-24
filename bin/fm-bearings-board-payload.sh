@@ -470,8 +470,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # text just before the URL names (understand, review, report). Question and
   # about text show that label in place of each URL, with a "?" written after
   # the URL and a space ("on <url> ?") put against the label ("on PR 135?"),
-  # and a kind word the text already writes before the URL shown once
-  # ("(PR <url>)" reads "(PR 133)", not "(PR PR 133)"). A link the text already
+  # and a kind word the text already writes before the URL (MR, merge request,
+  # PR, pull request, issue; any case) replaced with the URL by the one label
+  # ("(PR <url>)" reads "(PR 133)", "merge request <url>" reads "MR 883"). A link the text already
   # names by kind and number ("issue 942 (<url>)", "PR 938 (<url>)") drops its
   # parenthesis, and a link to a comment reads "Comment on issue 932". A
   # YouTrack issue link reads by its bare id ("APP-5837").
@@ -526,10 +527,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
               | if $c != null and ($part | startswith(")"))
                    and test("(?:^|[^[:alnum:]])(?:" + $kw + ") #?" + $c.n + " [(]$"; "i")
                 then sub(" [(]$"; "") + $part[1:]
-                else
-                  (if $c != null and test("(?:^|[^[:alnum:]])" + $c.k + " $"; "i") then $c.n
-                   elif $all then $l else $u end) as $shown
-                  | . + $shown + $part end));
+                elif $c != null and test("(?:^|[^[:alnum:]])(?:" + $kw + ") $"; "i")
+                then sub("(?:" + $kw + ") $"; ""; "i") + $l + $part
+                else . + (if $all then $l else $u end) + $part end));
     def labelled_urls: label_urls(true);
     def cited_item: "(?<url>https?://[^[:space:]<>\"()]+)|(?<path>/[\\w.@~+-]+(?:/[\\w.@~+-]+)+)(?:[[:space:]]+\\((?<note>[^()]*)\\))?";
     def trailing_cited_at:
