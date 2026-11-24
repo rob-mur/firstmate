@@ -670,6 +670,29 @@ test_a_markdown_only_page_shows_its_page_md_in_place() {
   pass "a markdown-only page shows its page.md in place inside the board"
 }
 
+# A page frame loads its page only while that page is shown: a page not in
+# view runs nothing, not even its own poll, until the captain opens it, and
+# leaving it drops it to a blank page that opening it again reloads.
+test_a_page_frame_loads_only_while_its_page_is_shown() {
+  local home out
+  home=$(make_home page-lazy)
+  register_page "$home" understand-mr-872 "Understand MR 872" >/dev/null
+  register_page "$home" grill-live "Grill live" >/dev/null
+  render_card_links "$home" '[{page:"understand-mr-872", label:"Understand page"}]' >/dev/null
+  out=$(run_board "$home" "snap,go,page:mr-872,snap,max,snap,home,snap,go,page:mr-872,snap")
+  printf '%s' "$out" | jq -e '
+    (.snaps | length) == 5 and (.snaps | all(length == 2))
+      and (.snaps[0] | all(.src == null))
+      and ([.snaps[1][] | .src] | sort) == [null, "pages/understand-mr-872/page.html"]
+      and .snaps[2] == .snaps[1]
+      and ([.snaps[3][] | .src] | sort) == [null, "about:blank"]
+      and ([.snaps[4][] | .src] | sort) == [null, "pages/understand-mr-872/page.html"]
+      and ([.snaps[] | map(.serial)] | unique | length) == 1
+      and .reloads == []
+  ' >/dev/null || fail "a page frame loaded while its page was not shown, or did not load when opened: $out"
+  pass "a page frame loads only while its page is shown"
+}
+
 # Full screen maximises the page in place: the same frame, never re-created,
 # moved or re-pointed, and the same button, Esc on the board, or Esc pressed
 # inside the page leaves it.
@@ -782,6 +805,7 @@ test_a_numbered_option_card_renders_its_buttons
 test_an_a_recommended_option_renders_as_the_recommendation
 test_a_card_page_button_shows_the_page_in_place
 test_a_markdown_only_page_shows_its_page_md_in_place
+test_a_page_frame_loads_only_while_its_page_is_shown
 test_full_screen_keeps_the_same_page_frame
 test_annotate_mode_reaches_in_place_pages_and_their_notes_reach_the_page_agent
 

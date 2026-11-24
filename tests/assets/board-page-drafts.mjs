@@ -12,8 +12,10 @@
 //   rerender  rewrite the page's data file, the way a page's worker moves its
 //             page on, and wait for the page to render its form again
 //   reload    rewrite the board file, so Lavish reloads the board and every
-//             page frame in it, and wait for the page to load again
-//   refresh   reload the whole browser tab, and wait for the page again
+//             page frame in it, then show the page's tab and wait for the
+//             page to load again
+//   refresh   reload the whole browser tab, then show the page's tab and
+//             wait for the page again
 //   view      record the view now (see below)
 //   queue     show the page's tab and press the page's own Queue answer button
 //   bar       record the board's notice under the page bar now (see below)
@@ -142,12 +144,15 @@ try {
   await send("Page.enable");
   await send("Page.navigate", { url: sessionUrl });
   await waitFor(() => inFrame(BOARD, "!!document.querySelector('.bb-tab') && document.querySelectorAll('.bb-tab').length > 1"), "the board to show the page's tab");
-  let load = await waitFor(pageReady, "the page to render its form");
-
+  // The board loads a page only while its tab is shown, so every wait for the
+  // page opens its tab first, as the captain would after the board reloads.
   const showTab = () => inFrame(BOARD, `(() => {
     const tab = [...document.querySelectorAll('.bb-tab')].find((b) => b.textContent === 'Drafts page');
-    tab.click();
+    if (tab) tab.click();
   })()`);
+  const shownReady = async () => { await showTab(); return pageReady(); };
+  let load = await waitFor(shownReady, "the page to render its form");
+
   const views = [];
   const bars = [];
   const bar = () => inFrame(BOARD, `(() => {
@@ -182,7 +187,7 @@ try {
     } else if (step === "reload" || step === "refresh") {
       if (step === "reload") appendFileSync(boardPath, `\n<!-- rewritten by the drafts guard ${++reloads} -->\n`);
       else await send("Page.reload", { ignoreCache: false });
-      await waitFor(async () => { const now = await pageReady(); return now && now !== load ? now : ""; }, `the page to load again after a ${step}`);
+      await waitFor(async () => { const now = await shownReady(); return now && now !== load ? now : ""; }, `the page to load again after a ${step}`);
       load = await pageReady();
       await sleep(3000);
     } else if (step === "view") {
