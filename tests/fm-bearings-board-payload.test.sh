@@ -483,6 +483,44 @@ test_a_hold_with_lettered_slug_options_keeps_explanations_and_lead_in() {
   pass "a hold's lettered slug options keep their explanations and a lead-in question keeps its subject"
 }
 
+# A hold whose reason lists its choices inline ("Options: a) ... b) ...") and
+# whose recorded options are other values would print its options twice, so the
+# build names it for its owner to re-post; a hold whose recorded options are the
+# reason's own letters, or whose prose holds a single stray "a)", is not named.
+test_a_hold_listing_its_options_in_the_reason_as_well_is_named() {
+  local snap p out url
+  snap="$TMP_ROOT/snap-twice.json"
+  url="https://forgejo.example/rob/nixos/issues/12"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq --arg url "$url" '.decisions_open = [
+        {id: "dns-encrypt-rollout", key: "dns-encrypt-rollout", verb: "captain-hold", owner: "nixos",
+         title_full: "Encrypted DNS rollout",
+         reason_full: "How should encrypted DNS roll out? Today the NixOS machines leak plaintext DNS to the router. Options: a) recommended: fix NixOS, Quad9 everywhere. b) NixOS fix, keep dnscrypt pool. c) Tailscale Override for the tailnet. d) change nothing.",
+         choices: {options: [{value: "quad9", label: "Fix NixOS, Quad9 everywhere"}, {value: "pool", label: "NixOS fix, keep dnscrypt pool"},
+                             {value: "tailscale", label: "Tailscale Override for the tailnet"}, {value: "nothing", label: "Change nothing"}],
+                   links: [{target: $url, label: "issue"}], free_text: false, no_link: false}},
+        {id: "lettered", key: "lettered", verb: "captain-hold", owner: "nixos",
+         title_full: "Red or warn",
+         reason_full: "Should the run go red or only warn? a) red from day one (recommended); b) advisory warning first.",
+         choices: {options: [{value: "a", label: "red"}, {value: "b", label: "advisory"}],
+                   links: [{target: $url, label: "issue"}], free_text: false, no_link: false}},
+        {id: "stray", key: "stray", verb: "captain-hold", owner: "nixos",
+         title_full: "Keep the pool",
+         reason_full: "Should we keep the dnscrypt pool? Step a) of the plan already landed, so only the pool remains.",
+         choices: {options: [{value: "keep", label: "Keep it"}, {value: "drop", label: "Drop it"}],
+                   links: [{target: $url, label: "issue"}], free_text: false, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/twice.json"
+  validates "$TMP_ROOT/twice.json" || fail "a payload with options in its reason did not validate"
+  out=$(build_checks "$TMP_ROOT/twice.json")
+  assert_contains "$out" "undecided-card: dns-encrypt-rollout: options given twice" \
+    "the build did not name a card whose reason lists its options as well: $out"
+  assert_not_contains "$out" "undecided-card: lettered" "the build named a card whose reason's letters are its options: $out"
+  assert_not_contains "$out" "undecided-card: stray" "the build named a card with a single stray a) in its prose: $out"
+  pass "a hold listing its options in the reason as well as on the card is named for its owner to re-post"
+}
+
 # A question that opens with a verbless asking word ("What next for X, where Y
 # names?") keeps its lead-in, so a comma-led "where ..." clause before the
 # "?" is neither taken as the question nor cut away.
@@ -2752,6 +2790,7 @@ fm_test_run \
   test_a_hold_with_recorded_options_and_links_puts_them_on_its_card \
   test_a_hold_with_bare_recorded_options_shows_words_not_raw_values \
   test_a_hold_with_lettered_slug_options_keeps_explanations_and_lead_in \
+  test_a_hold_listing_its_options_in_the_reason_as_well_is_named \
   test_a_question_that_opens_what_next_keeps_its_comma_led_clause \
   test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
