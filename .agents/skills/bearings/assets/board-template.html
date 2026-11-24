@@ -1530,10 +1530,13 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
   /* PAGES SHOWN IN PLACE. The board is the one tab of the whole app: every
      live page registered through bin/fm-board-page.sh arrives in the data's
      `pages` list and gets a header tab and a frame here, so a page opens
-     inside this tab and the Board tab brings the captain back. A frame is
-     loaded once and never reloaded: the page updates itself from its own data
-     file, and switching tabs only hides it, so text typed in a page survives
-     both. A page's lavish-relay.js passes its three Lavish calls up to this
+     inside this tab and the Board tab brings the captain back. A frame loads
+     its page only while that page is shown and drops it to a blank page when
+     the captain leaves, so a page not in view runs nothing, its own polls
+     included; while shown, the page updates itself from its own data file.
+     Text typed in a page survives leaving it, because the page's relay keeps
+     every changed form as a draft on this board and gets it back each time
+     the page loads (PAGE DRAFTS below). A page's lavish-relay.js passes its three Lavish calls up to this
      board, which queues them on the board's own Lavish session, labelled with
      the page, so the router hands each answer to that page's agent. Ending a
      page ends that page alone. A new page never takes the screen by itself;
@@ -1567,6 +1570,11 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     pageMaxBtn.setAttribute("aria-pressed", on ? "true" : "false");
     pageMaxBtn.textContent = on ? "Exit full screen" : "Full screen";
   }
+  function loadPage(p, on) {
+    if (on === p.loaded) return;
+    p.loaded = on;
+    p.frame.src = on ? p.href : "about:blank";
+  }
   function showPage(id) {
     if (id && !pageById[id]) id = null;
     shownPage = id;
@@ -1576,6 +1584,7 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
     boardTab.classList.toggle("is-active", !id);
     Object.keys(pageById).forEach(function (k) {
       var p = pageById[k];
+      loadPage(p, k === id);
       p.frame.hidden = k !== id;
       p.tab.classList.toggle("is-active", k === id);
       if (k === id) p.tab.classList.remove("is-new");
@@ -1618,14 +1627,13 @@ button.bb-decision__link { background: none; border: 0; padding: 0; text-align: 
       frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads");
       frame.hidden = true;
       frame.addEventListener("load", function () { tellAnnotate(frame); });
-      frame.src = p.href;
       frameHost.appendChild(frame);
       var tab = el("button", "bb-tab is-new", p.title);
       tab.type = "button";
       tab.title = p.title;
       tab.addEventListener("click", function () { showPage(p.id); });
       tabsEl.appendChild(tab);
-      pageById[p.id] = { id: p.id, title: p.title, frame: frame, tab: tab };
+      pageById[p.id] = { id: p.id, title: p.title, href: p.href, frame: frame, tab: tab, loaded: false };
     });
     Object.keys(pageById).forEach(function (k) { if (!live[k]) dropPage(k); });
     Object.keys(endedHere).forEach(function (k) { if (!live[k]) delete endedHere[k]; });

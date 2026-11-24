@@ -191,7 +191,7 @@ const keys = [];
 // An in-place page frame records what the board sends it, keyed by page id.
 const framePosts = {};
 const iframes = [];
-const pageOf = (frame) => (String(frame.src).match(/^pages\/([^/]+)\/page\.html$/) || [])[1] || "";
+const pageOf = (frame) => String(frame.id || "").replace(/^bb-page-frame-/, "");
 // A script element added to the body loads its src from beside the board.
 const body = new Node("body");
 const bodyAppend = body.appendChild.bind(body);
