@@ -1040,6 +1040,41 @@ test_a_past_tense_worker_option_keeps_its_verb() {
   pass "a past-tense worker option keeps its verb"
 }
 
+# A question whose lettered marks follow their options ("... yourself (a,
+# recommended) or have this lane post it as a draft note (b)?") offers those
+# options with the recommendation kept, never only the reconcile choice.
+test_options_marked_after_their_text_are_the_card_choices() {
+  local snap="$TMP_ROOT/trailing-marks.json" p card
+  fresh_homes trailing-marks
+  write_snapshot "$TMP_ROOT/trailing-marks-base.json"
+  jq '.decisions_open = [
+        {id: "pinocchio-125-understand", key: "status.pinocchio-125-understand.mr125-review", task: "pinocchio-125-understand", decision_key: "mr125-review", source: "status", verb: "needs-decision", title: "pinocchio-125-understand",
+         reason: "Will you review https://gitlab.descartesunderwriting.com/descartes-underwriting/app/pinocchio/-/merge_requests/125 then https://gitlab.descartesunderwriting.com/descartes-underwriting/app/pinocchio/-/merge_requests/126, and post the set -eo pipefail comment drafted in data/pinocchio-125-understand/report.md yourself (a, recommended) or have this lane post it as a draft note (b)? Page: page:understand-mr125. Report: data/pinocchio-125-understand/report.md", owner: "(main)"},
+        {id: "rel", key: "status.rel.pick", task: "rel", decision_key: "pick", source: "status", verb: "needs-decision", title: "rel",
+         reason: "Which release should ship: cut it today (a), wait for the fix (b, recommended), or skip it (c)?", owner: "(main)"},
+        {id: "ref", key: "status.ref.pick", task: "ref", decision_key: "pick", source: "status", verb: "needs-decision", title: "ref",
+         reason: "It was fixed in step (a) or step (b). Ship it now?", owner: "(main)"}]' \
+    "$TMP_ROOT/trailing-marks-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card() { jq -c --arg k "$1" '.captains_call[] | select(.key == $k)' <<<"$p"; }
+  card=$(card status.pinocchio-125-understand.mr125-review)
+  assert_equals "a|b" "$(jq -r '[.options[].value | select(. != "reconcile")] | join("|")' <<<"$card")" \
+    "an option marked after its text was not a card choice"
+  assert_equals "Post the set -eo pipefail comment drafted in data/pinocchio-125-understand/report.md yourself|Have this lane post it as a draft note" \
+    "$(jq -r '[.options[] | select(.value != "reconcile") | .label] | join("|")' <<<"$card")" "the options do not read as their own text"
+  assert_equals "a" "$(jq -r .recommend_value <<<"$card")" "the (a, recommended) option is not the recommendation"
+  assert_contains "$(jq -r .question <<<"$card")" "?" "the card heading does not ask"
+  card=$(card status.rel.pick)
+  assert_equals "a:Cut it today|b:Wait for the fix|c:Skip it" \
+    "$(jq -r '[.options[] | select(.value != "reconcile") | "\(.value):\(.label)"] | join("|")' <<<"$card")" "an a/b/c run marked after its text was not the choices"
+  assert_equals "b" "$(jq -r .recommend_value <<<"$card")" "a later recommended mark is not the recommendation"
+  assert_equals "" "$(card status.ref.pick | jq -r '[.options[].value | select(. != "reconcile")] | sort | join(",")')" \
+    "marks that only refer back became options"
+  printf '%s\n' "$p" > "$TMP_ROOT/trailing-marks-payload.json"
+  validates "$TMP_ROOT/trailing-marks-payload.json" || fail "a payload with options marked after their text did not validate"
+  pass "options marked after their text are the card choices, with the recommendation kept"
+}
+
 test_a_recorded_option_marked_recommended_is_the_card_recommendation() {
   local snap="$TMP_ROOT/rec-label.json" p
   fresh_homes rec-label
@@ -2715,6 +2750,7 @@ fm_test_run \
   test_an_unkeyed_status_line_naming_a_held_card_does_not_make_a_second_card \
   test_a_keyed_worker_question_on_a_held_task_does_not_make_a_second_card \
   test_a_past_tense_worker_option_keeps_its_verb \
+  test_options_marked_after_their_text_are_the_card_choices \
   test_a_recorded_option_marked_recommended_is_the_card_recommendation \
   test_an_a_recommended_hold_with_recorded_labels_is_the_recommendation \
   test_a_hold_the_captain_parked_waits_even_when_its_reason_asks_a_question \
