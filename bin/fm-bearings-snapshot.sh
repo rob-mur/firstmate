@@ -1069,7 +1069,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
 # page by its task's latest done line.
 # A handed row gains handed_at, handed_via (steer, resolved, reconcile, or board),
 # handed_task, and raised_at; it stays in decisions_open, and the board payload
-# shows it as a wait instead of a Captain's Call.
+# shows it as a wait instead of a Captain's Call. A record that moves or
+# vanishes between listing and reading is skipped without a diagnostic.
 handoff_records() {  # <home-label> <state-dir>
   local label=$1 st=$2
   [ -d "$st" ] || return 0
@@ -1077,6 +1078,11 @@ handoff_records() {  # <home-label> <state-dir>
   find "$st" -maxdepth 3 -type f \( -path "$st/*.inbox/*.msg" -o -path "$st/*.inbox/handled/*.msg" \
       -o -path "$st/*.status" -o -path "$st/*.meta" -o -path "$st/reconcile-requests/*.request" \) -print0 2>/dev/null \
     | xargs -0 -r awk -v label="$label" -v st="$st/" '
+      # A steer is moved to handled/ when its worker takes it, so a listed file
+      # can be gone by the time awk opens it. Skip it quietly: an unreadable
+      # file is fatal to awk, which would also drop every file after it.
+      BEGIN { for (i = 1; i < ARGC; i++) if ((getline line < ARGV[i]) < 0) delete ARGV[i]; else close(ARGV[i]) }
+      BEGINFILE { if (ERRNO != "") nextfile }
       function flush() {
         if (kind == "S" && at != "") printf "%s\tS\t%s\t%s\t%s\t%s\n", label, task, at, keys, body
         if (kind == "R" && at != "") printf "%s\tR\t%s\t%s\t\n", label, task, at

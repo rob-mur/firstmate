@@ -402,7 +402,16 @@ CAPTAIN_CONTROL_LOCK_HELD=0
 # an open bearings board to catch up (bin/fm-board-refresh.sh owns the debounce
 # and is a no-op for a home without a board).
 KICK_BOARD=0
+# Set by the commands that close captain calls other than `answer`, so their
+# exit republishes this home's summary (bin/fm-home-summary-refresh.sh), which a
+# secondmate's parent board reads its calls from: 1 after a success, 2 whatever
+# the result, for a batch of keyed answers that may have closed some holds
+# before one failed. The refresh runs after every lock is released and before
+# the board kick, and is side-band and best-effort: it never changes the exit
+# status.
+REFRESH_SUMMARY=0
 captain_hold_cleanup() {
+  local rc=$?
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
@@ -412,6 +421,9 @@ captain_hold_cleanup() {
     CAPTAIN_CONTROL_LOCK_HELD=0
   fi
   fm_afk_contract_lock_release || true
+  if [ "$REFRESH_SUMMARY" = 2 ] || { [ "$REFRESH_SUMMARY" = 1 ] && [ "$rc" -eq 0 ]; }; then
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
+  fi
   if [ "$KICK_BOARD" = 1 ]; then
     "$SCRIPT_DIR/fm-board-refresh.sh" --kick >/dev/null 2>&1 || true
   fi
@@ -2850,6 +2862,10 @@ run_then_refresh_home_summary() {  # <command-function> <args...>
 
 case "${1:-}" in
   hold|answer|answers|reconcile|reconcile-requests) KICK_BOARD=1 ;;
+esac
+case "${1:-}" in
+  reconcile|reconcile-requests|settle-pr) REFRESH_SUMMARY=1 ;;
+  answers) REFRESH_SUMMARY=2 ;;
 esac
 case "${1:-}" in
   hold) shift; run_then_refresh_home_summary command_hold "$@" ;;
