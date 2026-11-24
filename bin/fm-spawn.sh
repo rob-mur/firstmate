@@ -6845,11 +6845,23 @@ BUSY_GEN=
     # (https://code.claude.com/docs/en/hooks) and keeps any key
     # the flag omits (https://code.claude.com/docs/en/cli-reference), so the
     # home's tracked Stop guard and its settings.local.json both stay.
+    # A crewmate's settings.local.json is a gitignored worktree file, so it
+    # outlives the task whenever the pool slot is handed on without this
+    # task's cleanup (a slot released while the task still ran was re-leased
+    # as another firstmate home and kept writing into this home's state). Each
+    # crew hook therefore runs only in a session whose FM_HOME is the one this
+    # launch exports (see the ship/scout LAUNCH prefix below), so any other
+    # holder of the slot inherits inert hooks rather than this task's events.
+    hook_open='' hook_close=''
+    if [ "$KIND" != secondmate ]; then
+      hook_open="if [ \"\${FM_HOME-}\" = $(shell_quote "$FM_HOME") ]; then "
+      hook_close="; fi"
+    fi
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
-    j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-    j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
-    j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    j_submit=$(json_escape "${hook_open}$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true${hook_close}")
+    j_stopfail=$(json_escape "${hook_open}$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true${hook_close}")
+    j_sessionend=$(json_escape "${hook_open}$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true${hook_close}")
     stop_entry=
     if [ "$KIND" = secondmate ] && grep -qF '.fm-busy-stop' "$WT/bin/fm-turnend-guard.sh" 2>/dev/null; then
       {
@@ -6864,7 +6876,7 @@ BUSY_GEN=
       if [ "$busy_notify_turnend" = true ]; then
         stop_turnend="touch $(shell_quote "$TURNEND"); "
       fi
-      j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      j_stop=$(json_escape "${hook_open}${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true${hook_close}")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
     hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"

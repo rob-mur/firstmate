@@ -630,11 +630,18 @@ SH
   pass "opencode 2.x plugin applies events in emission order across its server hook and setup subscription"
 }
 
+# A crew worker's launch exports its supervising home as FM_HOME, so the hook
+# runs with that home by default; HOOK_FM_HOME overrides it (empty unsets it) to
+# act as a different session that inherited the worktree's settings file.
 run_claude_hook() {  # <settings.json> <hook-event>
   local cmd
   cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
   [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
-  sh -c "$cmd"
+  if [ -n "${HOOK_FM_HOME-${HOME_DIR-}}" ]; then
+    FM_HOME="${HOOK_FM_HOME-${HOME_DIR-}}" sh -c "$cmd"
+  else
+    env -u FM_HOME sh -c "$cmd"
+  fi
 }
 
 test_claude_hooks_semantic_lifecycle() {
@@ -689,6 +696,35 @@ test_claude_hooks_stale_incarnation_harmless() {
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+# The worktree's settings.local.json outlives the task when its pool slot goes
+# back to the pool without a cleanup (or a cleanup keeps it), so a later session
+# in that slot - another firstmate home, or no firstmate at all - inherits the
+# hooks. They must write nothing into this task's home from such a session.
+test_claude_crew_hooks_ignore_a_different_home() {
+  local rec id=busy-cl-3 out state settings ev home
+  rec=$(make_spawn_case claude-other-home claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  rm -f "$state/$id.turn-ended"
+  for home in "$CASE_DIR/other-home" ""; do
+    for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+      HOOK_FM_HOME=$home run_claude_hook "$settings" "$ev" \
+        || fail "a $ev hook in a different home must still exit 0"
+    done
+    [ ! -e "$state/$id.turn-ended" ] \
+      || fail "a Stop hook in a session of home '${home:-unset}' touched the task's notification marker"
+    out=$(classify claude "$id" "$state")
+    [ "$out" = "busy fm-spawn" ] \
+      || fail "hooks in a session of home '${home:-unset}' must not change the task's busy state, got '$out'"
+  done
+  run_claude_hook "$settings" Stop || fail "Stop hook in the task's own home failed"
+  [ -f "$state/$id.turn-ended" ] || fail "the task's own Stop no longer touches the notification marker"
+  pass "claude crew hooks left in a reused worktree write nothing into the old home from another session"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -1340,6 +1376,7 @@ test_opencode_plugin_applies_events_in_emission_order
 test_opencode_plugin_v2_applies_events_in_emission_order
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_crew_hooks_ignore_a_different_home
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
