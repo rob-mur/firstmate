@@ -2657,6 +2657,31 @@ test_an_uppercase_letter_tag_leaves_a_recorded_label() {
   pass "an uppercase tag of its own letter leaves a recorded label"
 }
 
+# A URL given to a command in the hold text ("tea login add --url
+# https://forgejo.clarob.uk") is an argument, not a link, and stays as written;
+# the same goes for a URL in a code span.
+test_a_url_given_to_a_command_is_never_a_card_link() {
+  local p snap
+  p=$(cd_mate_hold_payload) || fail "the generator failed"
+  assert_equals "Forgejo access tokens|report.md" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-forge-arm-login-access") | [.links[].label] | join("|")' <<<"$p")" \
+    "a URL given to the tea command became a card link"
+  jq -e '.captains_call[] | select(.key == "cd-forge-arm-login-access")
+         | ((.question // "") + " " + (.about // "")) | contains("--url https://forgejo.clarob.uk --token")' <<<"$p" >/dev/null \
+    || fail "the tea command lost its URL argument: $p"
+  snap="$TMP_ROOT/code-span-url.json"
+  write_snapshot "$TMP_ROOT/code-span-url-base.json"
+  jq '.decisions_open = [{id: "span", key: "span", verb: "captain-hold", owner: "(main)", title_full: "Pick a host",
+        reason_full: "Should I run `curl https://example.org/health` before the switch, as PR https://github.com/acme/alpha/pull/9 asks?",
+        choices: {options: [], links: [], free_text: true, no_link: false}}]' \
+    "$TMP_ROOT/code-span-url-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "https://github.com/acme/alpha/pull/9" \
+    "$(jq -r '.captains_call[] | select(.key == "span") | [.links[].url] | join("|")' <<<"$p")" \
+    "a URL in a code span became a card link, or the PR link was lost"
+  pass "a URL given to a command or written in a code span is never a card link"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_open_mrs_no_task_covers_become_information_rows \
@@ -2752,4 +2777,5 @@ fm_test_run \
   test_inline_bare_letter_options_are_the_card_options \
   test_lettered_options_answer_as_their_letters \
   test_an_evidence_path_in_a_mate_hold_is_a_card_link \
-  test_an_uppercase_letter_tag_leaves_a_recorded_label
+  test_an_uppercase_letter_tag_leaves_a_recorded_label \
+  test_a_url_given_to_a_command_is_never_a_card_link
