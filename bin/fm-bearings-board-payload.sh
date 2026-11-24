@@ -529,7 +529,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
   # It drops each URL with the word before it, except a link its own kind word
   # leads, which shows as its number ("deploy X (PR 133)?").
   # An asking sentence too long to show whole that ends in a clause which asks
-  # ("..., so how should I deploy X?") is cut to that clause, whole.
+  # ("..., so how should I deploy X?") is cut to that clause, whole, unless the
+  # clause before it is a lead-in it completes ("when X is seen, should the run
+  # go red?"), which keeps its subject.
   # A comma-led relative clause (", which ...", ", who ...", ", that ...") only
   # qualifies the clause before it, so it is never that asking clause; a too-long
   # sentence ending in one is cut to the main clause before it ("Shall I merge
@@ -550,9 +552,13 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
       | gsub("( (at|on|in|see|via))? ?https?://[^[:space:]]*[^[:space:].,;:!?](?: (?=[?]))?"; "")
       | sub("[[:space:]]*[.,;:]$"; "")
       | if length > $n and endswith("?") then
-          ([match("(?:,(?! (?:which|who|that) )|;|[[:space:]]-) (?:(?:so|and|but|then|now|or) )?(?<q>(?:how|what|which|who|when|where|why|whether|should|shall|can|could|will|would|do|does|did|is|are|may|must|might) [^,;]*[?])$"; "i")][0]
-           | .captures[0].string // null) as $c
-          | if $c != null and ($c | length) <= $n then $c | cap else . end
+          . as $s
+          | [match("(?:,(?! (?:which|who|that) )|;|[[:space:]]-) (?:(?:so|and|but|then|now|or) )?(?<q>(?:how|what|which|who|when|where|why|whether|should|shall|can|could|will|would|do|does|did|is|are|may|must|might) [^,;]*[?])$"; "i")][0] as $m
+          | ($m.captures[0].string // null) as $c
+          # A clause the asking one completes ("when X, should Y?") is its subject.
+          | ($m != null and ($s[:$m.offset] | sub("^.*[:;.!?][[:space:]]+"; "")
+                             | test("^(?:when|whenever|if|once|after|before|unless|until|while|since|because|although|though|given|as soon as|in case|where|wherever)[[:space:]]"; "i"))) as $lead_in
+          | if $c != null and ($c | length) <= $n and ($lead_in | not) then $c | cap else . end
         else . end
       | if length > $n and endswith("?") then
           . as $s
@@ -876,13 +882,20 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
           # its value) is shown in words: when every recorded option is bare
           # and the reason lists the same number of its own options, each takes
           # the reason option at its place, recommendation included; else its
-          # value reads as words (option_words).
+          # value reads as words (option_words). Recorded options whose values
+          # are the letters the reason lists, in order ("a=reads" for "a) reads
+          # - why ... (recommended); b) ..."), take the reason options the same
+          # way, so the card keeps each explanation and the recommendation.
           | ( [ ($d.reason_full // $d.reason), (($d.twins // [])[] | (.reason_full // .reason)) ]
               | map(nz(null) | select(. != null) | clean_reason | option_parse | select(. != null)) | .[0] ) as $own
           | [ ($ch.options // [])[] | objects ] as $ro
           | ($ro | all(((.label // "") | nz(null)) as $l | $l == null or $l == .value)) as $bare
+          | ($own != null and ($own.options | length) == ($ro | length)
+             and ([ range(0; $ro | length) as $i
+                    | (($ro[$i].value // "") | tostring | ascii_downcase)
+                      == ($own.options[$i].value | ltrimstr("option-") | ascii_downcase) ] | all)) as $lettered
           | if ($ro | length) > 0
-            then (if $bare and $own != null and ($own.options | length) == ($ro | length)
+            then (if ($bare or $lettered) and $own != null and ($own.options | length) == ($ro | length)
                   then .options = [ range(0; $ro | length) as $i | {value: $ro[$i].value, label: $own.options[$i].label} ]
                        | ([ range(0; $ro | length) | select($own.options[.].value == $own.recommend) ][0]) as $ri
                        | if $ri != null then .recommend_value = $ro[$ri].value else . end
