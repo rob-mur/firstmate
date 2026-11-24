@@ -442,6 +442,47 @@ test_a_hold_with_bare_recorded_options_shows_words_not_raw_values() {
   pass "a hold's bare recorded options show the reason's own option words or plain words, never raw values"
 }
 
+# A hold whose recorded options are the reason's own letters with slug values
+# ("a) reads - explanation ... (recommended); b) paths - ...") keeps each
+# option's explanation and its trailing recommendation, and a question with a
+# lead-in clause ("when X, should Y?") keeps its subject.
+test_a_hold_with_lettered_slug_options_keeps_explanations_and_lead_in() {
+  local snap p url h1 h4
+  snap="$TMP_ROOT/snap-lettered-slugs.json"
+  url="https://forgejo.example/rob/continuous-delivery/issues/987#issuecomment-35848"
+  h1="Path filter (design section 4, H1): what should adopters call the option that lists the files a stage depends on? a) reads - names it as a claim the pipeline checks against what the stage actually opened (recommended); b) paths - matches GitHub on.push.paths but invites trigger semantics and negation; c) changedPaths; d) runsWhenChanged. Design: $url"
+  h4="Path filter (design section 4, H4): when a filtered stage is seen reading a tracked file outside its filter, should the run go red or only warn? a) red from day one - relaxing later breaks nobody, tightening later breaks adopters (recommended); b) advisory warning first, red later. Design: $url"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq --arg h1 "$h1" --arg h4 "$h4" --arg url "$url" '.decisions_open = [
+        {id: "cd-987-h1-option-name", key: "cd-987-h1-option-name", verb: "captain-hold", owner: "cd",
+         title_full: "#987 H1: path filter option name", reason_full: $h1,
+         choices: {options: [{value: "a", label: "reads"}, {value: "b", label: "paths"},
+                             {value: "c", label: "changedPaths"}, {value: "d", label: "runsWhenChanged"}],
+                   links: [{target: $url, label: "design report"}], free_text: false, no_link: false}},
+        {id: "cd-987-h4-red-or-warn", key: "cd-987-h4-red-or-warn", verb: "captain-hold", owner: "cd",
+         title_full: "#987 H4: red or warn", reason_full: $h4,
+         choices: {options: [{value: "a", label: "red"}, {value: "b", label: "advisory"}],
+                   links: [{target: $url, label: "design report"}], free_text: false, no_link: false}}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  printf '%s\n' "$p" > "$TMP_ROOT/lettered-slugs.json"
+  validates "$TMP_ROOT/lettered-slugs.json" || fail "a payload with lettered slug options did not validate"
+  assert_equals '[{"label":"Reads - names it as a claim the pipeline checks against what the stage actually opened","value":"a"},{"label":"Paths - matches GitHub on.push.paths but invites trigger semantics and negation","value":"b"},{"label":"changedPaths","value":"c"},{"label":"runsWhenChanged","value":"d"}]' \
+    "$(jq -cS '[.captains_call[] | select(.key == "cd-987-h1-option-name") | .options[]]' <<<"$p")" \
+    "a lettered slug option lost its explanation"
+  assert_equals "a" "$(jq -r '.captains_call[] | select(.key == "cd-987-h1-option-name") | .recommend_value' <<<"$p")" \
+    "an option's trailing (recommended) did not become the card's recommendation"
+  assert_equals "Red from day one - relaxing later breaks nobody, tightening later breaks adopters|Advisory warning first, red later" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-987-h4-red-or-warn") | [.options[].label] | join("|")' <<<"$p")" \
+    "a lettered slug option lost its explanation"
+  assert_equals "a" "$(jq -r '.captains_call[] | select(.key == "cd-987-h4-red-or-warn") | .recommend_value' <<<"$p")" \
+    "an option's trailing (recommended) did not become the card's recommendation"
+  assert_equals "Path filter (design section 4, H4): when a filtered stage is seen reading a tracked file outside its filter, should the run go red or only warn?" \
+    "$(jq -r '.captains_call[] | select(.key == "cd-987-h4-red-or-warn") | .question' <<<"$p")" \
+    "a question with a lead-in clause lost its subject"
+  pass "a hold's lettered slug options keep their explanations and a lead-in question keeps its subject"
+}
+
 # A hold with no recorded options, or with no link, is refused by key naming
 # what to add; a declared free-text question with --no-link builds.
 test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add() {
@@ -2510,6 +2551,7 @@ fm_test_run \
   test_the_generators_own_cards_pass_the_build_decision_check \
   test_a_hold_with_recorded_options_and_links_puts_them_on_its_card \
   test_a_hold_with_bare_recorded_options_shows_words_not_raw_values \
+  test_a_hold_with_lettered_slug_options_keeps_explanations_and_lead_in \
   test_a_hold_without_recorded_options_or_a_link_is_refused_naming_what_to_add \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
   test_the_validator_accepts_https_and_the_tailnet_origin_and_refuses_other_http \
