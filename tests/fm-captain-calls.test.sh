@@ -467,6 +467,22 @@ test_mate_backlog_hold_options_are_the_call_options() {
   pass "a mate backlog's Captain hold option lines are the call's options"
 }
 
+# The pdm-oss-open-source-call card showed "(a, recommended) Go: ...", "(b) Go,
+# but ..." and "(c) Not now": each recorded label kept its letter tag.
+test_mate_backlog_option_letter_tags_leave_the_labels() {
+  local home out
+  home=$(make_mate_home mate-backlog-letter-tags)
+  printf 'needs-decision [key=captain-hold-t3-1] [at=%s]: captain hold t3: Open-source it?\n' \
+    "$LATER" > "$home/state/mm.status"
+  printf '## Queued\n\n- [ ] t3 - Open source (hold: open-source it) (hold-kind: captain)\n  Captain hold option: a=(a, recommended) Go: publish it now\n  Captain hold option: b=(b) Go, but after the audit\n  Captain hold option: c=(c) Not now\n\n## Done\n' \
+    > "$home/mm-home/data/backlog.md"
+  out=$(run_calls "$home" off) || fail "fm-captain-calls failed"
+  assert_equals "a|a=Go: publish it now,b=Go, but after the audit,c=Not now" \
+    "$(printf '%s\n' "$out" | jq -r '.calls[] | select(.key == "mm.captain-hold-t3-1") | "\(.recommend)|\([.options[] | "\(.value)=\(.label)"] | join(","))"')" \
+    "a leading (x) or (x, recommended) tag leaves each label, and the recommended one is the recommend"
+  pass "a recorded option's leading letter tag leaves its label and keeps its recommendation"
+}
+
 test_cd_calls_named_by_housekeeping_steers_stay_calls() {
   local out key
   out=$(run_calls "$FIXTURE" "$FIXTURE/prs-fos-merged.tsv") || fail "fm-captain-calls failed"
@@ -646,6 +662,7 @@ fm_test_run \
   test_mate_inline_recommended_option_is_the_recommend \
   test_mate_keyless_line_does_not_shadow_a_keyed_call \
   test_mate_backlog_hold_options_are_the_call_options \
+  test_mate_backlog_option_letter_tags_leave_the_labels \
   test_cd_calls_named_by_housekeeping_steers_stay_calls \
   test_cd_870_version_file_is_a_call_with_its_open_pr \
   test_captain_hold_key_names_its_task_and_question \
