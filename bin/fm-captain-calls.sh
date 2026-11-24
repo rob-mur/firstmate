@@ -95,7 +95,8 @@
 #   decision  false for a merge ask or a review hand-off, else true
 #   title, repo, question, options[{value,label}], recommend (an option value
 #   or null), free_text, no_link,
-#   links[{url,label}], blocked_by[], hold_until, raised_at (UTC ISO or null),
+#   links[{url,label}], report (the local path an "Evidence: <path>" tail
+#   names, or null), blocked_by[], hold_until, raised_at (UTC ISO or null),
 #   prs[{url,state}]  state is merged, closed, open or unknown
 #
 # Exit 0 with the JSON; exit 1 when the backlog cannot be read; exit 2 on usage.
@@ -384,19 +385,26 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
     | if .recommend == null and $mv != null then .recommend = $mv else . end
     | .options = [.options[] | if .label == "" then .label = .value else . end]
     | .recommend = (.recommend // null);
+  # A question that ends in "Evidence: <local path>" names its report: the path
+  # becomes the report of the call, and the tail leaves the question.
+  def evidence_report:
+    "[[:space:]]*(?<![[:alnum:]])Evidence:[[:space:]]+(?<p>(?:~|\\.{1,2})?/[^[:space:]]+|[A-Za-z0-9._-]+/[^[:space:]]+?)[.,;]?[[:space:]]*$" as $ev
+    | ((.question // "") | capture($ev)? // null) as $m
+    | if $m == null then . + {report: null}
+      else . + {question: (.question | sub($ev; "")), report: $m.p} end;
   ([$main.records[]
      | {key: .id, source: "main-hold", home: "main", task: .id, decision_key: null,
         title, repo, question: .hold_reason, options: [.options[] | {value, label}], free_text, no_link,
         links: ([.links[] | {url, label}] + ([(.hold_reason | urls_in[]), (.rest | urls_in[])]
                           | map({url: ., label: ""}))
                 | unique_by(.url)),
-        blocked_by, hold_until, raised_at: .hold_set} | inline_options | recommended_option | classify]) as $holds
+        blocked_by, hold_until, raised_at: .hold_set} | inline_options | recommended_option | evidence_report | classify]) as $holds
   | ([$mates[] | select(.kind == "call" and .worker)
      | {key: (.home + "." + .key), source: "main-worker", home: "main", task: .home,
         decision_key: .key, title: .home, repo: null,
         question: .note, options: [], free_text: true, no_link: false,
         links: ([.note | urls_in[]] | unique | map({url: ., label: ""})),
-        blocked_by: [], hold_until: null, raised_at: iso(.opened), answered} | inline_options | recommended_option | classify]) as $worker_calls
+        blocked_by: [], hold_until: null, raised_at: iso(.opened), answered} | inline_options | recommended_option | evidence_report | classify]) as $worker_calls
   | ([$mates[] | select(.kind == "call" and (.worker | not))
      | (.note | capture("^captain hold (?<t>[A-Za-z0-9._-]+):[[:space:]]*(?<q>.*)$")? // null) as $h
      | .home as $mate
@@ -409,7 +417,7 @@ CALLS_JSON=$(jq -n --argjson main "$MAIN_JSON" --argjson mates "$MATE_JSON" --ar
         blocked_by: [],
         hold_until: (if $h == null then null
                      else ([$until[] | select(.mate == $mate and .task == $h.t) | .until][0] // null) end),
-        raised_at: iso(.opened), answered} | inline_options | recommended_option | classify]) as $mate_calls
+        raised_at: iso(.opened), answered} | inline_options | recommended_option | evidence_report | classify]) as $mate_calls
   | def deferred: .hold_until != null and .hold_until > $today;
   # A live worker key on a task that is itself held for the captain asks the
   # same call: the hold is the one call, so the worker key is skipped.
