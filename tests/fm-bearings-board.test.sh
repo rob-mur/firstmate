@@ -1381,6 +1381,34 @@ test_build_flags_a_card_whose_lettered_choices_were_not_read() {
   pass "the board holds back a question whose lettered choices were not read, not one that only refers back"
 }
 
+# A hold reason that leads with a colon list cuts its heading to the list's
+# lead ("Four calls"), but the question it ends on still asks: the card builds.
+# A reason that asks nowhere is still held back for its question.
+test_build_reads_a_question_anywhere_in_the_reason() {
+  local home data out
+  home=$(make_home question-anywhere)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"cd-636-update-decisions","type":"decision","repo":"cd",
+    "title":"cd 636 update decisions","question":"Four calls",
+    "about":"Four calls: 1) Keep the cache. 2) Drop the flag. 3) Pin the image. 4) Split the job. Do you accept all four recommendations?",
+    "context":{"task":"cd-636-update-decisions","reason":"Four calls: 1) Keep the cache. 2) Drop the flag. 3) Pin the image. 4) Split the job. Do you accept all four recommendations?"},
+    "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}],"no_link":true}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "a reason whose question follows a colon list did not build: $out"
+  assert_not_contains "$out" "undecided-card: cd-636-update-decisions" "a reason whose question follows a colon list was held back: $out"
+
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"cd-636-update-decisions","type":"decision","repo":"cd",
+    "title":"cd 636 update decisions","question":"Four calls",
+    "about":"Four calls: 1) Keep the cache. 2) Drop the flag. 3) Pin the image. 4) Split the job.",
+    "context":{"task":"cd-636-update-decisions","reason":"Four calls: 1) Keep the cache. 2) Drop the flag. 3) Pin the image. 4) Split the job."},
+    "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}],"no_link":true}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" cd-636-update-decisions question "a reason with no question anywhere"
+  pass "the board reads a question anywhere in the reason and still holds back a reason that asks nothing"
+}
+
 # A card whose reason lists two or more "Option x:" marks but which offers no
 # options, or only a default yes/no, is a reason the option reader could not
 # read: it is held back naming the marks, even as a worker status card, so the
@@ -1815,6 +1843,7 @@ test_a_linked_page_token_leaves_the_card_text
 test_a_page_its_task_status_names_links_the_hold_card
 test_a_card_that_names_a_page_title_links_that_page
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
+test_build_reads_a_question_anywhere_in_the_reason
 test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_a_refusal_names_the_first_failing_item_and_its_fields
