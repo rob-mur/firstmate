@@ -74,6 +74,12 @@
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
+#   captain_followups_uncarded[]: {id,step,status,title} for each Done work item
+#     whose final status (live state/<id>.status, else the newest archived
+#     data/<id>/status*.log) names a step only the captain can do, per
+#     fm-classify-lib.sh's status_captain_next_step, while no open captain hold
+#     is that item or names it as its origin or gate. Bearings shows each as a
+#     "captain follow-up with no card" line so the step never stays chat-only.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
@@ -2376,6 +2382,35 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+# A Done work item whose final status names a step only the captain can do
+# ("next: captain runs snrs per host") must still have an open captain hold, or
+# the step reaches only chat. Each recently Done item's final status is its live
+# state/<id>.status when cleanup has not retired it, else its newest archived
+# data/<id>/status*.log; fm-classify-lib.sh's status_captain_next_step names the
+# step. The open-hold check runs in the final assembly, against the backlog.
+captain_followup_lines() {  # <backlog-json-file>
+  local id source step n
+  jq -r '.records[]? | select(.structured == true and .state == "done" and .kind != "captain") | .id' "$1" \
+    | while IFS= read -r id; do
+      case "$id" in ''|.|..|*[!A-Za-z0-9._-]*) continue ;; esac
+      source="$STATE/$id.status"
+      if [ ! -f "$source" ] || [ -L "$source" ]; then
+        [ -d "$DATA/$id" ] && [ ! -L "$DATA/$id" ] || continue
+        # Reused ids archive as status.log, then status.1.log, status.2.log...
+        n=0
+        source="$DATA/$id/status.log"
+        while [ -f "$DATA/$id/status.$((n + 1)).log" ]; do
+          n=$((n + 1))
+          source="$DATA/$id/status.$n.log"
+        done
+        [ -f "$source" ] && [ ! -L "$source" ] || continue
+      fi
+      step=$(status_captain_next_step "$source") || continue
+      jq -n --arg id "$id" --arg step "$step" --arg source "$source" '{id:$id,step:$step,status:$source}'
+    done \
+    | jq -s 'sort_by(.id)'
+}
+
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 contribution_tasks_json() {
   local meta id merge_authority
@@ -2440,6 +2475,9 @@ fi
 
 scout_report_lines > "$SCOUT_REPORTS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: scout report snapshot failed" >&2; exit 1; }
+CAPTAIN_FOLLOWUPS_JSON_FILE="$JSON_TRANSPORT_DIR/captain-followups.json"
+captain_followup_lines "$BACKLOG_JSON_FILE" > "$CAPTAIN_FOLLOWUPS_JSON_FILE" \
+  || { echo "fm-fleet-snapshot: captain follow-up scan failed" >&2; exit 1; }
 main_inventory_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" > "$MAIN_INVENTORY_JSON_FILE" \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 secondmate_current_json "$TASKS_JSON_FILE" "$SECONDMATE_CURRENT_JSON_FILE" \
@@ -2460,6 +2498,7 @@ jq -n \
   --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
   --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" \
   --slurpfile scout_reports "$SCOUT_REPORTS_JSON_FILE" \
+  --slurpfile captain_followups "$CAPTAIN_FOLLOWUPS_JSON_FILE" \
   --slurpfile secondmate_current "$SECONDMATE_CURRENT_JSON_FILE" \
   --slurpfile secondmate_landed "$SECONDMATE_LANDED_JSON_FILE" \
   '($backlog[0]) as $backlog
@@ -2471,6 +2510,10 @@ jq -n \
    | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
+   def hold_covers($id):
+     any($backlog.records[]?; .structured == true and .state != "done" and .hold_kind == "captain"
+       and (.id == $id or any((.body_lines // [])[];
+         (capture("^Captain hold (origin|gates):[[:space:]]*(?<v>[^[:space:]]+)")?.v) == $id)));
    {
      schema:"fm-fleet-snapshot.v1",
      generated:$generated,
@@ -2481,6 +2524,8 @@ jq -n \
      main_inventory:$main_inventory,
      contributions:$contributions[0],
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
+     captain_followups_uncarded:([$captain_followups[0][] | select(hold_covers(.id) | not)
+       | . + {title:(backlog_by_id(.id).title // null)}]),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
      secondmate_guidance:{

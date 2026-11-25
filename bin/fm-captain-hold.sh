@@ -35,6 +35,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh covered <task-id>
 #   fm-captain-hold.sh answered <origin-task-id> <decision-key> --opened-at <epoch>
 #   fm-captain-hold.sh answered-batch <origin-task-id>   (<decision-key>\t<epoch> lines on stdin)
 #   fm-captain-hold.sh settled <task-id>
@@ -236,6 +237,16 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+#
+# `covered` is the read-only predicate a closer asks before it retires a
+# record that carries something the captain must do or decide: does an open
+# captain hold cover this task? Exit 0 prints the covering task id when the
+# task is itself an open captain call (`open` exit 0) or an open captain hold
+# names it on its `Captain hold gates:` or `Captain hold origin:` line; 1 means
+# no open hold covers it; 2 means the answer could not be established.
+# It mutates nothing. bin/fm-teardown.sh, bin/fm-branch-report.sh, and
+# bin/fm-fleet-snapshot.sh ask it before a captain-only next step may leave
+# the record that carries it.
 #
 # `answered` is the read-only check a surface asks before it shows a keyed
 # status decision (<origin-task-id>, <decision-key>) as a captain call: has the
@@ -2703,6 +2714,47 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+# Does an open captain hold cover <task-id>? See the header for the contract.
+command_covered() {  # <task-id>
+  local id=${1:-} rc=0 data listing row other body
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*)
+      printf 'fm-captain-hold: task id must be a non-empty privacy-safe slug: %s\n' "$id" >&2
+      exit 2
+      ;;
+  esac
+  ( command_open "$id" ) >/dev/null || rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$id"; return 0 ;;
+    1) ;;
+    *) exit 2 ;;
+  esac
+  data=$(fm_backlog_data_absolute "$DATA") \
+    || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
+  if [ "$(fm_tasks_axi_backend_resolve "$(fm_backlog_root "$data" 2>/dev/null)" 2>/dev/null)" = markdown ]; then
+    local file
+    file=$(fm_backlog_file "$data" 2>/dev/null) || exit 2
+    [ -e "$file" ] || [ -L "$file" ] || return 1
+  fi
+  listing=$(fm_backlog_row_list "$data" --state held --fields hold_kind) \
+    || { printf 'fm-captain-hold: could not list held tasks: %s\n' "${listing%%$'\n'*}" >&2; exit 2; }
+  # Rows are `  <id>,<state>,<kind>,<repo>,<title>,<hold_kind>`, as in
+  # refuse_second_gate.
+  while IFS= read -r row; do
+    other=${row#  }
+    other=${other%%,*}
+    [ "${row##*,}" = captain ] || continue
+    task_show "$other" || exit 2
+    body=$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")
+    if [ "$(body_hold_gates "$body")" = "$id" ] || [ "$(body_hold_origin "$body")" = "$id" ]; then
+      printf '%s\n' "$other"
+      return 0
+    fi
+  done < <(printf '%s\n' "$listing" | grep -E '^  [A-Za-z0-9._-]+,')
+  return 1
+}
+
 # Has the captain already answered this keyed status decision? Exit 0 with the
 # answered task id printed, else 1 (see the header). Every doubt is a 1.
 command_answered() {  # <origin-task-id> <decision-key> --opened-at <epoch>
@@ -2871,6 +2923,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  covered) shift; command_covered "$@" ;;
   answered) shift; command_answered "$@" ;;
   answered-batch) shift; command_answered_batch "$@" ;;
   settled) shift; command_settled "$@" ;;

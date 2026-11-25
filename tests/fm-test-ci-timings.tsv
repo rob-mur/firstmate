@@ -82,6 +82,7 @@ tests/fm-captain-hold-teardown.test.sh	400000
 tests/fm-cd-pretool-check.test.sh	22185
 tests/fm-check-unregister.test.sh	687
 tests/fm-ci-workflow.test.sh	13889
+tests/fm-classify-captain-next-step.test.sh	557
 tests/fm-classify-corr-token.test.sh	24516
 tests/fm-classify-decision-key.test.sh	3785
 tests/fm-claude-account-quota.test.sh	697
