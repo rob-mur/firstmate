@@ -239,6 +239,15 @@ run_update_in_case() {
     "$ROOT/bin/fm-update.sh" 2>/dev/null
 }
 
+# register_local_mate <case-dir> <id>
+# Records a local mate in this home's registry, the source the restart's
+# fm-<id> selector resolves against.
+register_local_mate() {
+  local dir=$1 id=$2
+  printf -- '- %s - local domain (home: %s; scope: things; projects: p; added 2026-09-03)\n' \
+    "$id" "$dir/$id-home" >> "$dir/home/data/secondmates.md"
+}
+
 # arm_answer <case-dir> <id>: make the modelled mate answer the persist request.
 arm_answer() {
   local dir=$1 id=$2
@@ -261,6 +270,7 @@ test_persist_gates_and_asks_only_for_open_records() {
   local dir out rc request
   dir=$(new_case gate)
   add_local_mate "$dir" sm1
+  register_local_mate "$dir" sm1
   # No answer armed: the mate never confirms its open work is written down.
   out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" fm-sm1); rc=$?
 
@@ -312,6 +322,41 @@ test_persist_precedes_restart() {
   grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q '^phase=resolved$' \
     || fail "the persist answer did not settle its durable expectation"
   pass "T2 the mate persists before anything is stopped"
+}
+
+# --- T2c: the fm- selector resolves against registered mates ----------------
+test_fm_selector_resolves_against_the_registry() {
+  local dir out rc arg
+  # A mate whose real id starts with "fm-" restarts by that id.
+  dir=$(new_case fm-prefixed-id)
+  add_local_mate "$dir" fm-patches
+  register_local_mate "$dir" fm-patches
+  arm_answer "$dir" fm-patches
+
+  out=$(run_restart "$dir" fm-patches); rc=$?
+
+  expect_code 0 "$rc" "a registered fm- id must restart by its own id"$'\n'"$out"
+  assert_contains "$out" "restarted: fm-patches (claude)" \
+    "the registered fm- id was not the mate that restarted"
+  assert_not_contains "$out" "restarted: patches" "the registered fm- id was stripped"
+  assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" \
+    "the fm- prefixed mate was not accounted for as restarted"
+
+  # A plain mate restarts by both its fm-<id> selector and its bare id.
+  for arg in fm-sm1 sm1; do
+    dir=$(new_case "plain-$arg")
+    add_local_mate "$dir" sm1
+    register_local_mate "$dir" sm1
+    arm_answer "$dir" sm1
+
+    out=$(run_restart "$dir" "$arg"); rc=$?
+
+    expect_code 0 "$rc" "a plain mate must restart by '$arg'"$'\n'"$out"
+    assert_contains "$out" "restarted: sm1 (claude)" "a plain mate did not restart by '$arg'"
+    assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" \
+      "the plain mate named by '$arg' was not accounted for as restarted"
+  done
+  pass "T2c the fm- selector keeps a registered fm- id and strips only onto a registered mate"
 }
 
 # --- T2b: an answer delivered at a zero-second bound still releases the gate -
@@ -860,6 +905,7 @@ test_already_current_mate_restarts_end_to_end() {
   local dir out restart_line ids rc head_before head_after doorbell_line exit_line
   dir=$(new_case already-current)
   add_repo_backed_mate "$dir" sm1
+  register_local_mate "$dir" sm1
   arm_answer "$dir" sm1
   head_before=$(git -C "$dir/sm1-home" rev-parse HEAD)
 
@@ -990,6 +1036,7 @@ w = { tokens: [],
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
+test_fm_selector_resolves_against_the_registry
 test_answer_between_resolution_and_timeout_wins
 test_unprovable_runtime_falls_back
 test_unknown_mate_is_accounted_for
