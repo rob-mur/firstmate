@@ -48,12 +48,18 @@
 # repeated within `links`, name the card. A `pr_url` repeated exactly in
 # `links` is not a duplicate: the board shows it once, and the payload builder
 # emits that shape whenever a reason cites the task's own PR.
-# A card must not ask about a PR/MR that is already over: a `links` url that
-# the live link states name merged or closed names the card, so a card written
-# after its merge request merged cannot ask for its review. Only `links` is
-# judged: it carries what the hold itself names (its --link values and the
-# urls in its reason), while `pr_url` is only the PR the task recorded, which
-# may be an earlier, merged round of a question that is still live.
+# A card must not ask to review or merge a PR/MR that is already over: when the
+# card asks for review or merge, a `links` url that the live link states name
+# merged or closed names the card, so a card written after its merge request
+# merged cannot ask for its review. A card asks for review or merge when any of
+# its prompts (`question`, `decide`, `title`) is a merge ask (is_merge_ask in
+# bin/fm-bearings-question-lib.sh, read with the card's options) or names a
+# review ("review", "reviewed", "re-review" ... as a word). Any other card - a
+# rollout, deploy, or other post-merge question that links the PR it follows -
+# keeps its merged link and reaches the captain. Only `links` is judged: it
+# carries what the hold itself names (its --link values and the urls in its
+# reason), while `pr_url` is only the PR the task recorded, which may be an
+# earlier, merged round of a question that is still live.
 #
 # fm_bearings_card_link_states <data.json>: read the live state of every
 # GitHub, GitLab or Forgejo PR/MR url in the Captain's Call cards' (merge cards
@@ -73,7 +79,7 @@
 # `<key>: <problem>` line per Captain's Call card in an fm-bearings-board.v1
 # payload that fails the rule, <problem> being `missing <field> (<why>)[, ...]`,
 # `options given twice (...)`, `duplicate link (<url> ...)` and/or
-# `names <url>, already merged|closed`
+# `names <url>, already merged|closed, and asks to review or merge it`
 # (from the link states fm_bearings_card_link_states printed), joined by `; `.
 #
 # fm_bearings_status_decision_problem <task> <key> <note>: check one worker
@@ -165,8 +171,12 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
     | ( [ ([ $urls[], (.pr_url | strings | select(length > 0)) ] | unique | group_by(link_norm)[]
            | select(length > 1) | .[0] | link_norm),
           ($urls | group_by(.)[] | select(length > 1) | .[0] | link_norm) ] | unique ) as $dups
-    | ( $urls | map(link_norm) | unique
-        | map(select($states[.] != null) | "names \(.), already \($states[.])") ) as $over
+    | ( [.question, .decide, .title] | map(text) | map(select(length > 0)) ) as $asked
+    | ( any($asked[]; test("(^|[^a-z-])(re-?)?review(s|ed|ing)?([^a-z-]|$)"; "i"))
+        or (.options as $o | any($asked[]; {reason_full: ., choices: {options: $o}} | is_merge_ask(.))) ) as $pr_ask
+    | ( if $pr_ask then $urls | map(link_norm) | unique
+          | map(select($states[.] != null) | "names \(.), already \($states[.]), and asks to review or merge it")
+        else [] end ) as $over
     | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
          then "question (no question or decide prompt, and the title is not a question)"
          elif ($prompts | length) > 0 and (any($prompts[]; asks) | not)

@@ -107,7 +107,8 @@
 # board is touched, build checks that each Captain's Call card says
 # what the captain is deciding. The rule - a prompt that asks, a way to answer,
 # recorded options, a link unless the card is exempt, each link listed once,
-# and no link to a PR/MR already merged or closed - and its exemptions
+# and no link to a PR/MR already merged or closed in a card asking to review
+# or merge it - and its exemptions
 # are owned by bin/fm-bearings-card-check-lib.sh, the same check the watcher
 # runs on a worker's needs-decision line to bounce it back (bin/fm-watch.sh).
 # A card that fails is
