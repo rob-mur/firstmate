@@ -18,6 +18,11 @@
 # already uses when it first records a remote route - and republishes this
 # home's own metadata to match. A failed or refused relaunch leaves this
 # parent's record untouched.
+#
+# The whole relaunch holds this parent's per-mate liveness lock, the one
+# bin/fm-secondmate-liveness-lib.sh's probes take, so a liveness probe never
+# reads the mate mid-relaunch as dead and starts a second, refused relaunch.
+# FM_CONTROL_LIVENESS_WAIT bounds the wait for that lock (150 seconds).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +50,15 @@ META="$STATE/$ID.meta"
 REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
+
+LIVENESS_WAIT=${FM_CONTROL_LIVENESS_WAIT:-150}
+case "$LIVENESS_WAIT" in
+  ''|*[!0-9]*|0) die "FM_CONTROL_LIVENESS_WAIT must be a positive integer: $LIVENESS_WAIT" ;;
+esac
+LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+fm_lock_acquire_wait_bounded "$LIVENESS_LOCK" "$LIVENESS_WAIT" \
+  || die "a secondmate liveness check is in progress for $ID and did not finish within ${LIVENESS_WAIT}s; nothing was changed - retry the relaunch"
+trap 'fm_lock_release "$LIVENESS_LOCK" || true' EXIT
 
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
