@@ -158,7 +158,9 @@ fi
 [ -n "$last_message" ] || exit 0
 
 ask=$(jq -R -s -r '
-  def clean: gsub("```[\\s\\S]*?```"; " ") | gsub("`[^`\\n]*`"; " ") | gsub("https?://[^\\s)>\\]]+"; " ");
+  def clean_keep_code: gsub("```[\\s\\S]*?```"; " ") | gsub("https?://[^\\s)>\\]]+"; " ");
+  def clean: clean_keep_code | gsub("`[^`\\n]*`"; " ");
+  def imperative_cue: test("^(run|set|activate|enable|log ?in|sign ?in|approve|merge|install)\\b(?!\\s+(is|was|are|were|has|had|failed|passed|succeeded|finished|completed|started|went|ran)\\b)|\\bsteps are in\\b|\\bto (switch|turn) (it|this|that|them) on\\b"; "i");
   def question_cue: test("\\b(you|your|captain|shall (i|we)|should (i|we)|can (i|we)|may (i|we)|want me|ok|okay|go ahead|proceed|merge|approve|decision)\\b"; "i");
   def request_cue: test("\\b(your (call|go-ahead|go ahead|sign-off|ok|okay)\\b|(need|needs|needed|waiting (on|for)|awaiting|waits for|ready for|for) your (decision|approval|word|pick|choice|review|input|answer|verdict|read|go-ahead|call|ok|okay)\\b|your (decision|pick|choice) *(is\\b|:)|you (need|have|will need|.ll need) to\\b|please (run|approve|confirm|review|merge|log ?in|sign ?in|authenticate|decide|choose|pick|reply|check)\\b|let me know|say the word|shall i\\b|want me to|do you want|would you like|waiting (on|for) you\\b|needs? you\\b|up to you\\b)"; "i");
   def negated: test("\\b(no|not|nothing|never|none|neither|without|anything|everything|whatever)\\b|n.t\\b"; "i");
@@ -172,10 +174,12 @@ ask=$(jq -R -s -r '
              or any($l[$i + 1:][]; test("[[:alnum:]]")))
          then sub(label_re; "") else . end]
     | join("\n");
+  def sentences: answered_labels_dropped | splits("(?<=[.!?])\\s+|\\n+") | gsub("^(?:\\s|[>*_#-]|[0-9]+[.)]\\s)+|[\\s*_]+$"; "") | select(length > 0) | select(relay | not);
   if (gsub("^\\s+|\\s+$"; "") == "Captain, shipshape.") then ""
   else
-    [clean | answered_labels_dropped | splits("(?<=[.!?])\\s+|\\n+") | gsub("^[\\s>*_#-]+|[\\s*_]+$"; "") | select(length > 0)
-      | select((relay | not) and ((test("\\?[)\"'"'"']*$") and question_cue) or (request_cue and (negated | not) and (hypothetical | not))))]
+    ([clean | sentences
+      | select((test("\\?[)\"'"'"']*$") and question_cue) or (request_cue and (negated | not) and (hypothetical | not)))]
+     + [clean_keep_code | sentences | splits("[;:]\\s+") | gsub("^\\s+"; "") | select(imperative_cue)])
     | first // ""
   end' <<<"$last_message" 2>/dev/null || true)
 [ -n "$ask" ] || exit 0
