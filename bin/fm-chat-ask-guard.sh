@@ -27,6 +27,12 @@
 # Ask heuristic, on the final message with fenced code, inline code, and URLs
 # removed, split into sentences at . ! ? and line breaks:
 #   - The exact reply "Captain, shipshape." is never an ask.
+#   - A question that is a label is never an ask when text answers it: a
+#     markdown heading line, or a bold **...?** or __...?__ span at the start
+#     of a line (after any list or quote marker), followed by more text on its
+#     line or on a later line ("**What do you like most about your job?** The
+#     team ..." quoting a form's fields). The same label as the message's last
+#     text is still read.
 #   - A sentence that relays rather than asks is never an ask: I've, I have, I,
 #     it, has or have passed, sent, told, relayed, recorded, forwarded, handed,
 #     replaced, withdrawn or reported ("I've passed your pick to the worker",
@@ -158,9 +164,17 @@ ask=$(jq -R -s -r '
   def negated: test("\\b(no|not|nothing|never|none|neither|without|anything|everything|whatever)\\b|n.t\\b"; "i");
   def relay: test("\\b(i.ve|i have|i|it|has|have) (passed|sent|told|relayed|recorded|forwarded|handed|replaced|withdrawn|reported)\\b"; "i");
   def hypothetical: test("\\bi.ll\\b|\\bi will\\b|\\bif\\b"; "i");
+  def label_re: "^\\s*(?:(?:[>*+-]|[0-9]+[.)])\\s+)*(?:#{1,6}\\s+.*\\?[\\s#]*$|\\*\\*[^*\\n]*\\?\\*\\*|__[^_\\n]*\\?__)";
+  def answered_labels_dropped:
+    [splits("\\n")] as $l
+    | [range(0; $l | length) as $i | $l[$i]
+       | if test(label_re) and ((sub(label_re; "") | test("[[:alnum:]]"))
+             or any($l[$i + 1:][]; test("[[:alnum:]]")))
+         then sub(label_re; "") else . end]
+    | join("\n");
   if (gsub("^\\s+|\\s+$"; "") == "Captain, shipshape.") then ""
   else
-    [clean | splits("(?<=[.!?])\\s+|\\n+") | gsub("^[\\s>*_#-]+|[\\s*_]+$"; "") | select(length > 0)
+    [clean | answered_labels_dropped | splits("(?<=[.!?])\\s+|\\n+") | gsub("^[\\s>*_#-]+|[\\s*_]+$"; "") | select(length > 0)
       | select((relay | not) and ((test("\\?[)\"'"'"']*$") and question_cue) or (request_cue and (negated | not) and (hypothetical | not))))]
     | first // ""
   end' <<<"$last_message" 2>/dev/null || true)
