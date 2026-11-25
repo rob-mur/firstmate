@@ -21,7 +21,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--gates <work-item>] \
+#     [--until YYYY-MM-DD] \
 #     [--option <value>[=<label>]]... [--free-text] [--link <target>[ <label>]]... [--no-link]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh pr-policy <task-id> <PR-url> <merged|closed|terminal> <close|release>
@@ -56,6 +57,12 @@
 # hold with the same reason preserves the existing timestamp, while a new reason
 # or re-holding released work stamps the current time.
 # A task already closed is refused rather than reopened.
+# `--gates` names the work item the call gates and records it on a
+# `Captain hold gates:` body line. A work item has at most one open captain
+# hold: `hold` refuses a second task gating a work item that an open hold
+# already gates (or that is itself held), naming the open hold so the new PR
+# or question is added to it instead. Without `--gates` the held task gates
+# itself. The check is not atomic across different task ids.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
 # `complete` and `verify` check. The reason may hold parentheses and line breaks:
 # tasks-axi refuses them, so `hold` escapes them where it writes the reason and
@@ -1037,6 +1044,36 @@ body_hold_origin() {  # <decoded-task-body>
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | head -1
 }
 
+# The work item a hold gates lives on its own `Captain hold gates:` line. Unlike
+# an origin, which may carry many distinct calls, one work item has at most one
+# open captain call: `hold` refuses a second (refuse_second_gate below).
+body_hold_gates() {  # <decoded-task-body>
+  printf '%s\n' "$1" | sed -n 's/^Captain hold gates: \(.*\)$/\1/p' | head -1
+}
+
+# Refuse holding <task-id> when another open captain hold already gates
+# <work-item>: the other task is that work item itself, or records it on its
+# `Captain hold gates:` line. Holding a work item directly gates that item.
+refuse_second_gate() {  # <task-id> <work-item>
+  local id=$1 gates=$2 data listing row other other_gates
+  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
+  listing=$(fm_backlog_row_list "$data" --state held --fields hold_kind) \
+    || fail "could not list held tasks to check what already gates $gates: ${listing%%$'\n'*}"
+  # Rows are `  <id>,<state>,<kind>,<repo>,<title>,<hold_kind>`; ids are slugs
+  # and hold_kind is last, so a quoted title cannot shift either end.
+  while IFS= read -r row; do
+    other=${row#  }
+    other=${other%%,*}
+    [ "$other" != "$id" ] && [ "${row##*,}" = captain ] || continue
+    if [ "$other" != "$gates" ]; then
+      task_show "$other" || continue
+      other_gates=$(body_hold_gates "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
+      [ "$other_gates" = "$gates" ] || continue
+    fi
+    fail "work item $gates already has an open captain hold, $other; add the new PR or question to $other (re-run hold $other with the updated --reason, --option, and --link) instead of holding a second task for it"
+  done < <(printf '%s\n' "$listing" | grep -E '^  [A-Za-z0-9._-]+,')
+}
+
 task_identity() {
   local id=$1
   if task_show "$id"; then
@@ -1049,14 +1086,14 @@ task_identity() {
 }
 
 # The hold header is the stamp line plus the structured lines directly under
-# it: origin, then the option group, then the link group. A group named on this
+# it: origin, then gates, then the option group, then the link group. A group named on this
 # hold replaces its old lines; an unnamed group keeps them. Origin lines
 # elsewhere in the body are dropped when a new origin is recorded, as before.
-HOLD_HEADER_PATTERN='^Captain hold (origin|option|free text|link|no link): '
+HOLD_HEADER_PATTERN='^Captain hold (origin|gates|option|free text|link|no link): '
 
-rewrite_hold_header() {  # <task-id> <shown-body> <origin> <options-named-0-or-1> <links-named-0-or-1>
-  local id=$1 body=$2 origin=$3 options_named=$4 links_named=$5 stamp header rest
-  local origin_lines option_lines link_lines new_body tmp
+rewrite_hold_header() {  # <task-id> <shown-body> <origin> <options-named-0-or-1> <links-named-0-or-1> [gates]
+  local id=$1 body=$2 origin=$3 options_named=$4 links_named=$5 gates=${6:-} stamp header rest
+  local origin_lines gates_lines option_lines link_lines new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   stamp=$(printf '%s\n' "$body" | sed -n 1p)
@@ -1071,6 +1108,12 @@ rewrite_hold_header() {  # <task-id> <shown-body> <origin> <options-named-0-or-1
   else
     origin_lines=$(printf '%s\n' "$header" | grep '^Captain hold origin: ' || true)
   fi
+  if [ -n "$gates" ]; then
+    gates_lines="Captain hold gates: $gates"
+    rest=$(printf '%s\n' "$rest" | awk '!/^Captain hold gates: /' | awk 'NF || started { started = 1; print }')
+  else
+    gates_lines=$(printf '%s\n' "$header" | grep '^Captain hold gates: ' || true)
+  fi
   if [ "$options_named" = 1 ]; then
     option_lines=$HOLD_OPTION_LINES
   else
@@ -1083,6 +1126,7 @@ rewrite_hold_header() {  # <task-id> <shown-body> <origin> <options-named-0-or-1
   fi
   new_body=$stamp
   [ -z "$origin_lines" ] || new_body=$(printf '%s\n%s' "$new_body" "$origin_lines")
+  [ -z "$gates_lines" ] || new_body=$(printf '%s\n%s' "$new_body" "$gates_lines")
   [ -z "$option_lines" ] || new_body=$(printf '%s\n%s' "$new_body" "$option_lines")
   [ -z "$link_lines" ] || new_body=$(printf '%s\n%s' "$new_body" "$link_lines")
   if [ -n "$rest" ]; then
@@ -1350,7 +1394,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local id=${1:-} title='' reason='' repo='' origin='' gates='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' existing_reason='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
   local free_text=0 no_link=0 options_named=0 links_named=0
   HOLD_OPTION_ARGS=()
@@ -1363,6 +1407,7 @@ command_hold() {
       --reason) shift; reason=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
+      --gates) shift; gates=${1:-} ;;
       --until) shift; until=${1:-} ;;
       --option) shift; [ "$#" -gt 0 ] || { usage >&2; exit 2; }; HOLD_OPTION_ARGS+=("$1"); options_named=1 ;;
       --free-text) free_text=1; options_named=1 ;;
@@ -1380,6 +1425,7 @@ command_hold() {
   if [ -n "$origin" ]; then
     validate_slug origin-id "$origin"
   fi
+  [ -z "$gates" ] || validate_slug work-item "$gates"
   if [ -n "$until" ]; then
     case "$until" in
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
@@ -1393,6 +1439,10 @@ command_hold() {
   esac
   acquire_task_control_lock "$id"
   require_tasks_axi
+  # Refuse before anything is created or stamped. Without --gates the task is
+  # held as the work item itself, so a hold that already gates it still counts.
+  [ -z "$gates" ] || gates=$(task_identity "$gates") || exit $?
+  refuse_second_gate "$id" "${gates:-$id}"
   if task_show "$id"; then
     show=$TASK_SHOW_OUTPUT
     state=$(show_field "$show" state)
@@ -1474,8 +1524,8 @@ command_hold() {
     || fail "task $id lost its hold-set stamp while being held"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
-  if [ -n "$origin" ] || [ "$options_named" = 1 ] || [ "$links_named" = 1 ]; then
-    rewrite_hold_header "$id" "$(show_field "$show" body)" "$origin" "$options_named" "$links_named" || exit $?
+  if [ -n "$origin" ] || [ -n "$gates" ] || [ "$options_named" = 1 ] || [ "$links_named" = 1 ]; then
+    rewrite_hold_header "$id" "$(show_field "$show" body)" "$origin" "$options_named" "$links_named" "$gates" || exit $?
   fi
   printf '%s\n' "$id"
 }
