@@ -818,6 +818,30 @@ status_line_note() {  # <status-line> [<out-var>] -> text after the first colon,
   esac
   if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$__fm_note_text"; else printf '%s' "$__fm_note_text"; fi
 }
+
+# The captain-only next step a ship's newest done line names, such as
+# "next: captain runs snrs per host": prints "captain <step>" and returns 0, or
+# returns 1 when that line names none. A step the landing itself discharges
+# (the captain reviews, merges, or approves the change, with nothing after it)
+# is not captain-only and is skipped. Teardown and the fleet snapshot ask this
+# so a follow-up only the captain can do never leaves the record without an
+# open captain hold.
+status_captain_next_step() {  # <status-file>
+  local f=$1 line step
+  [ -f "$f" ] && [ -r "$f" ] || return 1
+  line=$(grep -E '^[[:space:]]*done([[:space:]:[]|$)' "$f" 2>/dev/null | tail -n 1) || :
+  [ -n "$line" ] || return 1
+  step=$(printf '%s\n' "$line" | grep -oiE '\bnext:[[:space:]]*captain\b.*' | head -n 1) || :
+  [ -n "$step" ] || return 1
+  step=$(printf '%s' "$step" | sed -E 's/^[Nn][Ee][Xx][Tt]:[[:space:]]*[Cc][Aa][Pp][Tt][Aa][Ii][Nn]//; s/^[[:space:]]+//; s/[[:space:].]+$//')
+  [ -n "$step" ] || return 1
+  if printf '%s\n' "$step" | grep -qiE '^((to|must|should|can|will|needs?( to)?)[[:space:]]+)?(review|reviews|reviewing|merge|merges|merging|approve|approves|approval)\b' \
+    && ! printf '%s\n' "$step" | grep -qiE '\b(then|after (that|merge|merging|landing))\b'; then
+    return 1
+  fi
+  printf 'captain %s\n' "$step"
+}
+
 _fm_decision_key() {  # <status-line> [<keyless>] [<out-var>] -> key slug, or <keyless> (default "default") when no token
   local __fm_key_slug __fm_key_unstamped
   _fm_status_unstamped "$1" __fm_key_unstamped

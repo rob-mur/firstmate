@@ -38,6 +38,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | `complete` | Records the reviewed captain-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
 | `verify` | Read-only check that scout teardown runs before removing source state. | [Checking before scout teardown](#checking-before-scout-teardown-verify) |
 | `open` | Read-only check of whether a row is still an open captain call. | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
+| `covered` | Read-only check of whether an open captain hold carries a task's captain-only follow-up. | [Cleanup never drops a captain-only follow-up](#cleanup-never-drops-a-captain-only-follow-up) |
 | `answers` | Channel-agnostic entry point for keyed answers. | [Answer-time resolution](#answer-time-resolution) |
 | `bind`, `unbind`, `binding` | Record that a captured-answer source feeds the keyed-answer intake. | [Source bindings](#source-bindings) |
 | `reconcile-requests` | Internal intake that records a reconcile request from a board selection. | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
@@ -215,6 +216,27 @@ The refusal names the record and the validation reason, so the captain can repai
 `--force` does not lift the deferral, because it authorizes discarding unlanded work, never the captain's question.
 The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) owns the allowed answer and evidence-backed settlement paths.
 `bin/fm-backlog-transition-lib.sh` owns the transition and its record, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
+
+## Cleanup never drops a captain-only follow-up
+
+A finished task's last report can leave steps that only the captain can take, such as "next: captain runs the setup per host".
+Once cleanup closes that row, nothing else on the board carried those steps, so they were lost.
+
+`bin/fm-teardown.sh` therefore reads the newest `done` line of the task's status (`status_captain_next_step` in `bin/fm-classify-lib.sh`).
+A next step that is only the captain's review, merge, or approval of the delivered work is not a follow-up, because the ready PR already carries it.
+Any other "next: captain ..." step must have an open captain hold before cleanup proceeds.
+Teardown asks the read-only `covered` subcommand:
+
+| `covered` exit | Meaning | What teardown does |
+| --- | --- | --- |
+| 0 | An open captain hold carries the task: the task itself, or a hold whose `Captain hold origin:` or `Captain hold gates:` names it. The covering id is printed. | Proceeds. |
+| 1 | No open captain hold carries the task. | Refuses and prints the exact `fm-captain-hold.sh hold <id>-captain --origin <id> --reason <step>` command. |
+| 2 | The answer could not be established. | Refuses. |
+
+`--force` does not lift this refusal either, for the same reason as above.
+
+`bin/fm-branch-report.sh --verdict captain` applies the same rule at report time.
+Unless `--inform true` marks the outcome as relay-only, or a hold already covers the task, it holds `<task>-captain` (or `fleet-captain-<epoch>` for a fleet report) with the outcome as its reason, so the outcome shows on the board.
 
 ## Answer-time resolution
 
@@ -435,6 +457,14 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 `--all-decisions` reveals every captain hold available within the remote-summary bound and drops its gate.
 An available hold is therefore never in both Captain's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
+
+### Captain follow-ups with no card
+
+The fleet snapshot's `captain_followups_uncarded[]` lists every Done task whose final status names a captain-only next step that no open captain hold carries.
+It reads the live status, or the newest archived `data/<id>/status.log` when cleanup archived it, so a home without a status archive cannot see a follow-up after cleanup.
+Unlike the hold buckets, this list does read status prose, through the same `status_captain_next_step` rule as teardown.
+Bearings renders each entry as a `(captain-followup-<id>)` Charted Next gate, ahead of the gate bound, and the web board shows it as a warning row.
+Holding the follow-up clears the flag.
 
 ### Handed to a worker
 
