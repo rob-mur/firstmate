@@ -176,7 +176,9 @@
 #                      (`reconcile-<id>`), whose state is unavailable
 #                      (`unavailable-<id>`), or that could not be read this time
 #                      and shows its last known rows (`stale-<id>`, titled with
-#                      the row's `stale_note`, with the read failure as reason).
+#                      the row's `stale_note`, with the read failure as reason),
+#                      or whose drive posture shows it stopped with standing
+#                      work (`stopped-<id>`, from `stopped_since`).
 #   decision `note` -> a card's `detail` (an authored detail wins) and the start of
 #                      a waiting row's reason, so a row kept from an unreadable
 #                      home, or an open key its idle home no longer carries,
@@ -1140,6 +1142,13 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
             { id: ("unavailable-" + ($m.id | gsub("[()]"; ""))), repo: null,
               title: ($m.id + " state unavailable"),
               reason: ($m.reason | nz("state unknown")),
+              dispatchable: false, kind: "warning" }
+          else empty end ),
+          ( if ($m.stopped_since // null) != null then
+            { id: ("stopped-" + ($m.id | gsub("[()]"; ""))), repo: null,
+              title: ($m.id + " stopped: standing work, nothing under way"),
+              reason: ("no workers, no captain question, no dated wait since " + $m.stopped_since
+                       + (if ($m.last_report // "") != "" then "; last line: " + $m.last_report else "" end)),
               dispatchable: false, kind: "warning" }
           else empty end )
         | . as $row | . + overlay("charted"; $row.id; charted_fields)

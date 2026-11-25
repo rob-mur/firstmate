@@ -174,6 +174,8 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
+# shellcheck source=bin/fm-standing-mandate-lib.sh
+. "$SCRIPT_DIR/fm-standing-mandate-lib.sh"  # mandate_stopped_since: the stopped-mate rule
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -231,7 +233,9 @@ board build passes so the captain can read the board while away.
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing,
     pr_url (the PR or MR the task names as its own, else null)},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason,
-    stale_note,read_failure},
+    stale_note,read_failure,posture,
+    stopped_since (a drive mate idle with no rest for 15 minutes, else null),
+    last_report (its latest report to this home, else null)},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,title,reason,title_full,reason_full,summary,question,owner,
     hold_until,hold_bucket,hold_set,hold_reconciled,origin,choices,answers,notes,report_path
@@ -517,7 +521,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson return_catchup "$RETURN_CATCHUP" \
   --argjson task_prs "$TASK_PRS" \
-  --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
+  --argjson stopped_grace "$FM_STANDING_MANDATE_STOPPED_GRACE" \
+  --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS$FM_STANDING_MANDATE_JQ"'
   def oneline: if . == null then null else (tostring | gsub("\\s+"; " ")) end;
   def trunc($n): if . == null then null else
     (oneline | if (length > $n) then (.[:$n] + "…") else . end) end;
@@ -770,7 +775,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                       else .provenance.selected end),freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-"),stale_note,
-          read_failure:(.freshness.read_failure // null)} ]) as $secondmates_all
+          read_failure:(.freshness.read_failure // null),
+          posture:(.posture // "routed"),
+          stopped_since:(if .provenance.selected == "structured-home" and .freshness.status == "fresh"
+            then ({posture:(.posture // "routed"),state:.bearings_state,valid:(.provenance.summary_valid == true),
+                   mandate_rest:(.mandate_rest // null),idle_since:(.idle_since // null),
+                   generated_epoch:(.summary_generated_epoch // null)}
+                  | mandate_stopped_since(($now | try fromdateiso8601 catch 0); $stopped_grace)
+                  | if . == null then null else todateiso8601 end)
+            else null end),
+          last_report:(.parent_event.note // null | if . == null then null else trunc(120) end)} ]) as $secondmates_all
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")

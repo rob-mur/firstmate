@@ -1,7 +1,7 @@
 ---
 name: secondmate-provisioning
 description: >-
-  Load when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
+  Load when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, when a secondmate stopped with standing work, or when editing data/secondmates.md.
 user-invocable: false
 metadata:
   internal: true
@@ -24,6 +24,7 @@ Load a reference with `cat` through Bash (for example `cat .agents/skills/second
 | `references/backlog-handoff.md` | Moving in-scope queued items to a secondmate, including right after creating and seeding a new one, so existing in-scope main-backlog work is not left behind. |
 | `references/recovery.md` | A secondmate's endpoint is dead, or a live mate needs a new harness, model, or effort. |
 | `references/retirement.md` | The captain or main firstmate explicitly decides to retire a secondmate. |
+| `references/standing-mandate.md` | A mate stopped with standing work, or a standing-work mate must wind down for a while. |
 
 ## Hard rules that hold without the references
 

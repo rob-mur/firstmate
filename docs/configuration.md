@@ -1535,6 +1535,36 @@ The seed writes the posture into the home's `config/secondmate-posture` and the 
 A registry change reaches a live local home as `config/secondmate-posture` through the inherited local-material push, which nudges that home to reread it.
 A remote home does not receive `config/secondmate-posture` yet: the remote seed renders `FM_SECONDMATE_POSTURE` into the charter text only, and the push does not reach a remote home, so a remote mate runs as `routed` for every check that reads that file.
 
+### Stopped standing work
+
+A `drive` mate has stopped with standing work when its own published summary shows `no_active_work` (no workers, no captain question, no dated wait) and no active rest.
+Each summary publication keeps the home's `state/.idle-since`, the first epoch of the current idle stretch, and the summary carries it as `idle_since` with any active rest as `mandate_rest`.
+A summary older than 30 minutes never counts as stopped, and [`bin/fm-standing-mandate-lib.sh`](../bin/fm-standing-mandate-lib.sh) owns the one rule every reader applies.
+
+- The bearings view gives each secondmate row its `posture` and, once the mate has been stopped for `FM_STANDING_MANDATE_STOPPED_GRACE` seconds (default 900), a `stopped_since` time that the board shows as a `stopped-<id>` warning row.
+- The main watcher wakes once per idle stretch with `check: secondmate <id> stopped with standing work` once the mate has been stopped for `FM_SECONDMATE_STOPPED_WAKE_SECS` seconds (default 3600), checking every `FM_SECONDMATE_STOPPED_TICK_SECS` seconds (default 300).
+- The watcher reads only local homes; a remote mate's stop shows on the board alone.
+
+A mate declares a dated rest with `bin/fm-secondmate-rest.sh --until <YYYY-MM-DDTHH:MMZ> --reason <text>`, which records it in the home's `state/.mandate-rest` and reports a `paused:` line with that `until` time on the parent channel.
+A rest lasts at most 24 hours and ends by itself at its date.
+The [standing-mandate reference](../.agents/skills/secondmate-provisioning/references/standing-mandate.md) owns the resume and wind-down steer text.
+
+### Standing-work wakes in the mate home
+
+A mate's own watcher reads `config/secondmate-posture` and its own published summary, and wakes the mate itself for standing work.
+Every wake is queued once under its own key and backs off: the first after 15 minutes (`FM_STANDING_MANDATE_FIRST_WAKE`, default 900 seconds), the second 1 hour later, then every 4 hours until the episode ends.
+An active rest silences both wakes.
+
+- A `drive` mate wakes with `check: standing mandate idle: <n>m with no work in flight, no captain question, no dated hold` while its summary shows `no_active_work`.
+  The episode is the summary's idle stretch, and its back-off is kept in `state/.mandate-idle-wake`.
+- A `duty offered-item-taken` mate wakes with `check: offered-item-taken: <ids> left the captain hold` when an offer card, a captain hold with `Captain hold option:` lines in its own backlog, leaves the held state because it was answered, released, or closed.
+  It also wakes with `check: offered-item-taken: no offer card is open` while no offer card is open and nothing is in flight.
+  The watcher keeps the last open cards in `state/.offered-open` and the empty-queue back-off in `state/.offered-refill-wake`.
+  A summary that omitted some holds never counts a missing card as taken.
+  The script only detects the event; the mate ranks its queue and holds the next card, and never dispatches the work itself.
+
+While either posture has no active rest, the turn-end guard treats the home as needing a live watcher, as [`turnend-guard.md`](turnend-guard.md#supervision-need) describes.
+
 ### Identity markers and upgrades
 
 Each seed writes an `.fm-secondmate-home` identity marker at the home root, alongside a durable `.fm-secondmate-parent` record of the home's route to its parent (see "Provision a route" in [`docs/remote-secondmates.md`](remote-secondmates.md)).
