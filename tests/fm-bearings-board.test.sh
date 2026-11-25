@@ -792,6 +792,61 @@ test_build_links_a_markdown_only_page_to_its_page_md() {
 }
 
 
+# A page whose worker last reported a day after the page was last written:
+# the card linking it is held back, page-backed or not; a page rebuilt at
+# that report passes.
+setup_page_with_worker() {  # <home> <page-id> <task> <page-age-seconds>
+  local now stamp
+  now=$(date +%s)
+  mkdir -p "$1/state/pages/$2" "$1/.lavish/pages/$2"
+  printf '{"id":"%s","title":"MR 900 understanding","opened":"2026-01-01T00:00:00Z","state":"live","task":"%s"}\n' \
+    "$2" "$3" > "$1/state/pages/$2/page.json"
+  printf '<html>not-yet-checked</html>\n' > "$1/.lavish/pages/$2/page.html"
+  stamp=$(date -u -r "$((now - $4))" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$((now - $4))" +%Y%m%d%H%M.%S)
+  TZ=UTC touch -t "$stamp" "$1/.lavish/pages/$2/page.html"
+  printf 'working [at=%s]: building the page\npaused [at=%s]: all saves judged\n' \
+    "$((now - 172800))" "$now" > "$1/state/$3.status"
+}
+
+add_page_card() {  # <data> <key> <page-id> <with-options-0-or-1>
+  jq --arg k "$2" --arg p "$3" --argjson o "$4" '.captains_call += [{"key":$k,"type":"decision","repo":"aegis",
+    "title":"MR 900 understanding page","question":"Will you answer the open questions on the page?",
+    "options":(if $o == 1 then [{"value":"a","label":"Answer now"},{"value":"b","label":"Leave it"}] else [] end),
+    "links":[{"page":$p,"label":"MR 900 understanding page"}]}]' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+test_build_flags_a_card_whose_page_missed_its_workers_last_report() {
+  local home data
+  home=$(make_home stale-page)
+  data="$home/payload.json"
+  setup_page_with_worker "$home" aegis-900-understand aegis-900-understand 86400
+  write_valid_payload "$data"
+  add_page_card "$data" captain-mr900-page aegis-900-understand 1
+  expect_flagged_build "$home" "$data" captain-mr900-page "" "a card linking a stale page" \
+    "stale page (aegis-900-understand was not rebuilt after its worker last reported"
+  write_valid_payload "$data"
+  add_page_card "$data" captain-mr900-page aegis-900-understand 0
+  expect_flagged_build "$home" "$data" captain-mr900-page "" "a page-backed card linking a stale page" \
+    "stale page (aegis-900-understand"
+  pass "build holds back a card whose linked page was not rebuilt since its worker last reported"
+}
+
+test_build_keeps_a_card_whose_page_was_rebuilt_at_its_workers_last_report() {
+  local home data out
+  home=$(make_home fresh-page)
+  data="$home/payload.json"
+  setup_page_with_worker "$home" aegis-900-understand aegis-900-understand 30
+  write_valid_payload "$data"
+  add_page_card "$data" captain-mr900-page aegis-900-understand 1
+  out=$(run_board "$home" build "$data" 2>&1) || fail "a board with a freshly rebuilt page did not build: $out"
+  case $out in *undecided-card*) fail "a card linking a freshly rebuilt page was held back: $out" ;; esac
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '[.captains_call[] | select(.key == "captain-mr900-page")] | length == 1' >/dev/null \
+    || fail "a card linking a freshly rebuilt page did not reach Captain's Call"
+  assert_absent "$home/state/board-cards-to-fix" "a freshly rebuilt page left a cards-to-fix record"
+  pass "build keeps a card whose linked page was rebuilt at its worker's last report"
+}
+
 # --- part 1: never arm a poll on an ended session ---------------------------
 
 test_build_reopens_a_session_the_captain_ended() {
@@ -1894,6 +1949,8 @@ test_charted_kind_is_optional_and_accepts_both_values
 test_an_underway_row_may_link_its_mr
 test_build_lists_live_pages_and_refuses_payload_pages
 test_build_links_a_markdown_only_page_to_its_page_md
+test_build_flags_a_card_whose_page_missed_its_workers_last_report
+test_build_keeps_a_card_whose_page_was_rebuilt_at_its_workers_last_report
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
