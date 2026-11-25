@@ -947,9 +947,9 @@ test_a_secondmate_status_question_is_titled_from_its_decision_not_its_home() {
         {id: "fos2", key: "status.fos.arm", task: "fos", decision_key: "arm", source: "status", verb: "needs-decision", title: "fos", reason: "Run the minimal arm now?", owner: "fos", mate: "fos"}]' \
     "$TMP_ROOT/st-title-base.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
-  assert_equals "fm-patches: Retire slot residue" "$(jq -r '[.captains_call[], .waiting[]] | map(select(.key == "status.fm-patches.retire-slot")) | .[0].title' <<<"$p")" "a status key that names a task takes that task title"
-  assert_equals "fos: PR 13 updated per the picks; two calls left" "$(jq -r '.captains_call[] | select(.key == "status.fos.default") | .title' <<<"$p")" "a default-key status question takes its first sentence, without the URL"
-  assert_equals "fos: Run the minimal arm now?" "$(jq -r '.captains_call[] | select(.key == "status.fos.arm") | .title' <<<"$p")" "an unknown task key falls back to the question text"
+  assert_equals "Retire slot residue" "$(jq -r '[.captains_call[], .waiting[]] | map(select(.key == "status.fm-patches.retire-slot")) | .[0].title' <<<"$p")" "a status key that names a task takes that task title"
+  assert_equals "PR 13 updated per the picks; two calls left" "$(jq -r '.captains_call[] | select(.key == "status.fos.default") | .title' <<<"$p")" "a default-key status question takes its first sentence, without the URL"
+  assert_equals "Run the minimal arm now?" "$(jq -r '.captains_call[] | select(.key == "status.fos.arm") | .title' <<<"$p")" "an unknown task key falls back to the question text"
   assert_equals "0" "$(jq '[.captains_call[], .waiting[]] | map(select(.title == "fos" or .title == "fm-patches")) | length' <<<"$p")" "no card is titled with only the home name"
   printf '%s\n' "$p" > "$TMP_ROOT/st-title-payload.json"
   validates "$TMP_ROOT/st-title-payload.json" || fail "a payload with derived status titles did not satisfy the board validator"
@@ -1052,6 +1052,47 @@ test_a_keyed_worker_question_on_a_held_task_does_not_make_a_second_card() {
   printf '%s\n' "$p" > "$TMP_ROOT/held-task-payload.json"
   validates "$TMP_ROOT/held-task-payload.json" || fail "a payload with a folded worker key did not satisfy the board validator"
   pass "a keyed worker question on a captain-held task is folded into the hold card"
+}
+
+# A second mate that holds one of its tasks for a call and also has open keyed
+# calls on that task shows each keyed call as its own card, as the terminal
+# board does: only a main worker key on a main hold folds into the hold.
+test_a_mate_held_task_keeps_its_open_keyed_calls() {
+  local snap="$TMP_ROOT/mate-held.json" p
+  fresh_homes mate-held
+  write_snapshot "$TMP_ROOT/mate-held-base.json"
+  jq '.decisions_open = [
+        {id: "cd/cd-732-cd-runs-own-callees", key: "cd-732-cd-runs-own-callees", verb: "captain-hold", title: "Review PR 1018 so cd runs its own callees", reason: "Shall I merge PR 1018 now?", owner: "cd", mate: "cd"},
+        {id: "cd-732-cd-runs-own-callees", key: "status.cd.cd-732-cd-runs-own-callees.cd-732-artifact-oidc", task: "cd-732-cd-runs-own-callees", decision_key: "cd-732-artifact-oidc", source: "status", verb: "needs-decision", title: "cd-732-cd-runs-own-callees", reason: "Should the artifact upload use OIDC instead of the stored token?", owner: "cd", mate: "cd"},
+        {id: "cd-732-cd-runs-own-callees", key: "status.cd.cd-732-cd-runs-own-callees.cd-732-release-trigger", task: "cd-732-cd-runs-own-callees", decision_key: "cd-732-release-trigger", source: "status", verb: "needs-decision", title: "cd-732-cd-runs-own-callees", reason: "Should a release start on a tag push or by hand?", owner: "cd", mate: "cd"}]' \
+    "$TMP_ROOT/mate-held-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "cd-732-cd-runs-own-callees")] | length' <<<"$p")" "the hold card stays"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.cd.cd-732-cd-runs-own-callees.cd-732-artifact-oidc")] | length' <<<"$p")" "the artifact-oidc call keeps its card"
+  assert_equals "1" "$(jq '[.captains_call[] | select(.key == "status.cd.cd-732-cd-runs-own-callees.cd-732-release-trigger")] | length' <<<"$p")" "the release-trigger call keeps its card"
+  printf '%s\n' "$p" > "$TMP_ROOT/mate-held-payload.json"
+  validates "$TMP_ROOT/mate-held-payload.json" || fail "a payload with a mate hold and its keyed calls did not satisfy the board validator"
+  pass "a second mate held task keeps its open keyed calls as separate cards"
+}
+
+# A second mate call whose text opens with its home name shows no home prefix
+# in the title, as on the terminal board, where the home is a separate tag.
+test_a_mate_call_title_drops_its_home_name() {
+  local snap="$TMP_ROOT/home-prefix.json" p
+  fresh_homes home-prefix
+  write_snapshot "$TMP_ROOT/home-prefix-base.json"
+  jq '.decisions_open = [
+        {id: "bcr-saved-answers", key: "status.intake.bcr-saved-answers-storage", task: "bcr-saved-answers", decision_key: "bcr-saved-answers-storage", source: "status", verb: "needs-decision", title: "bcr-saved-answers", reason: "intake: Where should the saved BCR import answers be stored?", owner: "intake", mate: "intake"},
+        {id: "plain", key: "status.intake.plain", task: "plain", decision_key: "plain", source: "status", verb: "needs-decision", title: "plain", reason: "Shall I post the intake summary now?", owner: "intake", mate: "intake"}]' \
+    "$TMP_ROOT/home-prefix-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "Where should the saved BCR import answers be stored?" \
+    "$(jq -r '.captains_call[] | select(.key == "status.intake.bcr-saved-answers-storage") | .title' <<<"$p")" "a leading home name is dropped from the title"
+  assert_equals "Shall I post the intake summary now?" \
+    "$(jq -r '.captains_call[] | select(.key == "status.intake.plain") | .title' <<<"$p")" "a title without a home name gains none"
+  printf '%s\n' "$p" > "$TMP_ROOT/home-prefix-payload.json"
+  validates "$TMP_ROOT/home-prefix-payload.json" || fail "a payload with unprefixed mate titles did not satisfy the board validator"
+  pass "a second mate call title drops its home name"
 }
 
 test_a_past_tense_worker_option_keeps_its_verb() {
@@ -1214,7 +1255,7 @@ test_a_card_heading_is_one_short_asking_sentence_without_correlation_ids() {
     "$TMP_ROOT/heading-base.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
   assert_equals "0" "$(jq '[.. | strings | select(test("corr="))] | length' <<<"$p")" "no correlation token reaches any card or waiting row"
-  assert_equals "mate: wait or merge now?" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | .title' <<<"$p")" "a status card is titled by its asking sentence"
+  assert_equals "wait or merge now?" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | .title' <<<"$p")" "a status card is titled by its asking sentence"
   assert_equals "true" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | (.about | contains("PR 14 adds the simplest-prompt option") and contains("only document it in the README"))' <<<"$p")" "the full text of the question and its folded twin stays in the body"
   assert_equals "a,b,option-1,option-2" "$(jq -r '.captains_call[] | select(.key == "status.mate.fos.default") | [.options[].value] | join(",")' <<<"$p")" "the card keeps the lettered choices and the twin choices"
   assert_equals "Should the rollout start on Monday?" "$(jq -r '.captains_call[] | select(.key == "hold-long") | .question' <<<"$p")" "a long hold reason gets its asking sentence as the heading"
@@ -1618,8 +1659,8 @@ test_annotated_decisions_offer_their_own_full_options_in_captain_terms() {
     assert_equals '{"options":[],"allow_freeform":false,"about":null,"question":null,"links":["Lavish page"]}' \
       "$(card "$k" | jq -c '{options, allow_freeform, about, question, links: [.links[].label]}')" "a page-backed decision shows only the page link"
   done
-  assert_equals "research: Grilling round 5 (research plan without the pipeline)" "$(card status.research.round5 | jq -r .title)" "a page-backed card is titled by what its page is about"
-  assert_equals "research: experiment 1 plan revised per the note" "$(card status.research.exp1 | jq -r .title)" "a page-backed card is titled by what its page is about"
+  assert_equals "Grilling round 5 (research plan without the pipeline)" "$(card status.research.round5 | jq -r .title)" "a page-backed card is titled by what its page is about"
+  assert_equals "experiment 1 plan revised per the note" "$(card status.research.exp1 | jq -r .title)" "a page-backed card is titled by what its page is about"
   printf '%s\n' "$p" > "$TMP_ROOT/annotated-payload.json"
   validates "$TMP_ROOT/annotated-payload.json" || fail "a payload with the annotated decisions did not satisfy the board validator"
   pass "annotated decisions offer their own full options in captain terms, and page-backed ones only the page link"
@@ -1837,7 +1878,7 @@ test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer() {
   assert_equals "Dry-run beta, no writes anywhere, on in prod behind Beta (~6 tickets: flag+upload/parse [APP-5860 rewritten, dummy page dropped], match+notice dry run, outcome CSV, money rows, policy prompt, link prompt)|A + Confirm in dev/stg (one-way doors, stretch)|Skeleton only" \
     "$(jq -r '[.options[].label] | join("|")' <<<"$card")" "each option keeps its full text without the rec mark"
   assert_equals "a" "$(jq -r '.recommend_value // "none"' <<<"$card")" "the option marked rec is the recommendation"
-  assert_equals "bcr-dec10-grill: Q1 what does BCR ship on 10 Dec?" "$(jq -r .title <<<"$card")" "the question heads the card"
+  assert_equals "Q1 what does BCR ship on 10 Dec?" "$(jq -r .title <<<"$card")" "the question heads the card"
   assert_equals "true" "$(jq -r .allow_freeform <<<"$card")" "the card takes a free-text answer"
   jq -e '.about | test("Facts: APP-5860 not built") and (test(" = ") | not)' <<<"$card" >/dev/null \
     || fail "the card body is not the text around the options: $card"
@@ -2047,7 +2088,7 @@ test_a_kind_word_before_a_link_reads_as_its_label() {
     n=$((n + 1))
     heading=${heading:-"$want "}
     card=$(real_line_card "kind-word-$n" kind-word "needs-decision [key=k] [at=1795094034]: Shall I merge ${lead}${url} now? It is green, see ${lead}${url}.")
-    assert_equals "kind-word: Shall I merge ${heading# }now?" "$(jq -r .title <<<"$card")" "the heading of '${lead}<url>' reads ${heading}"
+    assert_equals "Shall I merge ${heading# }now?" "$(jq -r .title <<<"$card")" "the heading of '${lead}<url>' reads ${heading}"
     if [[ -n $lead ]]; then
       assert_equals "Shall I merge $want now? It is green, see $want." "$(jq -r .about <<<"$card")" "the body of '${lead}<url>' reads $want"
     else
@@ -2074,7 +2115,7 @@ CD992_LINE="needs-decision [at=1795527005]: PR https://forgejo.clarob.uk/rob/con
 test_a_how_to_proceed_question_is_in_the_title_or_the_question() {
   local card reason p
   card=$(real_line_card how-cd992 cd-992-spec-reach-allow-list-hint "${CD992_LINE/\]: /] [key=default]: }")
-  assert_equals "cd-992-spec-reach-allow-list-hint: How to proceed?" "$(jq -r .title <<<"$card")" "status card: the title asks"
+  assert_equals "How to proceed?" "$(jq -r .title <<<"$card")" "status card: the title asks"
   assert_equals "null" "$(jq -r .question <<<"$card")" "status card: no second question beside the title"
   assert_equals "a|b|c" "$(jq -r '[.options[].value] | join("|")' <<<"$card")" "status card: the lettered options"
   reason=${CD992_LINE#*]: }
@@ -2098,7 +2139,7 @@ test_a_how_to_proceed_question_is_in_the_title_or_the_question() {
 test_a_long_asking_sentence_is_headed_by_the_clause_that_asks() {
   local card
   card=$(real_line_card ask-deploy immich-runner-dns-bump "$DEPLOY_LINE")
-  assert_equals "immich-runner-dns-bump: How should I deploy 0237139 (PR 133)?" "$(jq -r .title <<<"$card")" \
+  assert_equals "How should I deploy 0237139 (PR 133)?" "$(jq -r .title <<<"$card")" \
     "the title is the clause that asks"
   jq -e '(.question // null) == null or .question == "How should I deploy 0237139 (PR 133)?"' <<<"$card" >/dev/null \
     || fail "the question is not the clause that asks: $card"
@@ -2182,9 +2223,9 @@ test_a_parenthesis_before_the_question_mark_is_never_cut() {
   local card name line title
   for name in 887 888; do
     if [ "$name" = 887 ]; then
-      line=$MR887_LINE title="aegis-887-review: Which held comments should go on MR 887?"
+      line=$MR887_LINE title="Which held comments should go on MR 887?"
     else
-      line=$MR888_LINE title="aegis-888-review: Which held review comments should go on MR 888?"
+      line=$MR888_LINE title="Which held review comments should go on MR 888?"
     fi
     card=$(real_line_card "paren-$name" "aegis-$name-review" "$line")
     assert_equals "$title" "$(jq -r .title <<<"$card")" "$name: the title keeps the asking words whole"
@@ -2267,7 +2308,7 @@ FOS29_LINE="needs-decision [key=merge-pr-29] [at=1795100000]: Shall I merge fos-
 test_a_trailing_which_clause_is_never_the_question() {
   local card
   card=$(real_line_card which-29 fos-merge-pr-29 "$FOS29_LINE")
-  assert_equals "fos-merge-pr-29: Shall I merge fos-rulings-research PR 29?" "$(jq -r .title <<<"$card")" "29: title"
+  assert_equals "Shall I merge fos-rulings-research PR 29?" "$(jq -r .title <<<"$card")" "29: title"
   assert_equals "null" "$(jq -r .question <<<"$card")" "29: no second question beside the title"
   jq -e '.about | contains("PR 29, which makes its main run judge")' <<<"$card" >/dev/null \
     || fail "29: the about lost the relative clause the heading cut: $(jq -r .about <<<"$card")"
@@ -2323,7 +2364,7 @@ test_a_secondmate_question_after_its_context_is_asked() {
   p=$(FM_BEARINGS_BOARD_PR_CHECK=0 "$GEN" --snapshot "$snap") || fail "the generator failed"
   printf '%s\n' "$p" > "$TMP_ROOT/cd965-payload.json"
   validates "$TMP_ROOT/cd965-payload.json" || fail "the payload did not satisfy the validator"
-  assert_equals "cd: Who does the one-time ~3-min console step?" "$(jq -r '.captains_call[0].title' <<<"$p")" \
+  assert_equals "Who does the one-time ~3-min console step?" "$(jq -r '.captains_call[0].title' <<<"$p")" \
     "the card was not titled from its asking sentence"
   out=$(build_checks "$TMP_ROOT/cd965-payload.json")
   assert_not_contains "$out" "undecided-card: status.cd.cd-965-c4-diagram.default" "the question was refused: $out"
@@ -2658,9 +2699,9 @@ test_a_secondmate_decision_is_answerable_from_its_card() {
     card "$k" | jq -e '.off_board | (.question | length > 0) and (.malformed | test("Lavish page"))' >/dev/null \
       || fail "a page-backed decision does not carry its question and why its choices are missing: $(card "$k")"
   done
-  assert_equals "pruner: grilling round ready" "$(card status.pruner.tiers | jq -r .title)" "a page-backed card is titled by what its page is about"
-  assert_equals "pruner: the run-viewer prototype is ready" "$(card status.pruner.viewer | jq -r .title)" "a page-backed card is titled by what its page is about"
-  assert_equals "pruner: all seven baseline-run choices" "$(card status.pruner.calls | jq -r .title)" "a title cut short before its page phrase is still titled by what the page is about"
+  assert_equals "grilling round ready" "$(card status.pruner.tiers | jq -r .title)" "a page-backed card is titled by what its page is about"
+  assert_equals "the run-viewer prototype is ready" "$(card status.pruner.viewer | jq -r .title)" "a page-backed card is titled by what its page is about"
+  assert_equals "all seven baseline-run choices" "$(card status.pruner.calls | jq -r .title)" "a title cut short before its page phrase is still titled by what the page is about"
   printf '%s\n' "$p" > "$TMP_ROOT/mate-calls-payload.json"
   validates "$TMP_ROOT/mate-calls-payload.json" || fail "a payload with off-board fields did not satisfy the board validator"
   printf '{"captains_call":{"status.pruner.tiers":{"question":"Which test tiers run?","options":[{"value":"all","label":"All"},{"value":"fast","label":"Fast only"}]},"status.pruner.diag":{"options":[{"value":"seed","label":"Seed it"}]}}}\n' > "$copy"
@@ -2839,6 +2880,8 @@ fm_test_run \
   test_a_status_question_and_its_same_home_hold_render_one_card_with_every_choice \
   test_an_unkeyed_status_line_naming_a_held_card_does_not_make_a_second_card \
   test_a_keyed_worker_question_on_a_held_task_does_not_make_a_second_card \
+  test_a_mate_held_task_keeps_its_open_keyed_calls \
+  test_a_mate_call_title_drops_its_home_name \
   test_a_past_tense_worker_option_keeps_its_verb \
   test_options_marked_after_their_text_are_the_card_choices \
   test_a_last_option_ends_at_a_dash_before_links \
