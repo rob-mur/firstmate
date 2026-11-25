@@ -83,6 +83,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-role-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -108,6 +110,14 @@ FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-neve
 # it in propagate_secondmate_inheritance, and a failed propagation removes it
 # rather than leaving a stale proof. bin/fm-role-lib.sh owns how the grant and
 # receipt are interpreted.
+
+# Per-home config the primary derives from its own records rather than copying
+# its config: config/secondmate-posture is the destination home's registered
+# continuation posture (bin/fm-secondmate-registry-lib.sh owns the values), so
+# each home gets its own value. It rides the same report and reread nudge as
+# the inheritable items. The remote inherited-material route does not carry it
+# yet; a remote home is seeded with its posture instead.
+FM_HOME_SCOPED_CONFIG="secondmate-posture"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -665,8 +675,58 @@ propagate_secondmate_inheritance() {
   [ -n "$src_data" ] || src_data="$src_home/data"
   rc=0
   propagate_inheritable_config "$src_config" "$dest_home/config" "$src_home" || rc=1
+  propagate_secondmate_posture "$src_data" "$dest_home" || rc=1
   propagate_shared_captain_preferences "$src_data" "$dest_home/data" || rc=1
   return "$rc"
+}
+
+# propagate_secondmate_posture <src-data-dir> <dest-home>
+# Write the destination home's registered continuation posture from the
+# primary's data/secondmates.md into <dest-home>/config/secondmate-posture.
+# A home with no registry record is left untouched; a record without the field
+# writes `routed`, so a cleared posture converges too. Reports one
+# `secondmate-posture` line like the inheritable items.
+propagate_secondmate_posture() {
+  local src_data=$1 dest_home=$2 reg dest_abs line home_abs posture="" found=0 dest tmp reason
+  reg="$src_data/secondmates.md"
+  dest="$dest_home/config/secondmate-posture"
+  if [ ! -f "$reg" ] || [ -L "$reg" ] || ! dest_abs=$(cd "$dest_home" 2>/dev/null && pwd -P); then
+    record_inheritable_config_result secondmate-posture unchanged "not a registered home"
+    return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '- '*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || continue
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+    home_abs=$(cd "$SECONDMATE_REGISTRY_HOME" 2>/dev/null && pwd -P) || continue
+    [ "$home_abs" = "$dest_abs" ] || continue
+    found=$((found + 1))
+    posture=$SECONDMATE_REGISTRY_POSTURE
+  done < "$reg"
+  if [ "$found" -ne 1 ]; then
+    record_inheritable_config_result secondmate-posture unchanged "not a registered home"
+    return 0
+  fi
+  if ! destination_allows_inherited_item "$dest_home/config" secondmate-posture; then
+    reason=$(inheritable_config_skip_reason)
+    warn_inheritable_config_skip secondmate-posture "$dest_home/config" "$reason"
+    record_inheritable_config_result secondmate-posture skipped "$reason"
+    return 0
+  fi
+  if [ -f "$dest" ] && [ ! -L "$dest" ] && [ "$(cat "$dest" 2>/dev/null)" = "$posture" ]; then
+    record_inheritable_config_result secondmate-posture unchanged ""
+    return 0
+  fi
+  if ! tmp=$(mktemp "${TMPDIR:-/tmp}/fm-posture.XXXXXX" 2>/dev/null) ||
+    ! printf '%s\n' "$posture" > "$tmp" || ! copy_inheritable_file "$tmp" "$dest"; then
+    [ -z "${tmp:-}" ] || rm -f "$tmp" 2>/dev/null || true
+    reason="failed to write"
+    warn_inheritable_config_error secondmate-posture "$dest" "$reason"
+    record_inheritable_config_result secondmate-posture error "$reason"
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  record_inheritable_config_result secondmate-posture pushed ""
 }
 
 propagate_inheritable_config() {
@@ -822,7 +882,7 @@ FM_CONFIG_REREAD_FRAMING='These inherited config files changed. Re-read and appl
 # allowlisted here and must never be inlined into a reread instruction.
 fm_config_reread_is_allowlisted_item() {
   local item=$1 candidate
-  for candidate in $FM_INHERITABLE_CONFIG; do
+  for candidate in $FM_INHERITABLE_CONFIG $FM_HOME_SCOPED_CONFIG; do
     [ "$candidate" = "$item" ] && return 0
   done
   return 1
@@ -834,7 +894,7 @@ fm_config_reread_is_allowlisted_item() {
 fm_config_reread_changed_items() {
   local report=$1 item status
   [ -n "$report" ] && [ -f "$report" ] || return 0
-  for item in $FM_INHERITABLE_CONFIG; do
+  for item in $FM_INHERITABLE_CONFIG $FM_HOME_SCOPED_CONFIG; do
     status=$(awk -F '\t' -v item="$item" '$1 == item { print $2; exit }' "$report" 2>/dev/null) || status=""
     [ "$status" = pushed ] || continue
     printf '%s\n' "$item"
