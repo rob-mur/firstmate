@@ -28,6 +28,15 @@
 # outcome store, so the stored row and its delivery are those of any captain
 # row.
 # --wake defaults to the wake reason the host recorded for the turn.
+# A captain outcome MAIN must act on (no --inform true) is also something the
+# captain may have to do or decide, so before it is recorded this script makes
+# sure an open captain hold carries it (bin/fm-captain-hold.sh `covered`): an
+# existing hold on the task, or one gating or originating from it, is enough;
+# otherwise it holds a new `<task>-captain` row (`fleet-captain-<epoch>` for
+# the fleet) with the summary as its reason and the task as its origin, so the
+# outcome reaches the board and not only the return brief. A home with no
+# automatic backlog skips this; a hold that cannot be read or created refuses
+# with exit 1 and records nothing.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
 # must be "branch" and FM_BRANCH_REPORT_TURN must name the host's current turn
@@ -55,6 +64,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 TURN_FILE="$STATE/.supervision-host-turn"
 RECEIPTS="$STATE/.supervision-host-receipts"
 # shellcheck source=bin/fm-afk-contract.sh
@@ -130,6 +141,61 @@ fi
 
 [ "$WAKE_SET" -eq 1 ] || WAKE=$(turn_field wake)
 
+captain_hold() {  # <captain-hold args...>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" "$@"
+}
+
+# Make sure an open captain hold carries this captain outcome (see the header).
+ensure_captain_hold() {
+  local rc=0 id title out
+  [ -d "$DATA" ] || return 0
+  # shellcheck source=bin/fm-tasks-axi-lib.sh
+  . "$SCRIPT_DIR/fm-tasks-axi-lib.sh" || return 1
+  # shellcheck source=bin/fm-backlog-transition-lib.sh
+  . "$SCRIPT_DIR/fm-backlog-transition-lib.sh" || return 1
+  fm_backlog_transition_applies "$CONFIG" "$DATA" captain || rc=$?
+  case "$rc" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      echo "whether this home's backlog can hold the captain outcome could not be read${FM_BACKLOG_TRANSITION_ERROR:+: $FM_BACKLOG_TRANSITION_ERROR} (nothing recorded)" >&2
+      return 1
+      ;;
+  esac
+  if [ "$TASK" = fleet ]; then
+    id="fleet-captain-$(date +%s)"
+    title="Captain call from fleet supervision"
+    set -- hold "$id" --title "$title" --reason "$SUMMARY"
+  else
+    rc=0
+    out=$(captain_hold covered "$TASK" 2>&1) || rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      1) ;;
+      *)
+        printf 'whether an open captain hold carries %s could not be read (nothing recorded)\n%s\n' "$TASK" "$out" >&2
+        return 1
+        ;;
+    esac
+    id="$TASK-captain"
+    rc=0
+    captain_hold open "$id" --distinguish-absent >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 3 ] || id="$TASK-captain-$(date +%s)"
+    set -- hold "$id" --title "Captain call from $TASK" --origin "$TASK" --reason "$SUMMARY"
+  fi
+  if ! out=$(captain_hold "$@" 2>&1); then
+    printf 'the captain outcome could not be held for the captain as %s (nothing recorded)\n%s\n' "$id" "$out" >&2
+    return 1
+  fi
+  CAPTAIN_HOLD_ID=$id
+}
+
+CAPTAIN_HOLD_ID=
+if [ "$VERDICT" = captain ] && [ "$INFORM" != true ]; then
+  ensure_captain_hold || exit 1
+fi
+
 set -- append --task "$TASK" --verdict "$VERDICT" --summary "$SUMMARY" --silent "$SILENT"
 [ -z "$WAKE" ] || set -- "$@" --wake "$WAKE"
 if ! SEQ=$("$SCRIPT_DIR/fm-branch-outcome.sh" "$@"); then
@@ -142,6 +208,7 @@ printf '%s\t%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" "$MARK" >> "$REC
   echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
   exit 1
 }
+[ -z "$CAPTAIN_HOLD_ID" ] || printf 'held for the captain as %s, so the outcome shows on the board\n' "$CAPTAIN_HOLD_ID"
 if [ "$SILENT" = true ]; then
   printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
   exit 0

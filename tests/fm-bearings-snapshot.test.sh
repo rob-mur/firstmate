@@ -2988,6 +2988,64 @@ EOF
   pass "counterfactual meta clears main inventory warning and projects the live task"
 }
 
+# The dotfiles DNS rollout: the ship's PR merged, cleanup closed its work item,
+# and its captain-only enablement steps reached only chat, so the board never
+# showed them. A Done item whose final status names a step only the captain can
+# do, with no open captain hold carrying it, shows on the board as a captain
+# follow-up with no card; a hold linked to it clears the line, and a step the
+# landing itself discharged (the captain reviews the PR) is never flagged.
+test_done_captain_follow_up_without_a_card_is_flagged() {
+  local home fakebin json payload
+  home=$(make_home captain-follow-up)
+  : > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF2'
+## In flight
+
+## Queued
+
+## Done
+- [x] dns-encrypt-rollout-ship - Encrypt DNS on every host (repo: dotfiles) (kind: ship) (done 2026-07-11)
+- [x] reviewed-ship - Ordinary landed change (repo: dotfiles) (kind: ship) (done 2026-07-11)
+EOF2
+  mkdir -p "$home/data/dns-encrypt-rollout-ship"
+  printf '%s\n' 'working: wiring DoT into the resolver' \
+    'done [at=1795600000]: PR ready https://github.com/example/dotfiles/pull/62 - next: captain runs snrs per host, work-laptop sudo activate, Android Private DNS manual steps - all in PR body' \
+    > "$home/data/dns-encrypt-rollout-ship/status.log"
+  printf '%s\n' 'done [at=1795600000]: PR ready https://github.com/example/dotfiles/pull/63 - next: captain reviews https://github.com/example/dotfiles/pull/63' \
+    > "$home/state/reviewed-ship.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.gates | any(.id == "(captain-followup-dns-encrypt-rollout-ship)"
+        and (.title | contains("captain follow-up with no card"))
+        and (.reason | contains("captain runs snrs per host"))))
+      and ([.gates[].id] | any(contains("reviewed-ship")) | not)
+  ' >/dev/null || fail "the captain-only follow-up with no card is not flagged: $json"
+  payload=$(printf '%s' "$json" | FM_HOME="$home" "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot -) \
+    || fail "the board payload refused the flagged snapshot: $payload"
+  printf '%s' "$payload" | jq -e '
+    [.. | objects | select(.id? == "captain-followup-dns-encrypt-rollout-ship")]
+    | length > 0 and all(.kind == "warning" and .dispatchable == false
+        and (.title | contains("captain follow-up with no card")))
+  ' >/dev/null || fail "the board does not render the captain follow-up with no card: $payload"
+
+  cat > "$home/data/backlog.md" <<'EOF2'
+## In flight
+
+## Queued
+- [ ] dns-encrypt-rollout-ship-captain - Captain follow-up: dns-encrypt-rollout-ship (repo: dotfiles) (kind: captain) (hold: run snrs per host) (hold-kind: captain)
+  Captain hold origin: dns-encrypt-rollout-ship
+
+## Done
+- [x] dns-encrypt-rollout-ship - Encrypt DNS on every host (repo: dotfiles) (kind: ship) (done 2026-07-11)
+- [x] reviewed-ship - Ordinary landed change (repo: dotfiles) (kind: ship) (done 2026-07-11)
+EOF2
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '[.gates[].id] | any(startswith("(captain-followup-")) | not' >/dev/null \
+    || fail "an open captain hold carrying the follow-up did not clear the flag: $json"
+  pass "a Done captain-only follow-up with no open captain hold shows on the board until a hold carries it"
+}
+
 seed_working_child() {  # <mate-home> <id> <doing> [repo]
   local mate=$1 id=$2 doing=$3 repo=${4-sample} repo_field=
   mkdir -p "$mate/projects/$id"
@@ -4767,6 +4825,7 @@ test_a_bare_number_names_a_pr_only_in_a_linked_repo() {
 }
 
 fm_test_run \
+  test_done_captain_follow_up_without_a_card_is_flagged \
   test_full_captain_questions_survive_local_and_secondmate_projection \
   test_supplied_secondmate_questions_and_legacy_optional_fields \
   test_task_teardown_during_metadata_capture_does_not_abort_snapshot \
