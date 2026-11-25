@@ -931,6 +931,57 @@ test_github_merged_outcome_is_verified() {
   pass "fm-pr-merge verifies a genuinely merged GitHub pull request"
 }
 
+# A merged task whose project declares an after-merge note relays the note and
+# holds exactly one captain card linking the PR; a rerun of the merge for the
+# same PR adds none, and a project whose action has no note holds none.
+test_after_merge_note_holds_one_captain_card() {
+  local case_dir rc up dot note
+  for note in with-note without-note; do
+    case_dir=$(make_case "after-merge-card-$note")
+    add_gh_mocks "$case_dir" 1010101010101010101010101010101010101010
+    : > "$case_dir/gh-axi.log"
+    up="$case_dir/upstream" dot="$case_dir/dot"
+    fm_git_init_commit "$up"
+    git clone --quiet "$up" "$dot"
+    git -C "$up" commit -q --allow-empty -m landed
+    if [ "$note" = with-note ]; then
+      printf '## Projects\n- project [no-mistakes +yolo after-merge=ff:%s@origin/main after-merge-note=run%%20snrs] - fixture (added 2026-01-01)\n' \
+        "$dot" > "$case_dir/home/data/projects.md"
+    else
+      printf '## Projects\n- project [no-mistakes +yolo after-merge=ff:%s@origin/main] - fixture (added 2026-01-01)\n' \
+        "$dot" > "$case_dir/home/data/projects.md"
+    fi
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/51 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "after-merge-card-$note: the merge should succeed: $(cat "$case_dir/stderr")"
+    grep -qx 'after_merge=done' "$case_dir/state/task-x1.meta" \
+      || fail "after-merge-card-$note: the after-merge action did not run"
+    if [ "$note" = without-note ]; then
+      ! grep -q 'relay to the captain' "$case_dir/stdout" || fail "after-merge-card-$note: a note was relayed"
+      ! grep -q 'after-merge' "$case_dir/home/data/backlog.md" || fail "after-merge-card-$note: a card was held"
+      continue
+    fi
+    assert_grep 'relay to the captain: run snrs' "$case_dir/stdout" \
+      "after-merge-card-$note: the note was not relayed in chat"
+    [ "$(grep -c 'task-x1-after-merge' "$case_dir/home/data/backlog.md")" = 1 ] \
+      || fail "after-merge-card-$note: the note did not leave exactly one card"
+    FM_HOME="$case_dir/home" "$ROOT/bin/fm-captain-hold.sh" open task-x1-after-merge \
+      || fail "after-merge-card-$note: the card is not held for the captain"
+    assert_contains "$(FM_HOME="$case_dir/home" "$ROOT/bin/fm-tasks-axi.sh" show task-x1-after-merge)" \
+      'Run snrs to put project PR 51 live - https://github.com/example/repo/pull/51' \
+      "after-merge-card-$note: the card does not name the action and the PR's full URL"
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/51 >/dev/null 2>&1
+    set -e
+    [ "$(grep -c 'task-x1-after-merge' "$case_dir/home/data/backlog.md")" = 1 ] \
+      || fail "after-merge-card-$note: a repeated merge added a second card"
+  done
+  pass "fm-pr-merge holds one captain card for an after-merge note, and none without a note"
+}
+
 test_github_verified_merge_requires_poll_recording() {
   local case_dir rc
   case_dir=$(make_case github-poll-recording-fails)
@@ -6208,6 +6259,7 @@ test_code_root_marker_cannot_redirect_outcomes() {
   pass "a secondmate marker in the code root cannot redirect this suite's merge outcomes"
 }
 
+test_after_merge_note_holds_one_captain_card
 test_extra_pr_is_recorded_beside_the_main_pr
 test_extra_pr_merges_without_touching_the_main_pr
 test_extra_pr_keeps_the_merge_guards
