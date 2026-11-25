@@ -1544,9 +1544,9 @@ test_build_flags_a_card_naming_a_merged_or_closed_mr() {
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(FM_BEARINGS_BOARD_PR_TIMEOUT=5 run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -eq 0 ] || fail "a card naming a merged MR stopped the whole board: $out"
-  assert_contains "$out" "undecided-card: review-772: names https://gitlab.com/example/helm-charts/-/merge_requests/772, already merged" \
+  assert_contains "$out" "undecided-card: review-772: names https://gitlab.com/example/helm-charts/-/merge_requests/772, already merged, and asks to review or merge it" \
     "a card linking a merged MR was not named: $out"
-  assert_contains "$out" "undecided-card: review-773: names https://gitlab.com/example/helm-charts/-/merge_requests/773, already closed" \
+  assert_contains "$out" "undecided-card: review-773: names https://gitlab.com/example/helm-charts/-/merge_requests/773, already closed, and asks to review or merge it" \
     "a card linking a closed MR was not named: $out"
   assert_not_contains "$out" "review-774" "a card linking an open MR was flagged: $out"
   assert_not_contains "$out" "review-775" "a card whose MR read failed was flagged: $out"
@@ -1559,6 +1559,47 @@ test_build_flags_a_card_naming_a_merged_or_closed_mr() {
   [ "$rc" -eq 0 ] || fail "the build failed with the PR check off: $out"
   assert_not_contains "$out" "already merged" "the PR check ran although it was switched off: $out"
   pass "build holds back a card linking a merged or closed MR and leaves an open or unreadable one, or one only its task's recorded pr_url names"
+}
+
+# The real case: runner-image's rollout hold asked whether to roll a merged
+# change out to the cluster and linked its merged PR, and the board held it back
+# as "already merged", so the captain never saw it. A merged or closed link names
+# a card only when the card asks to review or merge that PR/MR; a rollout or
+# other post-merge question linking its merged PR reaches the captain.
+test_build_shows_a_post_merge_call_linking_its_merged_mr() {
+  local home data rc out
+  home=$(make_home merged-rollout)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  printf '{"state":"merged"}\n' > "$home/forge/gitlab-gitlab.com_example_runner-image-86"
+  printf '{"state":"merged"}\n' > "$home/forge/gitlab-gitlab.com_example_runner-image-87"
+  jq '.captains_call += [
+    {"key":"runner-store-gc-rollout","type":"decision","repo":"runner-image",
+     "title":"Roll the nightly store-collector window out to the runners cluster",
+     "question":"Roll the nightly store-collector window out to the runners cluster, restarting the store daemon at a quiet hour after 22:00 UTC tonight?",
+     "about":"Merged PR 86 runs clean-up 01:00-05:00 UTC; the rollout is a hand-applied cluster step.",
+     "options":[{"value":"yes-tonight","label":"Yes, roll it out after 22:00 UTC tonight (recommended)"},
+                {"value":"no","label":"Not now, keep it merged but unapplied"}],
+     "links":[{"url":"https://gitlab.com/example/runner-image/-/merge_requests/86","label":"merged PR"}]},
+    {"key":"merge-87","type":"decision","repo":"runner-image","title":"Runner image follow-up",
+     "question":"Merge runner-image !87 now?","options":[{"value":"go","label":"Go"},{"value":"wait","label":"Wait"}],
+     "links":[{"url":"https://gitlab.com/example/runner-image/-/merge_requests/87","label":"MR 87"}]},
+    {"key":"reviewed-86","type":"decision","repo":"runner-image","title":"Have you reviewed runner-image !86?",
+     "options":[{"value":"done","label":"Reviewed"},{"value":"not-done","label":"Not yet"}],
+     "links":[{"url":"https://gitlab.com/example/runner-image/-/merge_requests/86","label":"MR 86"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(FM_BEARINGS_BOARD_PR_TIMEOUT=5 run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -eq 0 ] || fail "a post-merge call stopped the whole board: $out"
+  assert_not_contains "$out" "runner-store-gc-rollout" "a rollout call linking its merged PR was held back: $out"
+  assert_contains "$out" "undecided-card: merge-87: names https://gitlab.com/example/runner-image/-/merge_requests/87, already merged, and asks to review or merge it" \
+    "a call asking to merge a merged MR was not held back: $out"
+  assert_contains "$out" "undecided-card: reviewed-86: names https://gitlab.com/example/runner-image/-/merge_requests/86, already merged, and asks to review or merge it" \
+    "a call asking whether a merged MR was reviewed was not held back: $out"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    ([.cards_to_fix[].key] | sort) == ["merge-87", "reviewed-86"]
+    and ([.captains_call[] | select(.key == "runner-store-gc-rollout")] | length) == 1
+  ' >/dev/null || fail "the board did not show the rollout call and hold back only the review and merge calls: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '{call: [.captains_call[].key], fix: .cards_to_fix}')"
+  pass "build shows a post-merge call linking its merged MR and holds back a call asking to review or merge a merged MR"
 }
 
 # The real case: a profile switch took jq off PATH for a fraction of a second
@@ -1764,6 +1805,7 @@ test_path_is_stable_and_home_scoped
 test_build_flags_a_card_without_recorded_choices_or_a_link
 test_build_flags_a_card_listing_a_link_twice
 test_build_flags_a_card_naming_a_merged_or_closed_mr
+test_build_shows_a_post_merge_call_linking_its_merged_mr
 test_build_retries_once_when_a_binary_vanishes
 test_build_does_not_retry_an_ordinary_failure
 test_build_flags_a_card_whose_option_marks_were_not_read
