@@ -77,6 +77,10 @@ Repeat and edge cases:
   When the task already records its previous origin, replaying the earlier `answer --release` can remove that stamp, and normal work completion can retain the answer, but neither transition changes the stored origin: neither can certify the failed move's new origin.
   Re-running `hold` completes the move, and re-running the same `answer --release` also normalizes a release interrupted before its stamp was removed.
 - A re-hold that names options or `--free-text` replaces the recorded choices, one that names links or `--no-link` replaces the recorded links, and one that names neither keeps them; a new lifecycle starts with neither ([`bin/fm-captain-hold.sh --help`](../bin/fm-captain-hold.sh) owns the flags).
+- `--gates <work-item>` records the work item the call gates on its own `Captain hold gates:` body line, separate from the origin, so one origin may still carry several calls.
+  A work item has at most one open captain hold: `hold` refuses, before creating or stamping anything, a task gating a work item that another open hold already gates or that is itself held, and names that open hold so the new PR or question is added to it.
+  A hold without `--gates` gates its own task id.
+  The check is serialized only per task id, so two concurrent holds on different ids can still both pass it.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
 
@@ -603,6 +607,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+- `test_hold_refuses_a_second_open_hold_gating_one_work_item` replays two holds gating one work item: the second is refused by name and creates nothing, re-holding the open one still works, holding the work item itself is refused, and a new gate is allowed once the open hold is answered.
 - `test_hold_origins_follow_backend_holds` exercises lookup, backend-hold, and origin-write failures for new, active, and released holds, including secondmate publication and retry deduplication.
 - `test_interrupted_origin_move_does_not_inherit_the_previous_answer` exercises failed restoration, TERM interruption, active and expired holds, earlier-answer replay, and normal released-work completion against the [hold failure semantics](#creating-a-hold-hold) and inventory checks above.
 - An answered call that markdown Done retention moved into the Done archive still passes `verify`, `complete`, and scout teardown, while an archived close carrying no recorded answer still refuses teardown, and an attested call found nowhere is refused by name.
