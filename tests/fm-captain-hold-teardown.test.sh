@@ -23,6 +23,78 @@ command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit
 . "$(dirname "${BASH_SOURCE[0]}")/captain-hold-helpers.sh"
 
 
+# The dotfiles DNS rollout: the ship's ready line left steps only the captain
+# could do ("next: captain runs snrs per host, ..."), the PR merged, and cleanup
+# closed the item, so the steps reached only chat and no card ever showed them.
+# Cleanup must refuse until an open captain hold carries those steps, name the
+# exact hold command, stay refused under --force, and proceed once a hold that
+# originates from the ship exists. A ready line whose only captain step is the
+# review the landing already discharged is not held back.
+test_teardown_refuses_a_captain_follow_up_with_no_hold() {
+  local home id plain out show reason
+  home=$(make_home teardown-follow-up)
+  id=dns-encrypt-rollout-ship
+  tasks_in "$home" add "$id" "Roll out encrypted DNS" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the ship fixture"
+  write_origin_meta "$home" "$id" ship
+  printf 'working: rolling out
+done [at=1795600000]: PR ready https://github.com/example/dotfiles/pull/62 - next: captain runs snrs per host, work-laptop sudo activate, Android Private DNS manual steps - all in PR body\n' \
+    > "$home/state/$id.status"
+
+  if run_teardown "$home" "$id" > "$home/refused.out" 2> "$home/refused.err"; then
+    fail "cleanup closed a ship whose captain-only steps have no captain hold"
+  fi
+  assert_grep "captain runs snrs per host" "$home/refused.err" \
+    "the refusal does not name the captain-only step"
+  assert_grep "fm-captain-hold.sh hold $id-captain" "$home/refused.err" \
+    "the refusal does not name the exact hold command"
+  assert_grep "--origin $id" "$home/refused.err" \
+    "the refusal's hold command does not link the hold to the ship"
+  assert_present "$home/state/$id.meta" "a refused cleanup removed the worker record"
+  show=$(tasks_in "$home" show "$id" --full) || fail "a refused cleanup lost the ship row"
+  assert_not_contains "$show" "state: done" "a refused cleanup closed the ship row"
+
+  if PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/forced.out" 2> "$home/forced.err"; then
+    fail "discard authority closed a ship whose captain-only steps have no captain hold"
+  fi
+  assert_grep "fm-captain-hold.sh hold $id-captain" "$home/forced.err" \
+    "forced cleanup did not refuse with the hold command"
+
+  if out=$(run_captain "$home" covered "$id" 2>/dev/null); then
+    fail "covered reported a hold before any captain hold carried the ship: $out"
+  else
+    [ $? -eq 1 ] || fail "covered could not tell whether the ship had a captain hold"
+  fi
+  out=$(grep -F "fm-captain-hold.sh hold" "$home/refused.err") \
+    || fail "the refusal has no runnable hold command"
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" bash -c "$out" >/dev/null \
+    || fail "the printed hold command did not run: $out"
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup still refused once a captain hold carries the steps: $(cat "$home/teardown.err")"
+  out=$(run_captain "$home" covered "$id") \
+    || fail "covered did not find the origin-linked captain hold"
+  assert_contains "$out" "$id-captain" "covered did not name the hold that carries the ship"
+  show=$(tasks_in "$home" show "$id-captain" --full) || fail "the follow-up hold vanished"
+  assert_contains "$show" "held: yes" "cleanup lifted the follow-up's captain hold"
+  reason=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: "fm-hold-v1:\(.*\)"$/\1/p' | base64 -d 2>/dev/null) || :
+  assert_contains "$reason" "captain runs snrs per host" "the follow-up hold lost the steps"
+
+  plain=sample-reviewed-ship
+  tasks_in "$home" add "$plain" "Ship the sample fix" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the reviewed-ship fixture"
+  write_origin_meta "$home" "$plain" ship
+  printf 'done: PR ready https://github.com/example/sample/pull/7 - next: captain reviews https://github.com/example/sample/pull/7\n' \
+    > "$home/state/$plain.status"
+  run_teardown "$home" "$plain" > "$home/plain.out" 2> "$home/plain.err" \
+    || fail "cleanup refused a ship whose only captain step was the review: $(cat "$home/plain.err")"
+  pass "cleanup refuses a captain-only follow-up with no captain hold and proceeds once one carries it"
+}
+
 # The originating work item is itself the captain call, which is what the policy
 # prefers ("hold the work item the question gates"). Cleanup of that finished
 # work must never be the act that closes the captain's own row: the deliverable
@@ -2227,6 +2299,7 @@ test_complete_refuses_an_entry_held_for_another_origin
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_teardown_never_closes_a_captain_held_task
+test_teardown_refuses_a_captain_follow_up_with_no_hold
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
