@@ -17,6 +17,8 @@
 # renews, kicks the board (`fm-board-refresh.sh --kick`, which a secondmate home
 # forwards to its parent's board), so a decision answered or a hold closed here
 # leaves the board at its next pass rather than one rebuild later.
+# Each publication also keeps state/.idle-since, the first epoch the summary
+# showed no_active_work (bin/fm-standing-mandate-lib.sh owns that marker).
 # A home-local refresh lock serializes concurrent triggers so an older in-flight
 # summary cannot overwrite one computed after a later status change. The shared
 # timeout owner bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT
@@ -55,6 +57,8 @@ HOME_SUMMARY_LOCK_HELD=0
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-standing-mandate-lib.sh
+. "$SCRIPT_DIR/fm-standing-mandate-lib.sh"
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
@@ -191,6 +195,7 @@ home_summary_refresh_once() {
     return 1
   fi
   HOME_SUMMARY_TMP=
+  fm_standing_mandate_idle_update "$STATE" "$LEDGER" 2>/dev/null || true
   fm_lock_release "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=0
   trap - EXIT HUP INT TERM

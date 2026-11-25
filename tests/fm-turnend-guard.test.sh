@@ -191,6 +191,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-hermes-process-lib.sh" "$dir/bin/fm-hermes-process-lib.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-standing-mandate-lib.sh" "$dir/bin/fm-standing-mandate-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
@@ -555,6 +556,25 @@ test_hook_silent_in_idle_secondmate_home() {
   expect_code 0 "$status" "hook must stay silent in an idle, empty-queue secondmate home"
   [ -z "$out" ] || fail "idle secondmate home produced guard output: $out"
   pass "fm-turnend-guard: idle-by-default - silent in a secondmate home with nothing in flight"
+}
+
+# A secondmate whose posture gives it standing work owes a live watcher even
+# with nothing in flight, so the guard names the three honest ways to stop.
+test_hook_blocks_idle_drive_secondmate_home() {
+  local dir out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate-drive")
+  mkdir -p "$dir/config"
+  printf 'drive\n' > "$dir/config/secondmate-posture"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block an idle drive secondmate with no live watcher"
+  assert_contains "$out" "standing work (posture: drive)" "block must name the standing work"
+  assert_contains "$out" "(a) hold a captain question" "block must offer the captain question"
+  assert_contains "$out" "(b) declare a dated rest: bin/fm-secondmate-rest.sh" "block must offer the dated rest"
+  assert_contains "$out" "(c) say that your charter is complete" "block must offer charter completion"
+  printf 'until_epoch=%s\nuntil=x\nreason=import\n' "$(( $(date +%s) + 3600 ))" > "$dir/state/.mandate-rest"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must stay silent for a drive secondmate on a dated rest"
+  pass "fm-turnend-guard: blocks an idle drive secondmate until it works, asks, rests, or reports its charter complete"
 }
 
 # The stop_hook_active loop guard bounds the secondmate to one forced
@@ -1494,6 +1514,7 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-standing-mandate-lib.sh" "$dir/bin/fm-standing-mandate-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
@@ -2692,6 +2713,7 @@ test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
+test_hook_blocks_idle_drive_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry
 test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree

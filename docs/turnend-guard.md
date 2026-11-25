@@ -35,7 +35,7 @@ The turn-end guard closes the remaining gap at the primary's own turn boundary.
 
 The guard acts at that boundary when both of these hold:
 
-- Work, a process-event source, a registered custom check, or Relay polling needs supervision.
+- Work, a process-event source, a registered custom check, Relay polling, or a secondmate's standing work needs supervision.
 - No identity-matched watcher has a fresh beacon.
 
 The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` touches every cycle, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
@@ -79,6 +79,9 @@ These sources also count toward supervision need:
 - Registered `state/procevent/*.source` records require supervision even though they have no task metadata.
 - Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
 - A custom check registered with `bin/fm-check-register.sh` counts the same way, so an operator's home-level poll keeps running after the last task is torn down.
+- A secondmate home whose `config/secondmate-posture` is `drive` or `duty offered-item-taken` counts while it has no active rest, because its own watcher must stay alive to wake it for standing work ([`docs/configuration.md`](configuration.md#standing-work-wakes-in-the-mate-home)).
+  A `drive` home whose last summary shows a captain question, a dated wait, or live workers is covered by that state instead.
+  The block message for this need names the three honest ways to stop: hold a captain question, declare a dated rest, or report the charter complete.
 
 The default cross-harness mode exits silently with no supervision need.
 
@@ -578,7 +581,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 - Child crewmate and scout worktrees are outside scope.
 - A valid secondmate home is in scope.
-  An idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
+  An idle `routed` or `scheduled` secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
@@ -600,6 +603,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 - The predicate.
 - Main and secondmate primary scope.
+- The standing-work need of an idle `drive` secondmate and its release by a dated rest.
 - Child-worktree exclusion.
 - `FM_HOME` and `FM_STATE_OVERRIDE` precedence.
 - The live-lock and fresh-beacon guard predicate.

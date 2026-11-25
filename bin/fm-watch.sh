@@ -312,6 +312,12 @@ WATCH_HOME_EXISTED=0
 # watcher runs it on a needs-decision line as it lands (question_bounce_check).
 # shellcheck source=bin/fm-bearings-card-check-lib.sh
 . "$SCRIPT_DIR/fm-bearings-card-check-lib.sh"
+# Standing-mandate facts: the shared stopped-mate rule this watcher wakes on
+# (secondmate_stopped_tick) and the registry posture it applies to.
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-standing-mandate-lib.sh
+. "$SCRIPT_DIR/fm-standing-mandate-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -403,6 +409,10 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+SECONDMATE_STOPPED_WAKE_SECS=${FM_SECONDMATE_STOPPED_WAKE_SECS:-3600}
+case "$SECONDMATE_STOPPED_WAKE_SECS" in ''|*[!0-9]*|0) SECONDMATE_STOPPED_WAKE_SECS=3600 ;; esac
+SECONDMATE_STOPPED_TICK_SECS=${FM_SECONDMATE_STOPPED_TICK_SECS:-300}
+case "$SECONDMATE_STOPPED_TICK_SECS" in ''|*[!0-9]*) SECONDMATE_STOPPED_TICK_SECS=300 ;; esac
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -1278,6 +1288,160 @@ secondmate_liveness_tick() {
   done
   [ -z "$first_reason" ] || wake "$first_reason"
   [ "$failed" -eq 0 ]
+}
+
+# A local mate whose registered posture is drive and whose own published summary
+# shows no work in flight, no captain question, no dated hold, and no active rest
+# has stopped with standing work.  bin/fm-standing-mandate-lib.sh owns that rule;
+# this tick wakes once per stop episode, after SECONDMATE_STOPPED_WAKE_SECS, so
+# firstmate can steer the mate back to its charter with the tracked resume text.
+# An episode is the mate's idle_since epoch: a new idle stretch is a new episode,
+# and the episode marker clears as soon as the mate is no longer stopped.
+# Remote mates and mates with no readable summary never wake here; the board's
+# stopped row and the mate's own watcher cover what this cannot read.
+secondmate_stopped_tick() {
+  local tick_marker="$STATE/.secondmate-stopped-tick"
+  [ "$(age_of "$tick_marker")" -ge "$SECONDMATE_STOPPED_TICK_SECS" ] || return 0
+  touch "$tick_marker" || return 1
+  local now meta id home posture summary since marker notify_key reason queued first_reason=''
+  now=$(( $(date +%s) ))
+  [ -f "$DATA/secondmates.md" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    [ "$(fm_meta_get "$meta" kind 2>/dev/null || true)" = secondmate ] || continue
+    [ -z "$(fm_meta_get "$meta" remote_host 2>/dev/null || true)" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    marker="$STATE/.secondmate-stopped-woken-$id"
+    home=$(fm_meta_get "$meta" home 2>/dev/null || true)
+    posture=$(secondmate_registry_posture "$DATA/secondmates.md" "$id" 2>/dev/null || true)
+    summary="$home/state/home-summary.json"
+    since=
+    if [ "$posture" = drive ] && [ -n "$home" ] && [ -f "$summary" ]; then
+      since=$(jq -r --argjson now "$now" --argjson grace "$SECONDMATE_STOPPED_WAKE_SECS" \
+        --arg posture "$posture" "$FM_STANDING_MANDATE_JQ"'
+        {posture:$posture,state,valid,mandate_rest,idle_since,generated_epoch}
+        | mandate_stopped_since($now; $grace) // empty' "$summary" 2>/dev/null || true)
+    fi
+    case "$since" in
+      ''|*[!0-9]*) rm -f "$marker"; continue ;;
+    esac
+    [ "$(cat "$marker" 2>/dev/null || true)" != "$since" ] || continue
+    notify_key="secondmate-stopped-$id-$since"
+    reason="check: secondmate $id stopped with standing work"
+    queued=$(fm_wake_queued_keys check)
+    if ! printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1; then
+      fm_wake_append check "$notify_key" "$reason" || return 1
+    fi
+    printf '%s\n' "$since" > "$marker" || return 1
+    [ -n "$first_reason" ] || first_reason=$reason
+  done
+  [ -z "$first_reason" ] || wake "$first_reason"
+  return 0
+}
+
+# Queue a check wake once under <key>, then wake this home with <reason>.
+standing_mandate_wake() {  # <key> <reason>
+  local queued
+  queued=$(fm_wake_queued_keys check)
+  if ! printf '%s\n' "$queued" | grep -Fx "$1" >/dev/null 2>&1; then
+    fm_wake_append check "$1" "$2" || return 1
+  fi
+  wake "$2"
+}
+
+# A secondmate home's own standing-mandate wakes, by the posture in
+# config/secondmate-posture (bin/fm-standing-mandate-lib.sh reads it):
+#   drive: the home's published summary has shown no work in flight, no captain
+#     question, and no dated hold for 15 minutes, with no active rest.  It wakes
+#     the mate on the shared back-off (15 minutes, 1 hour, then every 4 hours)
+#     until the mate starts work, holds a question, or declares a rest.
+#   duty offered-item-taken: an offer card (a captain hold with option lines in
+#     this home's backlog) left the held state since the last look, or no offer
+#     card is open and nothing is in flight, on the same back-off.  The script
+#     only detects the event; the mate re-ranks and holds a fresh card.
+# Every other posture, a non-secondmate home, and an active rest do nothing.
+standing_mandate_tick() {
+  local posture now summary
+  posture=$(fm_standing_mandate_posture "$FM_HOME")
+  case "$posture" in
+    drive|'duty offered-item-taken') ;;
+    *) return 0 ;;
+  esac
+  now=$(( $(date +%s) ))
+  summary="$STATE/home-summary.json"
+  [ -f "$summary" ] || return 0
+  if [ "$posture" = drive ]; then
+    standing_mandate_drive_tick "$now" "$summary"
+  else
+    standing_mandate_offer_tick "$now" "$summary"
+  fi
+}
+
+standing_mandate_drive_tick() {  # <now> <summary>
+  local now=$1 summary=$2 marker="$STATE/.mandate-idle-wake" since minutes
+  since=$(jq -r --argjson now "$now" --argjson grace "$FM_STANDING_MANDATE_FIRST_WAKE" \
+    "$FM_STANDING_MANDATE_JQ"'
+    {posture:"drive",state,valid,mandate_rest,idle_since,generated_epoch}
+    | mandate_stopped_since($now; $grace) // empty' "$summary" 2>/dev/null || true)
+  case "$since" in
+    ''|*[!0-9]*) rm -f "$marker"; return 0 ;;
+  esac
+  fm_mandate_rest_active "$STATE" "$now" && return 0
+  fm_standing_mandate_marker_read "$marker" || true
+  if [ "$MANDATE_WAKE_EPISODE" != "$since" ]; then
+    MANDATE_WAKE_COUNT=0
+    MANDATE_WAKE_LAST=0
+  fi
+  fm_standing_mandate_wake_due "$since" "$MANDATE_WAKE_COUNT" "$MANDATE_WAKE_LAST" "$now" || return 0
+  fm_standing_mandate_marker_write "$marker" "$since" $(( MANDATE_WAKE_COUNT + 1 )) "$now" || return 1
+  minutes=$(( (now - since) / 60 ))
+  standing_mandate_wake "standing-mandate-idle-$since-$MANDATE_WAKE_COUNT" \
+    "check: standing mandate idle: ${minutes}m with no work in flight, no captain question, no dated hold"
+}
+
+standing_mandate_offer_tick() {  # <now> <summary>
+  local now=$1 summary=$2 seen="$STATE/.offered-open" marker="$STATE/.offered-refill-wake"
+  local cards completeness current taken='' id state
+  cards=$(fm_standing_mandate_offer_cards "$summary" "$now") || return 0
+  completeness=$(printf '%s\n' "$cards" | sed -n 1p)
+  current=$(printf '%s\n' "$cards" | sed 1d)
+  # Taken: an offer card seen open last time is no longer open (answered,
+  # released, or closed).  A partial summary proves nothing about a missing id.
+  if [ "$completeness" = complete ]; then
+    if [ -f "$seen" ]; then
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        printf '%s\n' "$current" | grep -Fx -- "$id" >/dev/null 2>&1 || taken="$taken${taken:+, }$id"
+      done < "$seen"
+    fi
+    printf '%s\n' "$current" > "$seen.tmp.$$" && mv -f "$seen.tmp.$$" "$seen" || return 1
+  fi
+  fm_mandate_rest_active "$STATE" "$now" && return 0
+  if [ -n "$taken" ]; then
+    # The taken event is the first wake of the no-card episode that follows.
+    fm_standing_mandate_marker_write "$marker" "$now" 1 "$now" || return 1
+    standing_mandate_wake "offered-item-taken-$now" "check: offered-item-taken: $taken left the captain hold"
+    return
+  fi
+  if [ -n "$current" ]; then
+    rm -f "$marker"
+    return 0
+  fi
+  state=$(jq -r '.state // ""' "$summary" 2>/dev/null || true)
+  case "$state" in
+    no_active_work|externally_held) ;;
+    *) rm -f "$marker"; return 0 ;;
+  esac
+  if ! fm_standing_mandate_marker_read "$marker"; then
+    fm_standing_mandate_marker_write "$marker" "$now" 0 0 || return 1
+    MANDATE_WAKE_EPISODE=$now
+  fi
+  fm_standing_mandate_wake_due "$MANDATE_WAKE_EPISODE" "$MANDATE_WAKE_COUNT" "$MANDATE_WAKE_LAST" "$now" || return 0
+  fm_standing_mandate_marker_write "$marker" "$MANDATE_WAKE_EPISODE" $(( MANDATE_WAKE_COUNT + 1 )) "$now" || return 1
+  standing_mandate_wake "offered-item-taken-empty-$MANDATE_WAKE_EPISODE-$MANDATE_WAKE_COUNT" \
+    "check: offered-item-taken: no offer card is open"
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -4457,6 +4621,18 @@ while :; do
   # the parent without consuming or rewriting the receiving home's record.
   secondmate_wake_stall_tick || {
     echo "watcher: secondmate wake-loop observation failed" >&2
+    exit 1
+  }
+
+  # A drive mate stopped with standing work wakes this home once per episode.
+  secondmate_stopped_tick || {
+    echo "watcher: secondmate stopped-mandate check failed" >&2
+    exit 1
+  }
+
+  # A secondmate home with standing work wakes itself when it sits idle.
+  standing_mandate_tick || {
+    echo "watcher: standing-mandate check failed" >&2
     exit 1
   }
 
