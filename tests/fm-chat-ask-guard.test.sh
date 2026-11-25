@@ -119,6 +119,31 @@ test_ask_blocks() {
   pass "a final message that asks the captain for something blocks once and names the hold command"
 }
 
+test_answered_labels_pass() {
+  local form
+  form=$(printf '%s\n' \
+    "Here are suggested answers for the interview form." \
+    "" \
+    "**What do you like most about your job?**" \
+    "The team and the variety of problems I get to solve." \
+    "" \
+    "**What would you change about your role?**" \
+    "More time for deep work and fewer context switches." \
+    "" \
+    "- **Where do you see yourself in two years?** Leading a small platform team." \
+    "" \
+    "## Do you feel supported by your manager?" \
+    "Yes, with regular one-to-ones and clear feedback.")
+  expect silent answered-form-labels "$form"
+  expect block trailing-plain-ask "$form
+
+Shall I merge it?" "Shall I merge it?"
+  expect block trailing-bold-label "$form
+
+**Shall I send these to your manager?**" "Shall I send these to your manager?"
+  pass "a bold or heading question with an answer under it passes; a trailing plain ask or unanswered bold label still blocks"
+}
+
 test_recap_passes() {
   expect silent recap "The gitconfig fix landed on main. The board now shows 3 calls, and nothing needs your decision right now."
   expect silent recap-own-question "Why did the build break? A missing jq on the runner; I fixed it and CI is green."
@@ -280,6 +305,7 @@ test_tracked_stop_hook_is_synchronous_and_grok_inert() {
 
 fm_test_run \
   test_ask_blocks \
+  test_answered_labels_pass \
   test_recap_passes \
   test_shipshape_passes \
   test_payload_message_is_preferred \
