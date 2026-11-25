@@ -673,6 +673,68 @@ EOF
   pass "a child question past the summary cut reaches the board whole"
 }
 
+
+# Real shape (cd-636): a second mate's child raises a keyed question and the
+# mate resolves it before its published home summary catches up. The web board
+# must drop the card on the next build, the same as the terminal board, which
+# never lists a key the status fold holds resolved. The parent's own log opens
+# and resolves a key too, and an unresolved child key stays as the control.
+test_a_resolved_child_key_leaves_both_boards_before_the_summary_catches_up() {
+  local home mate fakebin json calls
+  home=$(make_home child-resolved-key)
+  mate="$TMP_ROOT/child-resolved-key-home"
+  write_domain_alpha_fixture "$home" "$mate"
+  mkdir -p "$mate/projects/bump" "$mate/projects/open"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] bump - Renovate updates (repo: sample) (kind: ship) (since 2026-07-13)
+- [ ] open - Still asking (repo: sample) (kind: ship) (since 2026-07-13)
+
+## Queued
+
+## Done
+EOF
+  local t
+  for t in bump open; do
+    fm_write_meta "$mate/state/$t.meta" \
+      "window=firstmate:fm-$t" "worktree=$mate/projects/$t" "project=sample" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "$t" idle
+  done
+  printf 'needs-decision [key=bump-files]: which files does the bump touch?\n' > "$mate/state/bump.status"
+  printf 'needs-decision [key=still-open]: keep the old pin?\n' > "$mate/state/open.status"
+  printf 'needs-decision [key=parent-call]: approve the parent ask?\n' >> "$home/state/domain-alpha.status"
+  fakebin=$(make_fakebin "$home")
+  # Publish the mate summary while both child keys are open.
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .key == "status.domain-alpha.bump.bump-files"))
+    and (.decisions_open | any(.[]; .key == "status.domain-alpha.open.still-open"))
+  ' >/dev/null || fail "fixture: the open child keys did not reach the board: $json"
+  jq -e '.decisions_open | any(.[]; .id == "bump" and .key == "bump-files")' \
+    "$mate/state/home-summary.json" >/dev/null || fail "fixture: the published summary lacks the open key"
+  # The mate resolves its child's key and the parent key; its summary stays stale.
+  printf 'resolved [key=bump-files]: answered\n' >> "$mate/state/bump.status"
+  printf 'resolved [key=parent-call]: answered\n' >> "$home/state/domain-alpha.status"
+  jq -e '.decisions_open | any(.[]; .id == "bump" and .key == "bump-files")' \
+    "$mate/state/home-summary.json" >/dev/null || fail "fixture: the summary was republished"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    NET_LOG="$home/net.log" "$BEARINGS" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .key == "status.domain-alpha.bump.bump-files") | not)
+    and (.decisions_open | any(.[]; (.key // "") | test("parent-call")) | not)
+    and (.decisions_open | any(.[]; .key == "status.domain-alpha.open.still-open"))
+  ' >/dev/null || fail "the web board kept a resolved key or lost an open one: $json"
+  [ -f "$home/data/backlog.md" ] || printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  calls=$(PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_CAPTAIN_CALLS_PR_CHECK=0 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-calls.sh") \
+    || fail "fm-captain-calls failed: $calls"
+  printf '%s' "$calls" | jq -e '
+    [.calls[] | .key | strings | select(test("bump-files|parent-call"))] | length == 0
+  ' >/dev/null || fail "the terminal board kept a resolved key: $calls"
+  pass "a resolved child key leaves both boards before the summary catches up"
+}
 make_valid_secondmate_home() {  # <id> <home>
   local id=$1 home=$2
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin"
@@ -4782,6 +4844,7 @@ fm_test_run \
   test_active_child_overrides_old_parent_event \
   test_structured_child_decision_reaches_captains_call \
   test_a_child_question_past_the_summary_cut_reaches_the_board_whole \
+  test_a_resolved_child_key_leaves_both_boards_before_the_summary_catches_up \
   test_bad_secondmate_homes_never_revive_parent_work \
   test_oversized_secondmate_summary_stays_strict_unknown \
   test_secondmate_and_child_bounds_are_disclosed \
