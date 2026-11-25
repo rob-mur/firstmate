@@ -102,6 +102,44 @@ test_lock_status_is_per_home() {
   pass "fm-lock status is scoped per home"
 }
 
+test_home_seed_records_continuation_posture() {
+  # The seed records a non-routed posture on the registry line, writes the
+  # effective posture into the home, scaffolds the posture's charter text, keeps
+  # the recorded posture on a plain reseed, and drops the field for routed.
+  local home sub reg
+  home="$TMP_ROOT/posture-seed-home"
+  sub="$TMP_ROOT/posture-seed-subhome"
+  reg="$home/data/secondmates.md"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate pruning' FM_SECONDMATE_SCOPE='pruning work' \
+    FM_SECONDMATE_POSTURE=drive "$ROOT/bin/fm-home-seed.sh" pruner "$sub" --no-projects >/dev/null \
+    || fail "drive seed failed"
+  assert_grep 'projects: ; posture: drive; added ' "$reg" "drive posture missing from the registry line"
+  [ "$(cat "$sub/config/secondmate-posture")" = drive ] || fail "seed did not write the home posture"
+  assert_grep 'Your continuation posture is drive' "$sub/data/charter.md" "drive charter text missing"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate pruning' FM_SECONDMATE_SCOPE='pruning work' \
+    "$ROOT/bin/fm-home-seed.sh" pruner "$sub" --no-projects >/dev/null \
+    || fail "plain reseed failed"
+  assert_grep 'posture: drive; added ' "$reg" "plain reseed dropped the recorded posture"
+  [ "$(cat "$sub/config/secondmate-posture")" = drive ] || fail "plain reseed changed the home posture"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate pruning' FM_SECONDMATE_SCOPE='pruning work' \
+    FM_SECONDMATE_POSTURE='forever' "$ROOT/bin/fm-home-seed.sh" pruner "$sub" --no-projects >/dev/null 2>&1; then
+    fail "seed accepted an unknown posture"
+  fi
+  assert_grep 'posture: drive; added ' "$reg" "refused posture changed the registry"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate pruning' FM_SECONDMATE_SCOPE='pruning work' \
+    FM_SECONDMATE_POSTURE=routed "$ROOT/bin/fm-home-seed.sh" pruner "$sub" --no-projects >/dev/null \
+    || fail "routed reseed failed"
+  assert_no_grep 'posture:' "$reg" "routed posture wrote a registry field"
+  [ "$(cat "$sub/config/secondmate-posture")" = routed ] || fail "routed reseed did not write the home posture"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after posture seeds"
+  pass "home seeding records, keeps, and clears the continuation posture"
+}
+
 test_seed_allows_overlapping_clones_and_drops_owner() {
   # A project may appear in several secondmates' (non-exclusive) clone lists; the
   # registry never uses the legacy owns: field, and the removed `owner` subcommand
@@ -3258,6 +3296,7 @@ test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
+test_home_seed_records_continuation_posture
 test_secondmate_spawn_resolves_punctuated_registry_projects
 test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home

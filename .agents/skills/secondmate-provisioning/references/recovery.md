@@ -24,5 +24,5 @@ A successful update restarts every live mate of both placements on its own, incl
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.
 Each secondmate is a firstmate in its own home, so it runs recovery on startup and reconciles its own crewmates.
-A secondmate's recovery reconciles only work that is already its own and then idles.
-It never initiates a survey or audit during recovery.
+A secondmate's recovery reconciles only work that is already its own and then continues as its charter's posture says.
+It never initiates a survey or audit outside its charter during recovery.

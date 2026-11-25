@@ -26,6 +26,12 @@
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
 #       and scope are derived from the filled charter brief.
+#       Set FM_SECONDMATE_POSTURE='<routed|drive|duty [offered-item-taken]|scheduled <cadence>>' to
+#       record that continuation posture; unset keeps an existing record's
+#       posture on a reseed and otherwise means routed. A routed posture writes
+#       no registry field, every other posture writes `posture: <value>`, and
+#       the effective posture is written into the home as
+#       config/secondmate-posture (a generated charter scaffold uses it too).
 #   fm-home-seed.sh validate
 #       Refuse records that operational consumers cannot parse, unavailable or
 #       unsafe registry files when present, non-absolute or unresolvable homes,
@@ -287,7 +293,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "config/secondmate-posture" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -543,8 +549,10 @@ SEED_PARENT_BRIEF_CREATED=0
 SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
+SEED_POSTURE_EXISTED=0
 SEED_MARKER_EXISTED=0
 SEED_PARENT_MARKER_EXISTED=0
+SEED_POSTURE=routed
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -666,6 +674,7 @@ seed_rollback() {
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
+        restore_seed_file "$SEED_POSTURE_EXISTED" "$SEED_BACKUP_DIR/posture" "$SEED_HOME/config/secondmate-posture"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
     fi
@@ -759,18 +768,20 @@ initialize_no_mistakes_project() {
 }
 
 write_registry() {
-  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today
+  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today posture_field
   mkdir -p "$DATA"
   scope=$(registry_scope_for_brief "$brief")
   summary=$(registry_summary_for_brief "$brief")
   today=$(date +%F)
+  posture_field=
+  [ "$SEED_POSTURE" = routed ] || posture_field="; posture: $SEED_POSTURE"
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
     grep -vE "^- $id( |$)" "$REG" > "$tmp" || true
   else
     : > "$tmp"
   fi
-  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" >> "$tmp"
+  printf -- '- %s - %s (home: %s; scope: %s; projects: %s%s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$posture_field" "$today" >> "$tmp"
   mv "$tmp" "$REG"
 }
 
@@ -837,6 +848,23 @@ refuse_projectful_projectless_charter() {
   return 1
 }
 
+# Effective continuation posture for this seed: an explicit
+# FM_SECONDMATE_POSTURE wins, a reseed keeps the existing record's posture, and
+# a new record is routed.
+resolve_seed_posture() {
+  local id=$1
+  if [ -n "${FM_SECONDMATE_POSTURE:-}" ]; then
+    SEED_POSTURE=$(secondmate_posture_normalize "$FM_SECONDMATE_POSTURE") || {
+      echo "error: FM_SECONDMATE_POSTURE must be routed, drive, duty, duty offered-item-taken, or scheduled <cadence>; got: $FM_SECONDMATE_POSTURE" >&2
+      return 1
+    }
+  elif secondmate_registry_line_for_id "$REG" "$id" 2>/dev/null; then
+    SEED_POSTURE=$SECONDMATE_REGISTRY_POSTURE
+  else
+    SEED_POSTURE=routed
+  fi
+}
+
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
   local no_projects=0 arg
@@ -869,6 +897,7 @@ seed_home() {
   trap seed_exit_cleanup EXIT
 
   validate_registry
+  resolve_seed_posture "$id" || return 1
   for project in "$@"; do
     validate_seed_project "$project"
   done
@@ -889,6 +918,7 @@ seed_home() {
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
+  SEED_POSTURE_EXISTED=0
   SEED_MARKER_EXISTED=0
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
@@ -929,6 +959,10 @@ seed_home() {
     SEED_CHARTER_EXISTED=1
     cp "$home/data/charter.md" "$SEED_BACKUP_DIR/charter.md"
   fi
+  if [ -f "$home/config/secondmate-posture" ]; then
+    SEED_POSTURE_EXISTED=1
+    cp "$home/config/secondmate-posture" "$SEED_BACKUP_DIR/posture"
+  fi
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     SEED_MARKER_EXISTED=1
     cp "$home/$SUB_HOME_MARKER" "$SEED_BACKUP_DIR/marker"
@@ -946,9 +980,9 @@ seed_home() {
     }
     [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
     if [ "$no_projects" -eq 1 ]; then
-      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
+      FM_SECONDMATE_POSTURE="$SEED_POSTURE" "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
     else
-      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+      FM_SECONDMATE_POSTURE="$SEED_POSTURE" "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
     fi
     SEED_PARENT_BRIEF_CREATED=1
   fi
@@ -983,6 +1017,8 @@ seed_home() {
   done
 
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
+  printf '%s\n' "$SEED_POSTURE" > "$home/config/secondmate-posture.tmp.$$"
+  mv -f -- "$home/config/secondmate-posture.tmp.$$" "$home/config/secondmate-posture"
 
   projects_csv=$(join_projects "$@")
   # Durable record of this home's route to its parent, written once here next

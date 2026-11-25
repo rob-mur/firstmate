@@ -9,6 +9,8 @@ bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
+Set `FM_SECONDMATE_POSTURE='<posture>'` on the scaffold and the seed to choose the mate's continuation posture; the seed records it in the route and the home's `config/secondmate-posture`, and a reseed without it keeps the registered posture ([`docs/configuration.md`](../../../../docs/configuration.md#secondmate-posture) owns the values).
+To change a live mate's posture, edit its route's `posture:` field, run `bin/fm-config-push.sh`, and regenerate its charter with the same `FM_SECONDMATE_POSTURE`, keeping its domain sections.
 Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take pooled worktrees of the same repo.
 `--no-projects` is mutually exclusive with a project list, and omitting both still fails loudly, so an accidental omission is never mistaken for a deliberate project-less seed.
 Re-seeding a populated home as project-less is refused non-destructively when the home contains project clones or `data/projects.md` entries.
