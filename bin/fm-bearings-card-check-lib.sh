@@ -14,7 +14,9 @@
 # THE RULE. A Captain's Call card needs a prompt that asks - its `question` or
 # `decide` carries a `?`, or its title does (for a `from_status` card only when
 # it has no `question` or `decide`, since its title may come from a body
-# sentence that asks, never from one of its options) - and a way to answer it,
+# sentence that asks, never from one of its options), or any sentence of its
+# reason (`context.reason` or `about`) outside its option items ends in `?`,
+# even one after a colon list whose lead became the heading - and a way to answer it,
 # at least one option of its own besides the injected reconcile choice or a free-text answer. A card whose
 # options include `done` and `not-done` asks for an in-person action, so its
 # prompt may be an imperative sentence. A card also needs the decision's own
@@ -159,6 +161,13 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
     | ([.question, .decide] | map(text) | map(select(length > 0))) as $prompts
     | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $action
     | (.from_status == true) as $raised
+    # A reason that asks anywhere outside its option items, even after a
+    # colon list whose lead became the heading ("Four calls: 1) ... 4) ....
+    # Do you accept all four?"), states its question; an asking sentence
+    # inside an item is a choice, never the question.
+    | any((.context.reason, .about) | strings
+          | (option_parse as $o | if $o == null then . else $o.lead + " " + $o.tail end)
+          | sentences[]; test("[?][[:space:]]*$")) as $reason_asks
     | ([ (.context.reason // .about // "") | strings
          | match("(?<![[:alnum:]])[Oo][Pp][Tt][Ii][Oo][Nn] [A-Za-z0-9](?![[:alnum:]])[^.:?!]{0,40}:"; "g") ] | length) as $marks
     | ([ (.context.reason // .about // "") | strings
@@ -177,7 +186,8 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
     | ( if $pr_ask then $urls | map(link_norm) | unique
           | map(select($states[.] != null) | "names \(.), already \($states[.]), and asks to review or merge it")
         else [] end ) as $over
-    | [ (if ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
+    | [ (if $reason_asks then empty
+         elif ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
          then "question (no question or decide prompt, and the title is not a question)"
          elif ($prompts | length) > 0 and (any($prompts[]; asks) | not)
               and ($raised or (.title | asks | not)) and ($action | not)
