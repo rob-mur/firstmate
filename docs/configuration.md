@@ -1439,7 +1439,7 @@ It is on by default in a plain Claude primary checkout of this home, and it stay
 When the final message of a turn asks the captain for something, and the turn held no card with `bin/fm-captain-hold.sh` and the message names no open board call, the hook blocks the turn end once.
 Its block message quotes the ask and gives the exact `bin/fm-captain-hold.sh hold` command to run.
 A message names an open board call when it carries that call's task id, a URL the call carries, or an MR, PR, or issue number the call names.
-The exact reply `Captain, shipshape.` and a message that only reports, relays, or asks a rhetorical question pass.
+The exact reply `Captain, shipshape.`, a message that only reports, relays, or asks a rhetorical question, and a heading or bold question label with its answer under it pass.
 The hook blocks at most once for each captain prompt, so the session can end the turn on the next stop when an open card already covers the ask.
 A hook error does not block the turn, and the hook never records a card itself.
 To turn it off, put `off` as the first line of the optional local, gitignored `config/chat-ask-guard`, which is per home and is not inherited.
