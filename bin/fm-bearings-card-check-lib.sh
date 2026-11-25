@@ -2,6 +2,7 @@
 # Shared "does this Captain's Call card state its decision" check.
 # Usage: . bin/fm-bearings-card-check-lib.sh; then call
 #   fm_bearings_card_link_states <data.json>
+#   fm_bearings_card_page_states <data.json> <state-dir> <pages-dir>
 #   fm_bearings_undecided_cards <data.json> [<link-states.json>]
 #   fm_bearings_status_decision_problem <task> <key> <note>
 #
@@ -83,13 +84,34 @@
 # and a forge read of up to the timeout per url there would stall it, so the
 # bounce check reads no link state and the next build catches a stale link.
 #
+# A card must not link a stale page: a `{page: <id>}` link that the states
+# object maps under `page:<id>` to "stale" (fm_bearings_card_page_states)
+# names the card, page-backed cards included, since a page that missed its
+# worker's latest news shows the captain an out-of-date decision.
+#
+# fm_bearings_card_page_states <data.json> <state-dir> <pages-dir>: print a
+# JSON object mapping `page:<id>` to "stale" for every page id that the
+# Captain's Call cards link as `{page: <id>}` and whose page file
+# (<pages-dir>/<id>/page.html, else page.md) was last written more than
+# FM_BEARINGS_PAGE_STALE_GRACE seconds (default 600) before its worker last
+# changed state. The worker is the task the page record
+# (<state-dir>/pages/<id>/page.json) names in `task`, else the page id; its
+# last state change is the `[at=<epoch>]` stamp of the last working,
+# needs-decision, blocked, paused, done or failed line in
+# <state-dir>/<task>.status. The grace leaves room for a worker that rebuilds
+# its page and reports a little later. A page with no page file, no status
+# log, or no stamped state line records nothing, so a missing page is handled
+# by the page link rules alone. Only the board build calls this.
+#
 # fm_bearings_undecided_cards <data.json> [<link-states.json>]: print one
 # `<key>: <problem>` line per Captain's Call card in an fm-bearings-board.v1
 # payload that fails the rule, <problem> being `missing <field> (<why>)[, ...]`,
 # `options given twice (...)`, `heading carries several calls (...)`,
 # `duplicate link (<url> ...)` and/or
 # `names <url>, already merged|closed, and asks to review or merge it`
-# (from the link states fm_bearings_card_link_states printed), joined by `; `.
+# (from the link states fm_bearings_card_link_states printed) and/or
+# `stale page (...)` (from the page states fm_bearings_card_page_states
+# printed, merged into the same object), joined by `; `.
 #
 # fm_bearings_status_decision_problem <task> <key> <note>: check one worker
 # status needs-decision line - <key> its decision key ("default" when the line
@@ -148,6 +170,31 @@ EOF
   printf '%s\n' "$states"
 }
 
+fm_bearings_card_page_states() {  # <data.json> <state-dir> <pages-dir>
+  local ids id task status at file mtime grace out='{}'
+  grace=${FM_BEARINGS_PAGE_STALE_GRACE:-600}
+  case $grace in ''|*[!0-9]*) grace=600 ;; esac
+  ids=$(jq -r '[.captains_call[]?.links[]?.page | strings
+                | select(test("^[a-z0-9][a-z0-9-]{0,63}$"))] | unique[]' "$1" 2>/dev/null) || ids=""
+  for id in $ids; do
+    task=$(jq -r '.task | strings | select(test("^[A-Za-z0-9._-]+$"))' "$2/pages/$id/page.json" 2>/dev/null) || task=""
+    [ -n "$task" ] || task=$id
+    status="$2/$task.status"
+    [ -f "$status" ] || continue
+    at=$(sed -nE 's/^(working|needs-decision|blocked|paused|done|failed)([[:space:]][^:]*)?\[at=([0-9]+)\].*/\3/p' "$status" | tail -n 1)
+    [ -n "$at" ] || continue
+    file="$3/$id/page.html"
+    [ -f "$file" ] || file="$3/$id/page.md"
+    [ -f "$file" ] || continue
+    mtime=$(stat -c %Y -- "$file" 2>/dev/null || stat -f %m -- "$file" 2>/dev/null) || continue
+    case $mtime in ''|*[!0-9]*) continue ;; esac
+    if [ "$((mtime + grace))" -lt "$at" ]; then
+      out=$(printf '%s\n' "$out" | jq -c --arg k "page:$id" '. + {($k): "stale"}') || return 1
+    fi
+  done
+  printf '%s\n' "$out"
+}
+
 fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
   local states='{}'
   if [ -n "${2:-}" ]; then states=$(cat -- "$2") || return 1; fi
@@ -160,10 +207,12 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
     | select(.type != "merge")
     | .options |= map(select(.value != "reconcile"))
     | select(has("off_board") | not)
-    | select(((.options | length) == 0)
-             and any(.links[]?; has("page")
-                     or ((.url // "") | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#]|$)")))
-             | not)
+    | ([ .links[]?.page | strings | select($states["page:" + .] == "stale")
+         | "stale page (\(.) was not rebuilt after its worker last reported: rebuild it)" ] | unique) as $stale
+    | (((.options | length) == 0)
+       and any(.links[]?; has("page")
+               or ((.url // "") | test("^http://dev-1\\.tailf848b0\\.ts\\.net:4387(?:[/?#]|$)")))) as $page_backed
+    | select(($page_backed | not) or ($stale | length) > 0)
     | .key as $key
     | ([.question, .decide] | map(text) | map(select(length > 0))) as $prompts
     | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $action
@@ -235,6 +284,8 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
         (if $twice then "options given twice (the background lists lettered a) b) choices as well as the card options: re-post without the list in the reason)" else empty end),
         ($dups[] | "duplicate link (\(.) is listed more than once: keep one)"),
         $over[] ]
+    | if $page_backed then [] else . end
+    | . + $stale
     | select(length > 0)
     | "\($key): \(join("; "))"
   ' "$1"
