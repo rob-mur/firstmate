@@ -156,6 +156,8 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_LIVENESS_WAIT     wait for a secondmate's liveness lock before
+#                                its relaunch stops anything (150)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -218,6 +220,7 @@ ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+LIVENESS_WAIT=${FM_CONTROL_LIVENESS_WAIT:-150}
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -226,6 +229,8 @@ die() {  # <message>
 
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
+LIVENESS_LOCK=
+LIVENESS_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
 
@@ -234,6 +239,12 @@ control_cleanup() {
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
+  fi
+  # Release the liveness lock only after any rollback, so the liveness probes
+  # never see the endpoint between the stop and the restored record.
+  if [ "$LIVENESS_LOCK_HELD" = 1 ]; then
+    LIVENESS_LOCK_HELD=0
+    fm_lock_release "$LIVENESS_LOCK" || true
   fi
   # Remove the dialog file while the lock is still held: once it is released,
   # the next lifecycle command for this task writes the same path.
@@ -1256,6 +1267,20 @@ do_relaunch() {
       # The charter in the secondmate's own home is its instruction source and
       # stays untouched.
       RELAUNCH_BRIEF=
+      # The liveness probes (bin/fm-secondmate-liveness-lib.sh) relaunch a mate
+      # whose endpoint reads dead or missing, through fm-spawn --secondmate.
+      # Between the stop below and the replacement coming up, this transaction
+      # holds the spawn lock and the endpoint reads dead, so an unserialized
+      # probe would kill the endpoint mid-relaunch and then be refused by that
+      # spawn lock. Hold the same per-mate lock the probes take, for the whole
+      # transaction, before anything is stopped.
+      LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+      case "$LIVENESS_WAIT" in
+        ''|*[!0-9]*|0) die "FM_CONTROL_LIVENESS_WAIT must be a positive integer: $LIVENESS_WAIT" ;;
+      esac
+      fm_lock_acquire_wait_bounded "$LIVENESS_LOCK" "$LIVENESS_WAIT" \
+        || die "a secondmate liveness check is in progress for $ID and did not finish within ${LIVENESS_WAIT}s; nothing was changed - retry the relaunch"
+      LIVENESS_LOCK_HELD=1
       ;;
     *)
       die "task $ID records kind '$KIND', which has no defined relaunch shape"
