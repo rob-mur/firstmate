@@ -292,6 +292,15 @@ case "${1:-}" in
     esac
     printf 'ok: hold %s\n' "${2:-}"
     ;;
+  list)
+    # hold lists open captain holds to refuse a second one gating one work item.
+    case " $* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads list received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    ;;
   done)
     [ "${2:-}" = "@ID@" ] || exit 1
     case " $* " in
@@ -2884,6 +2893,66 @@ hold_choices() {  # <home> <task-id>
   run_bearings "$1" | jq -cS --arg id "$2" '.decisions_open[] | select(.id == $id) | .choices'
 }
 
+# One work item has at most one open captain call. Two holds gating one rename
+# change split into two PRs (pdm-151-ack and pdm-152-ack, both for
+# pdm-143-rename) showed the captain two cards for one decision, so the second
+# `hold --gates` is refused, naming the open hold to add the new PR to.
+test_hold_refuses_a_second_open_hold_gating_one_work_item() {
+  local home item show decision
+  home=$(make_home hold-gates-dup)
+  item=pdm-143-rename
+  tasks_in "$home" add "$item" "Rename the CLI" --kind ship --repo pdm >/dev/null \
+    || fail "could not create the gated work item"
+  run_captain "$home" hold pdm-151-ack --title "Dismiss the review on the test PR" \
+    --reason "dismiss the acknowledgement review on PR 151?" --repo pdm --gates "$item" >/dev/null \
+    || fail "the first hold gating the work item was refused"
+  show=$(tasks_in "$home" show pdm-151-ack --full)
+  assert_contains "$show" "Captain hold gates: $item" "the hold did not record the work item it gates"
+
+  if run_captain "$home" hold pdm-152-ack --title "Dismiss the review on the exemption PR" \
+    --reason "dismiss the acknowledgement review on PR 152?" --repo pdm --gates "$item" \
+    > "$home/dup.out" 2> "$home/dup.err"; then
+    fail "a second open hold gating $item was accepted"
+  fi
+  assert_grep "work item $item already has an open captain hold, pdm-151-ack" "$home/dup.err" \
+    "the refusal does not name the open hold"
+  assert_grep "add the new PR or question to pdm-151-ack" "$home/dup.err" \
+    "the refusal does not say to add the new PR to the open hold"
+  if tasks_in "$home" show pdm-152-ack >/dev/null 2>&1; then
+    fail "the refused hold still created its task"
+  fi
+
+  run_captain "$home" hold pdm-151-ack --reason "dismiss the reviews on PRs 151 and 152?" \
+    --gates "$item" >/dev/null \
+    || fail "re-holding the open hold with the added PR was refused"
+
+  if run_captain "$home" hold "$item" --reason "rename call" > "$home/item.out" 2> "$home/item.err"; then
+    fail "holding the work item itself was accepted while another hold gates it"
+  fi
+  assert_grep "already has an open captain hold, pdm-151-ack" "$home/item.err" \
+    "holding the gated work item itself did not name the open hold"
+
+  decision="$home/decision.txt"
+  printf 'a\n' > "$decision"
+  run_captain "$home" answer pdm-151-ack --decision-file "$decision" >/dev/null \
+    || fail "could not answer the open hold"
+  run_captain "$home" hold pdm-152-ack --title "Dismiss the review on the exemption PR" \
+    --reason "dismiss the acknowledgement review on PR 152?" --repo pdm --gates "$item" >/dev/null \
+    || fail "a new hold gating the work item was refused after the open one was answered"
+
+  tasks_in "$home" add other-work "Other work" --kind ship --repo pdm >/dev/null \
+    || fail "could not create the directly held work item"
+  run_captain "$home" hold other-work --reason "ship it?" >/dev/null \
+    || fail "could not hold the work item directly"
+  if run_captain "$home" hold other-call --title "Other call" --reason "which way?" --repo pdm \
+    --gates other-work > "$home/direct.out" 2> "$home/direct.err"; then
+    fail "a hold gating a work item already held directly was accepted"
+  fi
+  assert_grep "work item other-work already has an open captain hold, other-work" "$home/direct.err" \
+    "the refusal does not name the directly held work item"
+  pass "hold refuses a second open captain hold gating one work item"
+}
+
 test_hold_records_options_and_links() {
   local home id choices show
   home=$(make_home hold-choices)
@@ -3123,6 +3192,7 @@ test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
+test_hold_refuses_a_second_open_hold_gating_one_work_item
 test_hold_records_options_and_links
 test_hold_refuses_malformed_choices
 test_active_rehold_moves_set_time_only_for_a_new_reason
