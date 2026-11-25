@@ -6,6 +6,12 @@
 #   (home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
 # A remote record adds its host placement before the existing fields:
 #   (host: ...; root: ...; home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
+# Either form may carry an optional continuation posture before `added`:
+#   (...; projects: ...; posture: drive; added YYYY-MM-DD)
+# The posture is `routed`, `drive`, `duty`, `duty offered-item-taken`, or
+# `scheduled <cadence>`; a missing field means `routed`, and any other value
+# makes the record malformed.
+# secondmate_registry_posture prints the effective posture for one id.
 # Summary text and scope text are natural language and may contain parentheses
 # and semicolons, so field boundaries are anchored to the suffix markers rather
 # than to the first incidental punctuation.
@@ -18,6 +24,7 @@ SECONDMATE_REGISTRY_HOME=
 SECONDMATE_REGISTRY_SCOPE=
 SECONDMATE_REGISTRY_PROJECTS=
 SECONDMATE_REGISTRY_ADDED=
+SECONDMATE_REGISTRY_POSTURE=
 SECONDMATE_REGISTRY_REMOTE=0
 SECONDMATE_REGISTRY_LINE=
 SECONDMATE_REGISTRY_MATCH_HOST=
@@ -31,10 +38,43 @@ SECONDMATE_REGISTRY_ERROR=
 secondmate_registry_lock_path() { printf '%s/.secondmate-registry.lock\n' "$1"; }
 secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.lock\n' "$1" "$2"; }
 
+secondmate_posture_normalize() {
+  # Prints the canonical posture for a raw value, or fails for an unknown one.
+  local raw=$1 word cadence
+  raw=$(printf '%s' "$raw" | tr -s '[:space:]' ' ')
+  raw=${raw# }
+  raw=${raw% }
+  word=${raw%% *}
+  case "$raw" in
+    *' '*) cadence=${raw#* } ;;
+    *) cadence= ;;
+  esac
+  case "$word" in
+    routed|drive)
+      [ -z "$cadence" ] || return 1
+      printf '%s\n' "$word"
+      ;;
+    duty)
+      # A duty mate may name one watched trigger; the mate-home watcher knows
+      # each listed trigger, so an unknown name is refused.
+      case "$cadence" in
+        '') printf 'duty\n' ;;
+        offered-item-taken) printf 'duty %s\n' "$cadence" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    scheduled)
+      case "$cadence" in ''|*[!A-Za-z0-9._\ -]*) return 1 ;; esac
+      printf 'scheduled %s\n' "$cadence"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 secondmate_registry_parse_line() {
-  local line=$1
-  local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
-  local remote_re='^- ([A-Za-z0-9._-]+) - (.+) \(host:[[:space:]]*([^;)]*);[[:space:]]*root:[[:space:]]*([^;)]*);[[:space:]]*home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
+  local line=$1 posture_field=
+  local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*)(;[[:space:]]*posture:[[:space:]]*([^;)]*))?;[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
+  local remote_re='^- ([A-Za-z0-9._-]+) - (.+) \(host:[[:space:]]*([^;)]*);[[:space:]]*root:[[:space:]]*([^;)]*);[[:space:]]*home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*)(;[[:space:]]*posture:[[:space:]]*([^;)]*))?;[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
   SECONDMATE_REGISTRY_ID=
   SECONDMATE_REGISTRY_SUMMARY=
   SECONDMATE_REGISTRY_HOST=
@@ -43,6 +83,7 @@ secondmate_registry_parse_line() {
   SECONDMATE_REGISTRY_SCOPE=
   SECONDMATE_REGISTRY_PROJECTS=
   SECONDMATE_REGISTRY_ADDED=
+  SECONDMATE_REGISTRY_POSTURE=
   SECONDMATE_REGISTRY_REMOTE=0
   # Parse the legacy local form first so summary prose that happens to mention
   # remote field names cannot change an existing route's placement semantics.
@@ -52,7 +93,9 @@ secondmate_registry_parse_line() {
     SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[3]}
     SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[4]}
     SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[5]}
-    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[6]}
+    posture_field=${BASH_REMATCH[6]}
+    SECONDMATE_REGISTRY_POSTURE=${BASH_REMATCH[7]}
+    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[8]}
   elif [[ "$line" =~ $remote_re ]]; then
     SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
     SECONDMATE_REGISTRY_SUMMARY=${BASH_REMATCH[2]}
@@ -61,13 +104,20 @@ secondmate_registry_parse_line() {
     SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[5]}
     SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[6]}
     SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[7]}
-    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[8]}
+    posture_field=${BASH_REMATCH[8]}
+    SECONDMATE_REGISTRY_POSTURE=${BASH_REMATCH[9]}
+    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[10]}
     SECONDMATE_REGISTRY_REMOTE=1
   else
     return 1
   fi
   [ -n "$SECONDMATE_REGISTRY_HOME" ] || return 1
   [ -n "$SECONDMATE_REGISTRY_SCOPE" ] || return 1
+  if [ -n "$posture_field" ]; then
+    SECONDMATE_REGISTRY_POSTURE=$(secondmate_posture_normalize "$SECONDMATE_REGISTRY_POSTURE") || return 1
+  else
+    SECONDMATE_REGISTRY_POSTURE=routed
+  fi
   if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
     [ -n "$SECONDMATE_REGISTRY_HOST" ] || return 1
     [ -n "$SECONDMATE_REGISTRY_ROOT" ] || return 1
@@ -99,8 +149,22 @@ secondmate_registry_field() {
     scope) printf '%s\n' "$SECONDMATE_REGISTRY_SCOPE" ;;
     projects) printf '%s\n' "$SECONDMATE_REGISTRY_PROJECTS" ;;
     remote) printf '%s\n' "$SECONDMATE_REGISTRY_REMOTE" ;;
+    posture) printf '%s\n' "$SECONDMATE_REGISTRY_POSTURE" ;;
     *) return 1 ;;
   esac
+}
+
+secondmate_posture_duty_trigger() {
+  # Prints the watched trigger of a canonical `duty <trigger>` posture, or
+  # nothing for any other posture.
+  case "$1" in
+    'duty '*) printf '%s\n' "${1#duty }" ;;
+  esac
+}
+
+secondmate_registry_posture() {
+  # Effective posture for one registered id; a record without the field is routed.
+  secondmate_registry_field "$1" "$2" posture
 }
 
 secondmate_registry_path_key() {
