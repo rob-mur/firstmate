@@ -276,6 +276,8 @@ esac
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-standing-mandate-lib.sh
+. "$SCRIPT_DIR/fm-standing-mandate-lib.sh"  # mandate_rest: a mate's dated rest record
 
 usage() {
   cat <<'EOF'
@@ -1184,6 +1186,14 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
+# The first epoch this home's published summary showed no_active_work, kept by
+# bin/fm-home-summary-refresh.sh in state/.idle-since; `null` when absent.
+home_idle_since_marker() {
+  local v=
+  [ -r "$STATE/.idle-since" ] && IFS= read -r v < "$STATE/.idle-since"
+  case "$v" in ''|*[!0-9]*) printf 'null\n' ;; *) printf '%s\n' "$v" ;; esac
+}
+
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
@@ -1193,6 +1203,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
+    --argjson mandate_rest "$(fm_mandate_rest_json "$STATE" "$SNAPSHOT_EPOCH")" \
+    --argjson idle_marker "$(home_idle_since_marker)" \
     --slurpfile backlog "$1" \
     --slurpfile tasks "$2" --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" "$FM_LANDED_JQ_DEFS"'
     ($backlog[0]) as $backlog
@@ -1353,6 +1365,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         reason:$reason,
         invalidity:$invalidity,
         state:$state,
+        mandate_rest:$mandate_rest,
+        idle_since:(if $state == "no_active_work" then ($idle_marker // $generated_epoch) else null end),
         active_children:$active_all[:$child_n],
         in_flight_children:$in_flight_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
@@ -1490,12 +1504,14 @@ BASH
         | select(startswith("- "))
         | (capture("^- (?<id>[^[:space:]]+)")?) as $id
         | select($id != null)
-        | ([capture("^.*\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*(?:;[[:space:]]*posture:[[:space:]]*[^;)]*)?;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
-        | ([capture("^.*\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*(?:;[[:space:]]*posture:[[:space:]]*[^;)]*)?;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
+        | ([capture("^.*\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*(?:;[[:space:]]*posture:[[:space:]]*(?<posture>[^;)]*))?;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
+        | ([capture("^.*\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*(?:;[[:space:]]*posture:[[:space:]]*(?<posture>[^;)]*))?;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
         | ($local // $remote) as $route
         | (($local == null) and ($remote != null)) as $is_remote
         | {id:$id.id,home:($route.home // null),host:(if $is_remote then $remote.host else null end),root:(if $is_remote then $remote.root else null end),
            remote:$is_remote,registered:true,
+           posture:(($route.posture // "") | gsub("[[:space:]]+"; " ") | sub("^ "; "") | sub(" $"; "")
+                    | if . == "" then "routed" else . end),
            registry_error:(if $route == null or ($route.home | length) == 0 then "registry entry has no home" else null end)} ]
       | group_by(.id)
       | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
@@ -2229,6 +2245,8 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          in_flight_children:($summary.in_flight_children // null),
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          contributions:($summary.contributions // null),
+         mandate_rest:($summary.mandate_rest // null),
+         idle_since:($summary.idle_since // null),summary_generated_epoch:($summary.generated_epoch // null),
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}' >> "$records_file" || return 1
@@ -2274,7 +2292,10 @@ EOF
     --argjson total "$total" \
     --argjson shown "$shown" \
     --argjson truncated "$truncated" \
-    '{registry:$registry[0],records:.,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}' \
+    '($registry[0].records // [] | map({key:.id, value:(.posture // "routed")}) | from_entries) as $postures
+     | {registry:$registry[0],
+        records:map(. + {posture:($postures[.id] // "routed")}),
+        total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}' \
     "$records_file" > "$output_file"
 }
 

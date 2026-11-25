@@ -298,6 +298,13 @@ block_stop() {
       printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
       printf '●  %s registered custom check(s), but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_CHECKS" "$FM_SUP_BEACON_DESC"
+    elif [ "$FM_SUP_MANDATE" = true ]; then
+      printf '●  This home has standing work (posture: %s) with nothing under way, and no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_MANDATE_POSTURE" "$FM_SUP_BEACON_DESC"
+      printf '●  Start the next item in your charter, or do exactly one of these and say which in your parent channel:\n'
+      printf '●  (a) hold a captain question for the decision that blocks you;\n'
+      printf '●  (b) declare a dated rest: bin/fm-secondmate-rest.sh --until <YYYY-MM-DDTHH:MMZ> --reason "<why>";\n'
+      printf '●  (c) say that your charter is complete and ask main to retire or re-scope you.\n'
+      printf '●  Otherwise re-arm the watcher so it can wake you for the standing work.\n'
     else
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
