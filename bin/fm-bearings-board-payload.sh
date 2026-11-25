@@ -50,8 +50,10 @@
 #     key, or a shared PR/MR URL), and it is dropped when no such card exists;
 #   - an unkeyed status decision whose text names, as a whole word, the task id
 #     of a captain hold in the same home announces that hold, so it is dropped
-#     and the hold card stays the one card for that call; so is a keyed status
-#     decision whose task is that captain-held task, so the call shows once.
+#     and the hold card stays the one card for that call; so is a main worker's
+#     keyed status decision whose task is a main captain-held task, as
+#     bin/fm-captain-calls.sh skips it. A second mate's keyed decision on a task
+#     its home holds is its own call and keeps its own card.
 #
 # Mapping (snapshot field -> board section):
 #   decisions_open  -> captains_call: one `decision` card per captain-held task id,
@@ -128,7 +130,8 @@
 #                      asking home: the task its decision key names, else a given title
 #                      that is not just the task or home, else that same asking
 #                      sentence outside its own options (a choice never titles
-#                      it), prefixed `<home>: ` for a secondmate. A status row whose
+#                      it). Like the terminal board, the title names no home: a
+#                      leading `<home>: ` the text carries is dropped. A status row whose
 #                      decision key names a captain-held task in the same home is the
 #                      same question: it adds no card or waiting row of its own, and an
 #                      asked hold card merges its text into `about` and its
@@ -645,7 +648,9 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                | (option_parse) as $p | if $p == null then . else $p.lead + " " + $p.tail end
                | ask_sentence | short_text) | nz(null))
           // (if $k != "default" then $k else $d.key end) ) as $t
-      | if $owner != "(main)" and ($t | startswith($owner + ": ") | not) then $owner + ": " + $t else $t end;
+      # The title names no home, as on the terminal board: a text that opens
+      # with its home name ("intake: ...") drops it.
+      | if $owner != "(main)" and ($t | startswith($owner + ": ")) then ($t | ltrimstr($owner + ": ") | nz($t)) else $t end;
     [ $held[] | if (.source // "") == "status" then .title_full = status_title(.) else . end ] as $held
   # A status line that only announces a live page or ready PR asks nothing: its
   # link folds into the card for the same task or PR/MR (below), and the line
@@ -690,13 +695,14 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
            and ([$s.reason_full, $s.reason, $s.question] | map(strings) | join(" ")
                 | test("(^|[^A-Za-z0-9_-])" + ($id | gsub("(?<c>[^A-Za-z0-9_-])"; "\\\(.c)"))
                        + "($|[^A-Za-z0-9_-])")));
-    # A keyed status decision of a task that is itself captain-held in the same
-    # home asks the call of that hold under another key: it is dropped, not a second
-    # card, and the hold card stays as it is.
+    # A keyed status decision of a main worker on a task that is itself captain-held
+    # in main asks the call of that hold under another key: it is dropped, not a
+    # second card, as bin/fm-captain-calls.sh skips it. A keyed decision of a second mate
+    # on a task its home holds is its own call and keeps its card.
     def on_held_task($s; $h):
       ($s.source // "") == "status" and ($h.verb // "") == "captain-hold"
       and (($s.decision_key // "default") != "default")
-      and (($s.owner // "(main)") == ($h.owner // "(main)"))
+      and (($s.owner // "(main)") == "(main)") and (($h.owner // "(main)") == "(main)")
       and ((($h.id // "") | split("/") | last) as $id | $id != "" and ($s.task // "") == $id);
     ( [ $asked[] | select((.verb // "") == "captain-hold") ] ) as $asked_holds
   | ( [ $held[] | select(. as $r | any($asked_holds[]; same_question($r; .) or names_hold($r; .) or on_held_task($r; .)))
@@ -995,7 +1001,7 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" --argjson prio "$P
                           and ($paged | gsub("[[:space:]]+"; " ") | ascii_downcase | startswith($stem)))) as $points
                    | { key, type, repo, context,
                        title: (if $points and ($subject | length) > 0 and ($subject | length) <= 120
-                               then (if $owner != "(main)" and ($t | startswith($owner + ": ")) then $owner + ": " else "" end) + $subject
+                               then $subject
                                else $t end),
                        options: [], allow_freeform: false, off_board: $off }
                      + with_entries(select(.key == "free_text" or .key == "no_link" or .key == "from_status"))
