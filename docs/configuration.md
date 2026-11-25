@@ -1476,6 +1476,21 @@ Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled char
 
 The seeded home's `data/charter.md` owns the standard secondmate lifecycle and escalation contract; the route file points to it through the existing `home:` field instead of adding another pointer.
 
+### Secondmate posture
+
+A route may carry an optional `posture:` field just before `added`, and a route without one is `routed`.
+The posture says how the secondmate keeps its work moving between routed tasks:
+
+- `routed` acts only on tasks the main firstmate routes to it, and idles otherwise.
+- `drive` treats its charter as a standing mandate and keeps moving the work in its scope forward; it may end a turn only under the rest rule its charter states.
+- `duty` reacts to the named external events its charter describes, and `duty offered-item-taken` also has its home's watcher wake it to hold a fresh offer card when an offered item is taken.
+- `scheduled <cadence>` runs its charter's cycle each time that cadence comes due.
+
+Any other value makes the route malformed, and [`bin/fm-secondmate-registry-lib.sh`](../bin/fm-secondmate-registry-lib.sh) owns the exact grammar.
+The seed writes the posture into the home's `config/secondmate-posture` and the charter's continuation text; set `FM_SECONDMATE_POSTURE` on the seed or on `fm-brief.sh --secondmate` to choose it, and a reseed without it keeps the registered posture.
+A registry change reaches a live local home as `config/secondmate-posture` through the inherited local-material push, which nudges that home to reread it.
+A remote home does not receive `config/secondmate-posture` yet: the remote seed renders `FM_SECONDMATE_POSTURE` into the charter text only, and the push does not reach a remote home, so a remote mate runs as `routed` for every check that reads that file.
+
 ### Identity markers and upgrades
 
 Each seed writes an `.fm-secondmate-home` identity marker at the home root, alongside a durable `.fm-secondmate-parent` record of the home's route to its parent (see "Provision a route" in [`docs/remote-secondmates.md`](remote-secondmates.md)).
