@@ -1257,13 +1257,13 @@ test_build_refuses_a_nondecision_reconcile_value() {
 # build's `cards_to_fix` and the home's state/board-cards-to-fix record with its
 # owning task, key and problem, while every other card builds. One bad card
 # never stops the board.
-expect_flagged_build() {  # <home> <data> <key> <field> <what>
-  local out rc
+expect_flagged_build() {  # <home> <data> <key> <field> <what> [<problem-prefix>]
+  local out rc want=${6:-missing $4}
   set +e; out=$(run_board "$1" build "$2" 2>&1); rc=$?; set -e
   [ "$rc" -eq 0 ] || fail "$5: one card that does not state its decision stopped the whole board: $out"
-  assert_contains "$out" "undecided-card: $3: missing $4" "$5: stderr did not name the card and its missing field: $out"
+  assert_contains "$out" "undecided-card: $3: $want" "$5: stderr did not name the card and its missing field: $out"
   assert_contains "$out" "held back Captain's Call cards with no explicit decision" "$5: the build did not report the held-back card: $out"
-  extract_payload "$1/.lavish/bearings-board.html" | jq -e --arg k "$3" --arg f "missing $4" '
+  extract_payload "$1/.lavish/bearings-board.html" | jq -e --arg k "$3" --arg f "$want" '
     ([.captains_call[] | select(.key == $k)] == [])
     and ([.captains_call[] | has("problem")] | any | not)
     and ([.cards_to_fix[] | select(.key == $k) | .problem | strings | startswith($f)] == [true])
@@ -1271,7 +1271,7 @@ expect_flagged_build() {  # <home> <data> <key> <field> <what>
     and ([.cards_to_fix[] | select(.key != $k)] == [])
     and (.captains_call | length) > 0
   ' >/dev/null || fail "$5: the board did not hold back that card alone: $(extract_payload "$1/.lavish/bearings-board.html" | jq -c '{call: [.captains_call[] | {key, problem}], fix: .cards_to_fix}')"
-  awk -F '\t' -v k="$3" -v f="missing $4" '$2 == k && index($3, f) == 1 { n++ } END { exit !(n == 1 && NR == 1) }' \
+  awk -F '\t' -v k="$3" -v f="$want" '$2 == k && index($3, f) == 1 { n++ } END { exit !(n == 1 && NR == 1) }' \
     "$1/state/board-cards-to-fix" \
     || fail "$5: the home's cards-to-fix record does not name that card alone: $(cat "$1/state/board-cards-to-fix" 2>&1)"
 }
@@ -1407,6 +1407,48 @@ test_build_reads_a_question_anywhere_in_the_reason() {
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   expect_flagged_build "$home" "$data" cd-636-update-decisions question "a reason with no question anywhere"
   pass "the board reads a question anywhere in the reason and still holds back a reason that asks nothing"
+}
+
+# The cd-636 card packed its four calls into one heading question: it is held
+# back. The same calls as options under one heading question build, and so
+# does a reason that lists numbered calls in its body under that question.
+test_build_flags_a_heading_that_packs_several_calls() {
+  local home data out
+  home=$(make_home heading-calls)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"cd-636-update-decisions","type":"decision","repo":"cd",
+    "title":"cd 636 update decisions",
+    "question":"Do you accept all four update recommendations: (1) keep the cache? (2) drop the flag? (3) pin the image? (4) split the job?",
+    "context":{"task":"cd-636-update-decisions","reason":"Four update calls are ready."},
+    "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}],"no_link":true}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" cd-636-update-decisions question "a heading with four numbered calls" \
+    "heading carries several calls (it asks a numbered list of 4 calls"
+
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"cd-636-update-decisions","type":"decision","repo":"cd",
+    "title":"cd 636 update decisions",
+    "question":"Do you keep the cache? Do you drop the flag?",
+    "context":{"task":"cd-636-update-decisions","reason":"Two update calls are ready."},
+    "options":[{"value":"yes","label":"Yes"},{"value":"no","label":"No"}],"no_link":true}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" cd-636-update-decisions question "a heading with two questions" \
+    "heading carries several calls (it asks 2 questions"
+
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"cd-636-update-decisions","type":"decision","repo":"cd",
+    "title":"cd 636 update decisions",
+    "question":"Which update recommendations do you accept (see https://example.com/r?id=636)?",
+    "about":"1) Keep the cache. 2) Drop the flag. 3) Pin the image. 4) Split the job.",
+    "context":{"task":"cd-636-update-decisions","reason":"Four calls: 1) Keep the cache. 2) Drop the flag. 3) Pin the image. 4) Split the job. Which do you accept?"},
+    "options":[{"value":"all","label":"All four"},{"value":"cache","label":"Keep the cache"},
+               {"value":"flag","label":"Drop the flag"},{"value":"image","label":"Pin the image"},
+               {"value":"job","label":"Split the job"}],"no_link":true}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "one heading question with its calls as options did not build: $out"
+  assert_not_contains "$out" "undecided-card: cd-636-update-decisions" "one heading question with its calls as options was held back: $out"
+  pass "the board holds back a heading that packs several calls, not one question with its calls as options or body"
 }
 
 # A card whose reason lists two or more "Option x:" marks but which offers no
@@ -1844,6 +1886,7 @@ test_a_page_its_task_status_names_links_the_hold_card
 test_a_card_that_names_a_page_title_links_that_page
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
 test_build_reads_a_question_anywhere_in_the_reason
+test_build_flags_a_heading_that_packs_several_calls
 test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_a_refusal_names_the_first_failing_item_and_its_fields
