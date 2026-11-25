@@ -32,6 +32,9 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   Set FM_SECONDMATE_POSTURE='<routed|drive|duty [offered-item-taken]|scheduled <cadence>>' to write that
+#   continuation posture's work-model and definition-of-done text; unset means
+#   routed, whose text is the idle-by-default contract.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -196,6 +199,8 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -555,6 +560,88 @@ else
 fi
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
+# Continuation posture (docs/configuration.md "Secondmate posture" owns the
+# values): routed keeps the idle-by-default text word for word; drive, duty, and
+# scheduled replace only the work-model and continuation sentences.
+SECONDMATE_POSTURE=$(secondmate_posture_normalize "${FM_SECONDMATE_POSTURE:-routed}") || {
+  echo "error: FM_SECONDMATE_POSTURE must be routed, drive, duty, duty offered-item-taken, or scheduled <cadence>; got: ${FM_SECONDMATE_POSTURE:-}" >&2
+  exit 1
+}
+SECONDMATE_RECONCILE="On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home."
+case "$SECONDMATE_POSTURE" in
+  routed)
+    IFS= read -r -d '' SECONDMATE_WORK_MODEL <<'POSTURE' || true
+You do not generate your own work.
+Act only on tasks the main firstmate routes to you.
+Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+POSTURE
+    SECONDMATE_WORK_MODEL=${SECONDMATE_WORK_MODEL%$'\n'}
+    IFS= read -r -d '' SECONDMATE_CONTINUATION <<'POSTURE' || true
+When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
+An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
+POSTURE
+    SECONDMATE_CONTINUATION=${SECONDMATE_CONTINUATION%$'\n'}
+    ;;
+  drive)
+    IFS= read -r -d '' SECONDMATE_WORK_MODEL <<'POSTURE' || true
+Your continuation posture is drive: the charter above is a standing mandate.
+It is your assigned work, permanently, so moving the work in your routing scope forward never needs a further routed task; tasks the main firstmate routes to you join that work.
+Work only inside your charter's projects and routing scope.
+Never start a survey, audit, or "find improvements" sweep outside that scope; when you cannot continue without new direction, ask for it under the rest rule below rather than inventing one.
+POSTURE
+    SECONDMATE_WORK_MODEL=${SECONDMATE_WORK_MODEL%$'\n'}
+    SECONDMATE_RECONCILE="On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home and reconcile the work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home."
+    IFS= read -r -d '' SECONDMATE_CONTINUATION <<'POSTURE' || true
+After that reconciliation, resume the standing mandate at once: start every ready queued item, and when your last worker lands, carry straight on to the next piece of work in the same turn.
+Rest rule: end a turn only while a worker is in flight, a captain question is open (a `needs-decision` line or a captain hold), a backlog item is held with a date, or a dated rest is active; an empty queue alone is never a valid rest.
+When nothing can start, do one of these before you stop:
+(a) start the next ready item, or file and start the next issue inside your routing scope;
+(b) append `needs-decision [key=<your-id>-direction] [at=<epoch>]: <question>?` with lettered options, recommended option first, when the next direction is a captain call;
+(c) hold the specific blocked item with a date: `bin/fm-tasks-axi.sh hold <item> --reason "<what it waits on>" --kind external --until <YYYY-MM-DD>`.
+A prose `paused:` line alone does not satisfy the rest rule, because no script can check it.
+When the main firstmate asks you to wind down, run `bin/fm-secondmate-rest.sh --until <YYYY-MM-DDTHH:MMZ> --reason "<why>"` in this home; it records the dated rest and reports it to the parent channel for you.
+After a wind-down rest expires or the session restarts, resume the mandate in the same turn.
+POSTURE
+    SECONDMATE_CONTINUATION=${SECONDMATE_CONTINUATION%$'\n'}
+    SECONDMATE_CONTINUATION=${SECONDMATE_CONTINUATION//<your-id>/$ID}
+    ;;
+  duty)
+    IFS= read -r -d '' SECONDMATE_WORK_MODEL <<'POSTURE' || true
+Your continuation posture is duty: you react to the named external events your charter describes, through the durable checks recorded in this home, and to tasks the main firstmate routes to you.
+Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+POSTURE
+    SECONDMATE_WORK_MODEL=${SECONDMATE_WORK_MODEL%$'\n'}
+    IFS= read -r -d '' SECONDMATE_CONTINUATION <<'POSTURE' || true
+When no event or routed task is waiting after that reconciliation, go idle and wait silently: your event checks wake you when the next event arrives.
+An empty queue is a healthy resting state between events, not a cue to invent work.
+POSTURE
+    SECONDMATE_CONTINUATION=${SECONDMATE_CONTINUATION%$'\n'}
+    ;;
+  duty\ offered-item-taken)
+    IFS= read -r -d '' SECONDMATE_WORK_MODEL <<'POSTURE' || true
+Your continuation posture is duty with the trigger offered-item-taken: you keep one open offer card, a captain-held task in this home's backlog whose `--option` lines are the ranked items you offer, and you act on tasks the main firstmate routes to you.
+Offering is your whole job on that card: never dispatch, start, or claim an offered item yourself.
+Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+POSTURE
+    SECONDMATE_WORK_MODEL=${SECONDMATE_WORK_MODEL%$'\n'}
+    IFS= read -r -d '' SECONDMATE_CONTINUATION <<'POSTURE' || true
+This home's watcher wakes you with a `check: offered-item-taken` line when a captain-held task carrying options leaves the held state (answered, released, or closed), or when no offer card is open and no dated rest is active.
+On that wake, run the offer cycle your charter describes, rank the next items, and hold one fresh offer card with `bin/fm-captain-hold.sh hold <item> --reason "<question>" --option "<item>"...`.
+Between those wakes, go idle and wait silently; an empty queue is a healthy resting state, not a cue to invent work.
+POSTURE
+    SECONDMATE_CONTINUATION=${SECONDMATE_CONTINUATION%$'\n'}
+    ;;
+  scheduled\ *)
+    SECONDMATE_CADENCE=${SECONDMATE_POSTURE#scheduled }
+    SECONDMATE_WORK_MODEL="Your continuation posture is scheduled $SECONDMATE_CADENCE: you run the cycle your charter describes each time that cadence comes due, and you act on tasks the main firstmate routes to you.
+Never start a survey, audit, or \"find improvements\" sweep outside that cycle; that is not your job and it is unwanted."
+    IFS= read -r -d '' SECONDMATE_CONTINUATION <<'POSTURE' || true
+When the current cycle is finished and no routed task is waiting after that reconciliation, go idle and wait silently until the next cycle comes due; its trigger wakes you.
+An empty queue between cycles is a healthy resting state, not a cue to invent work.
+POSTURE
+    SECONDMATE_CONTINUATION=${SECONDMATE_CONTINUATION%$'\n'}
+    ;;
+esac
 if [ "$NO_PROJECTS" -eq 1 ]; then
   PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crews take pooled worktrees of that firstmate repo."
   PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crews take pooled worktrees of that repo."
@@ -579,9 +666,7 @@ You are in an isolated firstmate home. The local \`AGENTS.md\` is your job descr
 $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
-You do not generate your own work.
-Act only on tasks the main firstmate routes to you.
-Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+$SECONDMATE_WORK_MODEL
 
 # The captain and the parent channel
 Nobody reads this chat: the captain and the main firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.
@@ -626,9 +711,8 @@ Routine internal supervision, heartbeats, retries, and crewmate churn stay insid
 
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
-On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
-When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
-An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
+$SECONDMATE_RECONCILE
+$SECONDMATE_CONTINUATION
 If this charter cannot be carried out, append \`blocked [at=<epoch>]: {why}\` or \`failed [at=<epoch>]: {why}\` to the main status file and stop.
 EOF
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then

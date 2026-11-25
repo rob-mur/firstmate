@@ -11,7 +11,7 @@ metadata:
 
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and a secondmate continues as its registered posture says (`routed`, the default, is idle by default).
 
 ## References
 
@@ -30,7 +30,7 @@ Load a reference with `cat` through Bash (for example `cat .agents/skills/second
 - `local-only` projects and items stay with the main firstmate; secondmate project lists hold `no-mistakes` and `direct-PR` projects only.
 - A remote seed creates nothing in this home beyond the route, the charter brief, and a launch record; never clone a project into `projects/` for it.
 - SSH exit 255 means unknown completion: preserve the route and never launch a local replacement for a remote mate.
-- The main firstmate reconciles only direct reports and never reconstructs a secondmate's tree; a secondmate's recovery reconciles only work already its own and then idles.
+- The main firstmate reconciles only direct reports and never reconstructs a secondmate's tree; a secondmate's recovery reconciles only work already its own and then continues as its posture says.
 - An empty queue never triggers retirement; retire only on an explicit captain or main-firstmate decision, and never use `--force` unless the captain explicitly said to discard the work.
 
 ## Routing table
@@ -38,13 +38,13 @@ Load a reference with `cat` through Bash (for example `cat .agents/skills/second
 `data/secondmates.md` has one parser-compatible line per persistent second mate.
 A local route uses:
 ```markdown
-- <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
+- <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; [posture: <posture>; ]added <date>)
 ```
 
 A whole-home remote route uses:
 
 ```markdown
-- <id> - <one-sentence charter summary> (host: <ssh-alias>; root: <absolute-remote-code-root>; home: <absolute-remote-home>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
+- <id> - <one-sentence charter summary> (host: <ssh-alias>; root: <absolute-remote-code-root>; home: <absolute-remote-home>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; [posture: <posture>; ]added <date>)
 ```
 
 Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
@@ -56,4 +56,5 @@ This release places whole secondmate homes remotely and never individual workers
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md) owns current operator setup and transport behavior.
 The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts, so point to that charter rather than restating those contracts in the registry entry.
 The `scope:` field is used during intake.
+The optional `posture:` field sets how the mate continues between routed tasks, and a route without it is `routed`; [`docs/configuration.md`](../../../docs/configuration.md#secondmate-posture) owns the values and how a change reaches the home.
 The `projects:` field is a non-exclusive clone list, not ownership.
