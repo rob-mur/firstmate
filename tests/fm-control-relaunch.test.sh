@@ -1478,6 +1478,113 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
 }
 
+# One watcher liveness episode against this case's secondmate, run exactly as
+# bin/fm-watch.sh's tick drives the shared library: take the per-mate liveness
+# lock or skip, probe, and relaunch a relaunchable endpoint.
+run_liveness_episode() {  # <case-dir> <id>
+  local dir=$1 id=$2
+  mkdir -p "$dir/user-home"
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_ROOT="$ROOT" \
+    STATE="$dir/home/state" \
+    bash -c '
+      . "$1/bin/fm-secondmate-liveness-lib.sh"
+      fm_secondmate_liveness_lock "$2" || { echo "episode=skipped-busy"; exit 0; }
+      fm_secondmate_liveness_probe "$3" "$2" poll
+      printf "probe=%s\n" "$FM_SM_LIVE_STATUS"
+      if [ "$FM_SM_LIVE_STATUS" = relaunchable ]; then
+        rc=0
+        fm_secondmate_liveness_relaunch "$3" "$2" 5 || rc=$?
+        printf "relaunch_rc=%s\n%s\n" "$rc" "$FM_SM_LIVE_OUT"
+      fi
+      fm_secondmate_liveness_unlock "$2"
+    ' _ "$ROOT" "$id" "$dir/home/state/$id.meta" 2>&1
+}
+
+# Regression: a secondmate relaunch stops the agent and holds the spawn lock
+# until the replacement is up. Before the relaunch took the per-mate liveness
+# lock, a watcher tick in that window read the endpoint as dead and started its
+# own relaunch, which the held spawn lock refused, leaving the restart outcome
+# unknown. The tick must now skip the mate while the relaunch runs, and a later
+# tick must still be able to relaunch a mate that really died.
+test_secondmate_relaunch_holds_the_liveness_lock_against_watcher_relaunch() {
+  local dir home control_pid rc out i=0 prepare release
+  dir=$(new_case smrace smr)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/smr"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/smr/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'smr\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-smr"
+    echo "endpoint_task_id=smr"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/smr.meta"
+  printf '%s\n' "fm-smr" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+
+  prepare="$dir/launch-paused"
+  release="$dir/launch-release"
+  FM_FAKE_TRACE_PREPARE="$prepare" FM_FAKE_TRACE_RELEASE="$release" \
+    run_control "$dir" smr relaunch > "$dir/control.out" &
+  control_pid=$!
+  while [ ! -e "$prepare" ] && [ "$i" -lt 1000 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$prepare" ] || {
+    : > "$release"
+    wait "$control_pid" 2>/dev/null || true
+    fail "the secondmate relaunch never reached its launch"$'\n'"$(cat "$dir/control.out")"
+  }
+  # Mid-relaunch: the old agent is stopped and the launch owner holds the
+  # spawn lock, so the endpoint reads dead to any probe.
+  [ "$(cat "$dir/fake/command")" = zsh ] || {
+    : > "$release"
+    wait "$control_pid" 2>/dev/null || true
+    fail "the relaunch was paused before the old agent stopped"
+  }
+  out=$(run_liveness_episode "$dir" smr)
+  : > "$release"
+  wait "$control_pid"; rc=$?
+  assert_not_contains "$out" "another spawn is already creating task" \
+    "a watcher tick raced the relaunch into the held spawn lock"
+  assert_contains "$out" "episode=skipped-busy" \
+    "a watcher tick probed a secondmate mid-relaunch instead of skipping it"$'\n'"$out"
+  expect_code 0 "$rc" "the secondmate relaunch should complete"$'\n'"$(cat "$dir/control.out")"
+  assert_contains "$(cat "$dir/control.out")" "relaunched smr" "the relaunch did not report its replacement"
+  [ ! -e "$home/state/.secondmate-liveness-smr.lock" ] && [ ! -L "$home/state/.secondmate-liveness-smr.lock" ] \
+    || fail "the relaunch left the secondmate liveness lock behind"
+  [ ! -e "$home/state/.spawn-smr.lock" ] && [ ! -L "$home/state/.spawn-smr.lock" ] \
+    || fail "the relaunch left the spawn lock behind"
+
+  # The mate later dies for real and its window is gone: the watcher's
+  # automatic relaunch proceeds.
+  : > "$dir/fake/windows"
+  out=$(run_liveness_episode "$dir" smr)
+  assert_contains "$out" "probe=relaunchable" "a dead mate was not offered for relaunch"$'\n'"$out"
+  assert_contains "$out" "relaunch_rc=0" "the automatic relaunch did not proceed"$'\n'"$out"
+  assert_not_contains "$out" "another spawn is already creating task" \
+    "the automatic relaunch was refused by a spawn lock left by the earlier relaunch"
+  grep -q 'relaunched' "$home/state/.secondmate-relaunch-smr" \
+    || fail "the automatic relaunch was not recorded as relaunched"$'\n'"$(cat "$home/state/.secondmate-relaunch-smr" 2>/dev/null)"
+  pass "fm-control relaunch: a secondmate relaunch holds the liveness lock, and a later automatic relaunch proceeds"
+}
+
 # The relaunch half of the opt-in scope: a pin file that declares no
 # "mate <id>:" line is read exactly as it was before that grammar existed, so a
 # second default line and a fourth token must not stop the relaunch. The mate
@@ -3406,6 +3513,7 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_secondmate_relaunch_holds_the_liveness_lock_against_watcher_relaunch
 test_secondmate_claude_relaunch_keeps_local_settings
 test_secondmate_mcp_pin_follows_relaunch
 test_secondmate_mcp_pin_refuses_before_stop
