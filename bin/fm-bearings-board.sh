@@ -505,12 +505,17 @@ payload_errors() {  # <data.json>
 # Print one `<key>: <problem>` line per Captain's Call card that does
 # not state its decision (see EVERY CARD STATES ITS DECISION above;
 # the check is bin/fm-bearings-card-check-lib.sh's, shared with the watcher).
-# Only the build reads its cards' PR/MR links live, so a card naming one that
-# already merged or closed is held back here and not by the watcher.
+# Only the build reads its cards' PR/MR links live and its linked pages' age,
+# so a card naming one that already merged or closed, or a page not rebuilt
+# since its worker last reported, is held back here and not by the watcher.
 undecided_cards() {  # <data.json>
-  local states rc=0
+  local states links pages rc=0
   states=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-links.XXXXXX") || return 1
-  fm_bearings_card_link_states "$1" > "$states" || echo '{}' > "$states"
+  links=$(fm_bearings_card_link_states "$1") && [ -n "$links" ] || links='{}'
+  pages=$(fm_bearings_card_page_states "$1" "$STATE" "$FM_HOME/.lavish/pages") && [ -n "$pages" ] || pages='{}'
+  # shellcheck disable=SC2016  # jq program text.
+  jq -n -c --argjson l "$links" --argjson p "$pages" '$l + $p' > "$states" 2>/dev/null \
+    || echo '{}' > "$states"
   fm_bearings_undecided_cards "$1" "$states" || rc=$?
   rm -f -- "$states"
   return "$rc"
