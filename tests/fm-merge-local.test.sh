@@ -309,8 +309,9 @@ SH
 }
 
 # A project that declares an after-merge action has it run right after the
-# landing; a refused action leaves the landing in place but is reported and
-# recorded as failed, never swallowed.
+# landing, and its note is held as exactly one captain card; a refused action
+# leaves the landing in place but is reported and recorded as failed, never
+# swallowed, and holds no card.
 test_landing_runs_the_declared_after_merge_action() {
   local up dot out err rc
   make_case after-merge
@@ -320,12 +321,20 @@ test_landing_runs_the_declared_after_merge_action() {
   git -C "$up" commit -q --allow-empty -m landed
   printf '## Projects\n- project [local-only after-merge=ff:%s@origin/main after-merge-note=run%%20snrs] - fixture (added 2026-01-01)\n' \
     "$dot" > "$HOME_DIR/data/projects.md"
+  fm_test_tasks_toml "$HOME_DIR/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
   record_done || fail 'done head was not accepted'
   out=$(land 2>&1) || fail "landing with an after-merge action failed: $out"
   [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'landing did not use X'
   [ "$(git -C "$dot" rev-parse HEAD)" = "$(git -C "$up" rev-parse HEAD)" ] || fail 'the declared checkout was not fast-forwarded'
   assert_contains "$out" 'relay to the captain: run snrs' 'the landing did not print the note for the captain'
   grep -qx 'after_merge=done' "$META" || fail 'the after-merge result was not recorded done'
+  [ "$(grep -c 'local-task-after-merge' "$HOME_DIR/data/backlog.md")" = 1 ] || fail 'the note did not leave exactly one card'
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" open local-task-after-merge || fail 'the note card is not held for the captain'
+  assert_contains "$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" show local-task-after-merge)" \
+    'Run snrs to put the project change live' 'the note card does not read as the captain action'
+  land >/dev/null 2>&1 || true
+  [ "$(grep -c 'local-task-after-merge' "$HOME_DIR/data/backlog.md")" = 1 ] || fail 'a repeated landing added a second card'
 
   make_case after-merge-dirty
   up="$CASE/upstream" dot="$CASE/dot"
@@ -335,6 +344,8 @@ test_landing_runs_the_declared_after_merge_action() {
   printf 'local edit\n' >> "$dot/README.md"
   printf '## Projects\n- project [local-only after-merge=ff:%s@origin/main] - fixture (added 2026-01-01)\n' \
     "$dot" > "$HOME_DIR/data/projects.md"
+  fm_test_tasks_toml "$HOME_DIR/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
   record_done || fail 'done head was not accepted'
   rc=0
   err=$(land 2>&1 >/dev/null) || rc=$?
@@ -342,7 +353,8 @@ test_landing_runs_the_declared_after_merge_action() {
   [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'the landing itself did not happen'
   assert_contains "$err" 'actionable: landed fm/local-task but its project after-merge action did not complete' 'the refused action was not reported'
   grep -qx 'after_merge=failed' "$META" || fail 'the refused action was not recorded as failed'
-  pass 'landing runs the declared after-merge action and reports a refused one'
+  ! grep -q 'after-merge' "$HOME_DIR/data/backlog.md" || fail 'a landing without a note held a card'
+  pass 'landing runs the declared after-merge action, holds its note as one card, and reports a refused one'
 }
 
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
