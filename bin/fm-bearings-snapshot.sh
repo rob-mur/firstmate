@@ -123,6 +123,12 @@
 # gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
 # chat cannot claim an empty fleet while main current state is broken.
 #
+# A Done work item whose final status names a step only the captain can do,
+# with no open captain hold carrying it (the canonical snapshot's
+# captain_followups_uncarded), is disclosed as an action-free
+# (captain-followup-<id>) gate row titled "captain follow-up with no card",
+# reserved ahead of the gate bound so the step never stays chat-only.
+#
 # An open away-return catch-up is disclosed the same way, as a single action-free
 # (return-catchup) gate row naming the blockers left to clear or the reason the
 # catch-up was retained. Reporting is not ordinary captain work, so the gate never
@@ -905,6 +911,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          owner:"(main)",
          filed:null}]
      else [] end) as $return_catchup_gate
+  | ([ (.captain_followups_uncarded // [])[]
+       | {id:("(captain-followup-" + .id + ")"),
+          title:("captain follow-up with no card: " + .id | trunc(60)),
+          blocked_by:"-",
+          reason:(((.step // "a captain-only step") | trunc(160))
+                  + " (no open captain hold carries it)"),
+          owner:"(main)",
+          filed:null} ]) as $followup_gates
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
@@ -997,6 +1011,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: ($return_catchup_gate
+              + $followup_gates
               + $gates_shown),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)

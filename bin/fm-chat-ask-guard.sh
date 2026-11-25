@@ -54,6 +54,13 @@
 #     never, none, neither, without, anything, everything, whatever, n't
 #     ("nothing needs your decision", "anything that needs you waits").
 #     Hypothetical: I'll, I will, if ("I'll tell you if you need to sign in").
+#   - A bare imperative step left for the captain is an ask even with no
+#     request cue or question mark. Each sentence is also split at ";" and ":"
+#     with inline code kept, and a clause is an ask when it starts with run,
+#     set, activate, enable, log in, sign in, approve, merge, or install (not
+#     followed by a past-tense or state verb such as "run is green" or "merge
+#     failed"), or says "steps are in" or "to switch/turn it on" ("Next:
+#     `snrs` per host; activate on the work laptop").
 #
 # Covered: the ask passes when this turn ran a Bash command that holds a card
 # (fm-captain-hold.sh ... hold), or when the final message names an open

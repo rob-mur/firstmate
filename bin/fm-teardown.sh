@@ -41,6 +41,13 @@
 # lift the deferral (it authorizes discarding unlanded WORK, never the
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
+# A ship task whose newest done line names a step only the captain can do
+# ("next: captain runs ...", read by fm-classify-lib.sh's
+# status_captain_next_step) REFUSES unless an open captain hold carries it -
+# the task's own, or one whose gates or origin name the task
+# (bin/fm-captain-hold.sh `covered`). The refusal prints the exact hold command;
+# "cannot tell" refuses too, and --force does not lift it, because the step
+# would otherwise leave the record with the item and reach the captain nowhere.
 # A merged ship task whose project declares an after-merge action REFUSES until
 # bin/fm-after-merge.sh has recorded that action done; see the gate below.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
@@ -820,6 +827,30 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     *)
       echo "error: task $ID cannot be torn down because whether its backlog item is still held for the captain could not be read; fix that read and retry rather than risk closing a captain call with no recorded answer" >&2
       [ -z "$TEARDOWN_CAPTAIN_OPEN_OUT" ] || printf '%s\n' "$TEARDOWN_CAPTAIN_OPEN_OUT" >&2
+      exit 1
+      ;;
+  esac
+fi
+# A ship whose last done line leaves a step only the captain can do keeps its
+# record until an open captain hold carries that step (see the header): asked
+# here, before any destructive step, and --force never lifts it.
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] && [ "$TEARDOWN_META_KIND" = ship ] \
+  && TEARDOWN_CAPTAIN_STEP=$(status_captain_next_step "$STATE/$ID.status"); then
+  TEARDOWN_COVERED_STATUS=0
+  TEARDOWN_COVERED_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" covered "$ID" 2>&1) || TEARDOWN_COVERED_STATUS=$?
+  case "$TEARDOWN_COVERED_STATUS" in
+    0) ;;
+    1)
+      echo "error: task $ID cannot be torn down because its last done line leaves a step only the captain can do ($TEARDOWN_CAPTAIN_STEP) and no open captain hold carries it; nothing was changed. Hold it for the captain, then retry teardown:" >&2
+      printf '  %q hold %q --title %q --origin %q --reason %q\n' "$SCRIPT_DIR/fm-captain-hold.sh" "$ID-captain" \
+        "Captain follow-up: $ID" "$ID" "$TEARDOWN_CAPTAIN_STEP" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: task $ID cannot be torn down because its last done line leaves a step only the captain can do ($TEARDOWN_CAPTAIN_STEP) and whether an open captain hold carries it could not be read; fix that read and retry" >&2
+      [ -z "$TEARDOWN_COVERED_OUT" ] || printf '%s\n' "$TEARDOWN_COVERED_OUT" >&2
       exit 1
       ;;
   esac

@@ -167,8 +167,9 @@
 #                      reason the hold reason, prefixed `until <date>: ` while
 #                      `hold_until` is in the future, so every held second-mate
 #                      task names its wait;
-#                   -> charted: one row per other gate; `(main-inventory)` and
-#                      `(return-catchup)` become warning rows (kind warning, never
+#                   -> charted: one row per other gate; `(main-inventory)`,
+#                      `(return-catchup)`, and each `(captain-followup-<id>)`
+#                      become warning rows (kind warning, never
 #                      dispatchable), and a gate with neither blocker nor hold
 #                      reason is the only dispatchable row.
 #   secondmates, secondmate_reconcile
