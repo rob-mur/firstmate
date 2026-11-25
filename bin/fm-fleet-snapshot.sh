@@ -118,7 +118,10 @@
 #     when unrecorded), so a reader can tell when the hold was raised or re-held
 #     and which task carries it. A status-raised decisions_open row likewise
 #     carries its uncut text as question beside the bounded summary, so a
-#     question past the summary cut still reaches the parent board.
+#     question past the summary cut still reaches the parent board. For a local
+#     home, a status-raised row whose key the child's own status log has since
+#     resolved is dropped at read time, so a summary published before the
+#     resolution never keeps the call on the parent board.
 #     Both captain-hold row shapes also carry choices (the options, links,
 #     free_text, and no_link that bin/fm-captain-hold.sh recorded on the hold),
 #     answers (each recorded resolution's at, mode, and first paragraph of
@@ -1634,6 +1637,42 @@ summary_backfill_local_holds() {  # <summary-file> <home>
   return 0
 }
 
+# A local secondmate publishes its summary on its own cadence, so a decision its
+# child task raised can still be listed after the mate resolved its key. Each
+# status-raised decisions_open row is re-checked against the child's own status
+# log in that home with the same status_open_decisions fold the parent status
+# log uses, and a row whose key that fold no longer holds open is dropped from
+# the private selected copy (counts.decisions_open follows). A row whose log is
+# missing or unreadable stays as published; nothing is ever added.
+summary_drop_resolved_local_decisions() {  # <summary-file> <home>
+  local summary=$1 home=$2 ids id log open_json='{}' keys filled
+  ids=$(jq -r '[(.decisions_open // [])[] | select(.source == "status") | .id | strings]
+               | unique[]' "$summary" 2>/dev/null) || return 0
+  [ -n "$ids" ] || return 0
+  while IFS= read -r id; do
+    case "$id" in ''|.*|*/*) continue ;; esac
+    log="$home/state/$id.status"
+    [ -f "$log" ] && [ ! -L "$log" ] && [ -r "$log" ] || continue
+    summary_file_oversized "$log" && continue
+    keys=$(status_open_decisions "$log" | cut -f1 | jq -R . | jq -s -c .) || continue
+    open_json=$(jq -c --arg id "$id" --argjson keys "$keys" '. + {($id): $keys}' <<<"$open_json") || return 0
+  done <<<"$ids"
+  filled=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/.resolved-summary.XXXXXX") || return 0
+  if jq -c --argjson open "$open_json" '
+      (.decisions_open | length) as $before
+      | .decisions_open |= map(select(.source != "status" or $open[.id] == null
+                                      or ((.key // "default") as $k | $open[.id] | index($k)) != null))
+      | ($before - (.decisions_open | length)) as $dropped
+      | if $dropped > 0 and (.counts.decisions_open | type) == "number"
+        then .counts.decisions_open -= $dropped else . end
+    ' "$summary" > "$filled" 2>/dev/null && [ -s "$filled" ]; then
+    mv -f -- "$filled" "$summary" || rm -f -- "$filled"
+  else
+    rm -f -- "$filled"
+  fi
+  return 0
+}
+
 summary_file_oversized() {  # <file>
   local bytes
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
@@ -2209,7 +2248,10 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     fi
 
     if [ -z "$reason" ]; then
-      [ "$remote" = true ] || summary_backfill_local_holds "$summary_file" "$home"
+      if [ "$remote" != true ]; then
+        summary_backfill_local_holds "$summary_file" "$home"
+        summary_drop_resolved_local_decisions "$summary_file" "$home"
+      fi
       state=$(jq -r '.state' "$summary_file")
       reconciliation=$(parent_evidence_reconciliation_json "$summary_file" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
