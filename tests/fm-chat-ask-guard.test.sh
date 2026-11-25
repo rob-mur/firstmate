@@ -119,6 +119,20 @@ test_ask_blocks() {
   pass "a final message that asks the captain for something blocks once and names the hold command"
 }
 
+test_imperative_steps_block() {
+  expect block imperative-dns-steps "Welcome back. The DNS change merged overnight.
+
+To finish: run \`snrs\` on the desktop and the laptop; on the work laptop run \`sudo darwin-rebuild activate\`; set Private DNS on the phone by hand." "run \`snrs\` on the desktop and the laptop"
+  expect block imperative-dns-exact "run \`snrs\` on the desktop ...; set Private DNS on the phone by hand" "run \`snrs\` on the desktop"
+  expect block imperative-list-item "The rollout is merged.
+- install the new profile on the laptop
+- enable it in settings" "install the new profile"
+  expect block imperative-lead-in "PR 62 merged. The enablement steps are in its description." "steps are in"
+  expect silent imperative-status "I ran the tests; all pass."
+  expect silent imperative-noun-run "Run 42 failed on a flaky test, so I re-ran it and it passed."
+  pass "a bare imperative step for the captain blocks, including inline code; a plain status sentence passes"
+}
+
 test_answered_labels_pass() {
   local form
   form=$(printf '%s\n' \
@@ -305,6 +319,7 @@ test_tracked_stop_hook_is_synchronous_and_grok_inert() {
 
 fm_test_run \
   test_ask_blocks \
+  test_imperative_steps_block \
   test_answered_labels_pass \
   test_recap_passes \
   test_shipshape_passes \
