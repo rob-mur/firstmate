@@ -4582,6 +4582,15 @@ while :; do
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
   fi
+  # Keep an open bearings board current while no event kicks its refresher: a
+  # quiet fleet (a usage limit, every worker paused) has every event absorbed
+  # here, so no wake is queued and nothing else kicks it. --kick-due kicks only
+  # once the last look is old (bin/fm-board-refresh.sh owns when); no board
+  # costs one file test.
+  if [ -f "$FM_HOME/.lavish/bearings-board.html" ]; then
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_DATA_OVERRIDE=$DATA FM_CONFIG_OVERRIDE=$CONFIG \
+      "$SCRIPT_DIR/fm-board-refresh.sh" --kick-due >/dev/null 2>&1 || true
+  fi
   # Opt-in lane capacity facts: off costs one file test.
   if [ -e "$CONFIG/lane-capacity" ] && [ "$(age_of "$STATE/lane-capacity.json")" -ge 30 ]; then
     lane_capacity_publish_detached
