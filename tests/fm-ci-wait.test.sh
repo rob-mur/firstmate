@@ -52,8 +52,17 @@ case "$*" in
   "login list --output json") echo '[{"name":"fj","url":"https://forgejo.example"}]' ;;
   *"/pulls/5") echo '{"head":{"sha":"abc1234"}}' ;;
   *"/commits/abc1234/status") fixture fj-status ;;
-  *"/actions/runs/7/jobs") echo '[{"id":99,"name":"test"},{"id":98,"name":"lint"}]' ;;
+  *"/actions/runs?run_number=7") echo '{"total_count":1,"workflow_runs":[{"id":70,"index_in_repo":7}]}' ;;
+  *"/actions/runs?run_number=9") fixture fj-run ;;
+  *"/actions/runs?run_number="*) echo '{"total_count":0,"workflow_runs":[]}' ;;
+  *"/actions/runs?head_sha="*) a="$*"; a=${a##*head_sha=}; printf '%s\n' "${a%%&*}" >> "$FIX/head-shas"; fixture fj-runs ;;
+  *"/git/commits/abc1234") echo '{"sha":"abc1234000000000000000000000000000000000"}' ;;
+  *"/branches/main") fixture fj-branch ;;
+  *"/actions/runs/70/jobs") echo '[{"id":99,"name":"test","status":"failure"},{"id":98,"name":"lint","status":"success"}]' ;;
+  *"/actions/runs/90/jobs") echo '{"jobs":[{"id":91,"name":"build","status":"success"},{"id":92,"name":"publish","status":"failure"},{"id":93,"name":"notify","status":"cancelled"}]}' ;;
   *"/actions/jobs/99/logs") seq -f 'fj log %g' 1 20 ;;
+  *"/actions/jobs/92/logs") seq -f 'publish log %g' 1 20 ;;
+  *"/actions/jobs/"*"/logs") echo '{"message":"job has not been executed yet"}' ;;
   *) echo "unexpected tea $*" >&2; exit 9 ;;
 esac
 EOF
@@ -212,6 +221,77 @@ test_forgejo() {
   pass "fm-ci-wait: Forgejo reads the PR head's combined status through tea and tails the failed Actions job"
 }
 
+# fj_run <id> <index> <workflow> <status>: one Actions run as the runs API lists it.
+fj_run() {
+  printf '{"id":%s,"index_in_repo":%s,"workflow_id":"%s","status":"%s","html_url":"https://forgejo.example/o/r/actions/runs/%s"}' "$1" "$2" "$3" "$4" "$2"
+}
+
+test_forgejo_run_url() {
+  local fix url=https://forgejo.example/o/r/actions/runs/9
+  fix=$(new_fix fj-run-url)
+  echo "{\"total_count\":1,\"workflow_runs\":[$(fj_run 90 9 release.yml running)]}" > "$fix/fj-run.1"
+  echo "{\"total_count\":1,\"workflow_runs\":[$(fj_run 90 9 release.yml failure)]}" > "$fix/fj-run.2"
+  run_wait "$fix" --tail 2 "$url"
+  assert_equals 1 "$RC" "a failed Actions run must exit 1"
+  printf '%s\n' "$OUT" > "$fix/out"
+  assert_equals "failed: $url (1 of 1 checks failed)" "$(head -n 1 "$fix/out")" "the run verdict must name the run URL"
+  assert_grep "--- release.yml #9 $url" "$fix/out" "the failed run must be named by workflow and number"
+  assert_grep "--- job publish" "$fix/out" "the run's failed job must be named"
+  assert_grep "publish log 20" "$fix/out" "the failed job's log tail must be printed"
+  assert_no_grep "publish log 18" "$fix/out" "--tail must bound the run's job log"
+  assert_no_grep "job notify" "$fix/out" "a cancelled job that never ran must not be listed as a failed job"
+  assert_no_grep "message" "$fix/out" "an API error body must never print as a log"
+
+  fix=$(new_fix fj-run-pass)
+  echo "{\"total_count\":1,\"workflow_runs\":[$(fj_run 90 9 release.yml waiting)]}" > "$fix/fj-run.1"
+  echo "{\"total_count\":1,\"workflow_runs\":[$(fj_run 90 9 release.yml success)]}" > "$fix/fj-run.3"
+  run_wait "$fix" --timeout 30 "$url"
+  assert_equals 0 "$RC" "a succeeded Actions run must exit 0"
+  assert_equals "passed: $url (1 checks)" "$OUT" "the run must be waited for until it succeeds"
+
+  fix=$(new_fix fj-run-missing)
+  run_wait "$fix" --timeout 30 https://forgejo.example/o/r/actions/runs/404
+  assert_equals 4 "$RC" "a run number the repository does not have must be an error"
+  case $OUT in "error: https://forgejo.example/o/r/actions/runs/404: the CI state could not be read: no Actions run 404 in o/r"*) ;;
+    *) fail "a missing run must be reported (got '$OUT')" ;; esac
+  pass "fm-ci-wait: a Forgejo Actions run URL waits on that run and tails its failed jobs"
+}
+
+test_forgejo_run_ref() {
+  local fix repo=https://forgejo.example/o/r
+  fix=$(new_fix fj-run-sha)
+  echo '{"total_count":0,"workflow_runs":[]}' > "$fix/fj-runs.1"
+  echo "{\"total_count\":2,\"workflow_runs\":[$(fj_run 80 8 ci.yml success),$(fj_run 81 9 release.yml running)]}" > "$fix/fj-runs.2"
+  echo "{\"total_count\":2,\"workflow_runs\":[$(fj_run 80 8 ci.yml success),$(fj_run 81 9 release.yml skipped)]}" > "$fix/fj-runs.3"
+  run_wait "$fix" --timeout 30 --run abc1234 "$repo"
+  assert_equals 0 "$RC" "a commit whose runs all succeed or skip must exit 0"
+  assert_equals "passed: $repo@abc1234 (2 checks)" "$OUT" "the --run verdict must name the repository and ref"
+  assert_equals abc1234000000000000000000000000000000000 "$(sort -u "$fix/head-shas")" "a short sha must be resolved to the full sha the runs filter needs"
+
+  fix=$(new_fix fj-run-workflow)
+  echo "{\"total_count\":2,\"workflow_runs\":[$(fj_run 80 8 ci.yml failure),$(fj_run 81 9 release.yml running)]}" > "$fix/fj-runs.1"
+  run_wait "$fix" --timeout 2 --workflow release.yml --run abc1234 "$repo"
+  assert_equals 3 "$RC" "--workflow must ignore another workflow's failed run"
+  assert_equals "timed out: $repo@abc1234 (release.yml) after 2s (still pending: release.yml #9)" "$OUT" "the timeout must name the pending run"
+
+  fix=$(new_fix fj-run-branch)
+  echo '{"commit":{"id":"1111111111111111111111111111111111111111"}}' > "$fix/fj-branch.1"
+  echo '{"commit":{"id":"2222222222222222222222222222222222222222"}}' > "$fix/fj-branch.2"
+  echo '{"total_count":0,"workflow_runs":[]}' > "$fix/fj-runs.1"
+  echo "{\"total_count\":1,\"workflow_runs\":[$(fj_run 82 10 ci.yml success)]}" > "$fix/fj-runs.2"
+  run_wait "$fix" --timeout 30 --run main "$repo"
+  assert_equals 0 "$RC" "a branch's runs must be waited for"
+  assert_equals "$(printf '%s\n' 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222)" "$(cat "$fix/head-shas")" \
+    "a branch must be re-read on every poll so a push during the wait is followed"
+
+  fix=$(new_fix fj-run-none)
+  echo '{"total_count":0,"workflow_runs":[]}' > "$fix/fj-runs.1"
+  run_wait "$fix" --timeout 2 --run abc1234 "$repo"
+  assert_equals 3 "$RC" "a commit with no runs yet must time out, not pass"
+  assert_equals "timed out: $repo@abc1234 after 2s (no CI has reported yet)" "$OUT" "no runs must read as not started"
+  pass "fm-ci-wait: --run waits on a commit's or branch's Forgejo Actions runs, optionally one workflow"
+}
+
 test_gitlab_delegation() {
   local fix url=https://gitlab.example/g/p/-/merge_requests/3
   fix=$(new_fix gl)
@@ -241,6 +321,16 @@ test_usage() {
   assert_equals 2 "$RC" "an unsupported URL must be a usage error"
   run_wait "$TMP_ROOT" --timeout soon "$PR"
   assert_equals 2 "$RC" "a non-numeric timeout must be a usage error"
+  run_wait "$TMP_ROOT" --run main https://github.com/o/r
+  assert_equals 2 "$RC" "--run on a host that is not Forgejo must be a usage error"
+  run_wait "$TMP_ROOT" https://github.com/o/r/actions/runs/9
+  assert_equals 2 "$RC" "a run URL on a host that is not Forgejo must be a usage error"
+  run_wait "$TMP_ROOT" --run main --commit abc1234 https://forgejo.example/o/r
+  assert_equals 2 "$RC" "--run and --commit together must be a usage error"
+  run_wait "$TMP_ROOT" --workflow ci.yml "$PR"
+  assert_equals 2 "$RC" "--workflow without --run must be a usage error"
+  run_wait "$TMP_ROOT" --run 'main;x' https://forgejo.example/o/r
+  assert_equals 2 "$RC" "a --run ref with shell or URL characters must be a usage error"
   pass "fm-ci-wait: unsupported targets and bad options exit 2"
 }
 
@@ -252,5 +342,7 @@ test_not_yet_started
 test_read_error
 test_github_commit
 test_forgejo
+test_forgejo_run_url
+test_forgejo_run_ref
 test_gitlab_delegation
 test_usage

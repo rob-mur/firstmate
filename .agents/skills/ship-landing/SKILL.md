@@ -33,6 +33,10 @@ When their output says `relay to the captain: <note>`, include that note in the 
 An `actionable:` line about the step means the merge landed but the step did not run and nothing in that checkout was changed: report the stated reason to the captain, and retry with the command it names once the cause is fixed, or record it done by hand only after the captain says it was done another way.
 Cleanup of that task refuses until the step is recorded done, including after a merge firstmate did not perform, so a cleanup refused for this reason is handled the same way.
 
+To learn how a Forgejo Actions run ends, such as a release, deploy, or promotion run after a merge or a workflow dispatch, never poll its status or sleep across turns.
+Run one `bin/fm-ci-wait.sh --timeout 3600 <run URL>`, or `--run <sha|branch> [--workflow <file>] <repo URL>` when no run URL is known yet, as a harness background command that reports when it exits, such as Claude Code's `run_in_background`; elsewhere run it in the foreground with a `--timeout` under the shell tool's largest timeout, and run it again on exit 3.
+Its verdict line and failed-job log tails are the result to act on, so a failure needs no separate run, job, or log reads.
+
 Tear down any other ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
