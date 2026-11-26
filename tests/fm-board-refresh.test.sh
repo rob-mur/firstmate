@@ -443,10 +443,9 @@ test_a_failed_build_is_logged_and_not_retried_until_state_changes() {
   printf '#!/usr/bin/env bash\nexit 1\n' > "$home/fakebin/lavish-axi"
   in_home "$home" "$REFRESH" && fail "a refused build reported success"
   grep -q 'board build refused' "$home/state/.board-refresh.log" || fail "the refusal was not logged"
-  local before
-  before=$(wc -l < "$home/state/.board-refresh.log")
   in_home "$home" "$REFRESH" || fail "retry of an unchanged fleet failed"
-  [ "$(wc -l < "$home/state/.board-refresh.log")" = "$before" ] || fail "a failed build was retried with no state change"
+  assert_equals "1" "$(grep -c 'board build refused' "$home/state/.board-refresh.log")" \
+    "a failed build was retried with no state change"
   pass "a failed build is logged and not retried until state changes"
 }
 
@@ -1043,6 +1042,110 @@ test_a_failing_call_change_send_never_fails_the_rebuild() {
   pass "a failing Captain's Call send never fails the rebuild"
 }
 
+# A live input the payload reads but no file the input check covers shows,
+# such as a worker's liveness or a PR's forge state: the payload wrapper puts
+# the content of live-probe, outside every signed path, into the board data.
+live_payload() {  # <home>
+  local home=$1
+  cat > "$home/live-payload" <<SH
+#!/usr/bin/env bash
+set -o pipefail
+"$ROOT/bin/fm-bearings-board-payload.sh" "\$@" | jq -c --arg v "\$(cat "$home/live-probe")" '.live_probe = \$v'
+SH
+  chmod +x "$home/live-payload"
+}
+
+reap_watcher() {  # <pid> <state-dir>
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+  FM_HOME="$(dirname "$2")" FM_STATE_OVERRIDE="$2" "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+}
+
+# The stall a usage limit caused: every event the watcher saw was absorbed, so
+# no wake was queued, nobody drained a queue, and no agent turn ran, while the
+# live inputs moved. The watcher's own poll must still bring the board current.
+test_a_live_input_change_rebuilds_the_board_with_no_event_or_agent_turn() {
+  local home pid before i
+  home=$(make_home live-idle)
+  add_task "$home" t1
+  printf 'first\n' > "$home/live-probe"
+  live_payload "$home"
+  build_initial_board "$home"
+  FM_BOARD_REFRESH_PAYLOAD="$home/live-payload" in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  assert_equals "1" "$(rebuilt_count "$home")" "the baseline refresh did not rebuild"
+  fm_test_track_watcher_state "$home/state"
+  FM_BOARD_REFRESH_PAYLOAD="$home/live-payload" FM_BOARD_REFRESH_MAX_AGE=2 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    in_home "$home" "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -e "$home/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$home/state/.last-watcher-beat" ] || { reap_watcher "$pid" "$home/state"; fail "the watcher never polled: $(cat "$home/watch.out")"; }
+  # Let the watcher's startup settle: its first home summary publication may
+  # kick a pass of its own.
+  sleep 4
+  i=0
+  while { [ -e "$home/state/.board-refresh.lock" ] || [ -e "$home/state/.board-refresh.pending" ]; } && [ "$i" -lt 200 ]; do
+    sleep 0.1; i=$((i + 1))
+  done
+  before=$(rebuilt_count "$home")
+  printf 'second\n' > "$home/live-probe"
+  i=0
+  while [ "$(rebuilt_count "$home")" -le "$before" ] && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
+  kill -0 "$pid" 2>/dev/null || { reap_watcher "$pid" "$home/state"; fail "the watcher exited: $(cat "$home/watch.out")"; }
+  reap_watcher "$pid" "$home/state"
+  [ ! -s "$home/state/.wake-queue" ] || fail "the test fleet queued a wake, so an event could have kicked the refresher: $(cat "$home/state/.wake-queue")"
+  [ "$(rebuilt_count "$home")" -gt "$before" ] \
+    || fail "a live input changed with no event and the board was never rebuilt: $(cat "$home/state/.board-refresh.log")"
+  grep -q '"live_probe":"second"' "$home/.lavish/bearings-board.data.js" \
+    || fail "the rebuilt board does not show the changed live input"
+  pass "a live input change rebuilds the board with no event and no agent turn"
+}
+
+# Every pass leaves a log line saying whether it built or why it skipped, and a
+# skip that repeats keeps one line with its latest time and count.
+test_every_skipped_pass_is_logged_and_repeats_collapse() {
+  local home log
+  home=$(make_home skip-log)
+  add_task "$home" t1
+  build_initial_board "$home"
+  log="$home/state/.board-refresh.log"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  in_home "$home" "$REFRESH" || fail "repeat refresh failed"
+  tail -n 1 "$log" | grep -q ' skipped: no input changed since the last pass$' \
+    || fail "an unchanged-input skip left no log line: $(cat "$log")"
+  FM_BOARD_REFRESH_MAX_AGE=0 in_home "$home" "$REFRESH" || fail "aged refresh failed"
+  tail -n 1 "$log" | grep -q ' skipped: the board data has not changed$' \
+    || fail "an unchanged-data skip left no log line: $(cat "$log")"
+  FM_BOARD_REFRESH_MAX_AGE=0 in_home "$home" "$REFRESH" || fail "second aged refresh failed"
+  FM_BOARD_REFRESH_MAX_AGE=0 in_home "$home" "$REFRESH" || fail "third aged refresh failed"
+  assert_equals "1" "$(grep -c 'the board data has not changed' "$log")" "a repeated skip was logged twice"
+  tail -n 1 "$log" | grep -Eq ' skipped: the board data has not changed \(repeated 3 times since [0-9T:-]+Z\)$' \
+    || fail "a repeated skip did not carry its count: $(cat "$log")"
+  pass "every skipped pass is logged and a repeated skip collapses into one line"
+}
+
+# The watcher's timer kick is a no-op until a pass is due.
+test_a_due_kick_waits_for_the_last_look_to_age() {
+  local home
+  home=$(make_home kick-due)
+  in_home "$home" "$REFRESH" --kick-due || fail "a due kick with no board failed"
+  [ ! -e "$home/state/.board-refresh.pending" ] || fail "a due kick with no board recorded a request"
+  add_task "$home" t1
+  build_initial_board "$home"
+  in_home "$home" "$REFRESH" || fail "baseline refresh failed"
+  in_home "$home" "$REFRESH" --kick-due || fail "an early due kick failed"
+  [ ! -e "$home/state/.board-refresh.pending" ] || fail "a due kick right after a pass recorded a request"
+  FM_BOARD_REFRESH_MAX_AGE=0 in_home "$home" "$REFRESH" --kick-due || fail "a due kick failed"
+  local i=0
+  while ! tail -n 1 "$home/state/.board-refresh.log" | grep -q 'the board data has not changed' && [ "$i" -lt 100 ]; do
+    sleep 0.1; i=$((i + 1))
+  done
+  tail -n 1 "$home/state/.board-refresh.log" | grep -q 'the board data has not changed' \
+    || fail "a due kick did not take a pass: $(cat "$home/state/.board-refresh.log")"
+  pass "a due kick waits until the last look has aged"
+}
+
 fm_test_run \
   test_a_home_without_a_board_is_left_alone \
   test_the_board_is_rebuilt_only_when_fleet_state_changes \
@@ -1078,4 +1181,7 @@ fm_test_run \
   test_a_captain_call_change_tells_board_keeper_once \
   test_a_card_held_back_into_cards_to_fix_never_joins \
   test_no_call_change_message_without_a_board_keeper_route \
-  test_a_failing_call_change_send_never_fails_the_rebuild
+  test_a_failing_call_change_send_never_fails_the_rebuild \
+  test_every_skipped_pass_is_logged_and_repeats_collapse \
+  test_a_due_kick_waits_for_the_last_look_to_age \
+  test_a_live_input_change_rebuilds_the_board_with_no_event_or_agent_turn
