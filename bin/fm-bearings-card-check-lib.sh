@@ -52,6 +52,13 @@
 # 1, 2, ... in order, names the card, since those sub-questions belong in its
 # options or its body. A reason body may still list numbered calls under one
 # heading question.
+# A card shows the question of its line whole: a heading that carries the cut
+# mark "…" the payload adds when it shortens one (short_text_n in
+# bin/fm-bearings-board-payload.sh), which its reason never had, was cut and
+# names the card, and so does a background (`about`) of a card with options that
+# ends in the bare stub of its asking clause, a modal and its subject alone after
+# a clause break (", should the captain?"), its choices taken out into the
+# options. Such a card is held back, not reworded.
 # A card also lists each link once: two spellings of its `links` urls and
 # `pr_url` that differ only by trailing slashes or a `#fragment`, or one url
 # repeated within `links`, name the card. A `pr_url` repeated exactly in
@@ -107,6 +114,7 @@
 # `<key>: <problem>` line per Captain's Call card in an fm-bearings-board.v1
 # payload that fails the rule, <problem> being `missing <field> (<why>)[, ...]`,
 # `options given twice (...)`, `heading carries several calls (...)`,
+# `heading cut short (...)`, `background ends in a dangling fragment (...)`,
 # `duplicate link (<url> ...)` and/or
 # `names <url>, already merged|closed, and asks to review or merge it`
 # (from the link states fm_bearings_card_link_states printed) and/or
@@ -279,8 +287,22 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
        | if $calls >= 2 then "a numbered list of \($calls) calls"
          elif $q >= 2 then "\($q) questions"
          else null end) as $packed
+    # A heading the payload cut short carries its cut mark "…" (short_text_n in
+    # bin/fm-bearings-board-payload.sh), which the source text never had: it is
+    # not the complete question the line asks.
+    | (((.context.reason // .about // "") | strings | contains("…")) as $source_cut
+       | [$prompts[0] // (.title | text)] | map(select(contains("…") and ($source_cut | not)))[0]
+       // null) as $cut
+    # An about line whose choices were cut away can be left as the bare stub
+    # of the asking clause ("..., should the captain?"): a modal and its
+    # subject alone after a clause break, with nothing left to decide.
+    | ((.options | length) > 0
+       and ((.about // "") | strings | gsub("[[:space:]]+$"; "")
+            | test("(?:[,;:]|[[:space:]](?:or|and|but|so|then))[[:space:]]+(?:should|shall|can|could|will|would|do|does|did|may|must|might)[[:space:]]+(?:the[[:space:]]+)?[^[:space:]?]+[?]$"; "i"))) as $dangling
     | [ (if ($missing | length) > 0 then "missing \($missing | join(", "))" else empty end),
         (if $packed != null then "heading carries several calls (it asks \($packed): ask one question there and put the sub-questions in the options or the body)" else empty end),
+        (if $cut != null then "heading cut short (\"\($cut | if length > 80 then .[:79] + "…" else . end)\" is not the complete question the line asks: re-post with one short asking sentence first)" else empty end),
+        (if $dangling then "background ends in a dangling fragment (\"\((.about | gsub("[[:space:]]+$"; "") | [match("[^,;:]*$")][0].string | sub("^[[:space:]]+"; "")))\" lost its choices: re-post with the question as its own sentence before the choices)" else empty end),
         (if $twice then "options given twice (the background lists lettered a) b) choices as well as the card options: re-post without the list in the reason)" else empty end),
         ($dups[] | "duplicate link (\(.) is listed more than once: keep one)"),
         $over[] ]
