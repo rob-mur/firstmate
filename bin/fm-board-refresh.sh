@@ -5,6 +5,7 @@
 #   fm-board-refresh.sh [--force]
 #   fm-board-refresh.sh --kick
 #   fm-board-refresh.sh --kick-decision <status-file>
+#   fm-board-refresh.sh --kick-due
 #
 # Regenerates the board payload (bin/fm-bearings-board-payload.sh, which applies
 # the captain's stored priority) and, only when it differs from the last one
@@ -37,6 +38,19 @@
 # reaches the board's Captain's Call at its next pass, as an answer does, rather
 # than when the watcher next queues the line as a wake.
 #
+# --kick-due is --kick for a timer: it kicks only when a pass is due because
+# none has looked at the fleet for a while, and does nothing otherwise (with no
+# board it does nothing at all, never forwarding). A pass is due when no
+# refresher holds the lock, the last payload attempt (state/.board-refresh.inputs)
+# is missing or at least FM_BOARD_REFRESH_MAX_AGE seconds old, and the last pass
+# (the log, which every pass writes) is missing or at least
+# FM_BOARD_REFRESH_MIN_INTERVAL seconds old. The watcher calls it on every poll
+# (bin/fm-watch.sh), because the kicks above all ride an event: while the fleet
+# sits idle, at a usage limit or with every worker paused, the watcher absorbs
+# each event without queueing a wake, nobody drains a queue, and a live input
+# (worker liveness, forge state, the date) or a status line that kicks nothing
+# would otherwise leave the board stale until the next event.
+#
 # A board is built only by its own home's code. When $FM_HOME carries its own
 # bin/fm-board-refresh.sh and that is not this file, this script runs that one
 # in its place, before anything else. A kick forwarded from a secondmate on
@@ -64,7 +78,8 @@
 #     reclaimed; a running refresher refreshes the lock while it waits.
 #
 # A pass costs a full fleet snapshot, so it is skipped when nobody can see it or
-# nothing it reads has moved. Each skip leaves the request consumed:
+# nothing it reads has moved. Each skip leaves the request consumed and a log
+# line saying why:
 #   - no viewer: while Lavish records the board's session as ended
 #     (`fm-bearings-board.sh ended`, a file read that never calls the server)
 #     there is no pass at all, even with --force. A rebuild could not reach an
@@ -92,8 +107,11 @@
 #     when fleet state has not moved; an attempt, even a failed one, records it
 #     and the input signature, so a refused payload is not retried until fleet
 #     state or the template changes again or the signature ages out.
-# A failed build is logged to state/.board-refresh.log (last 20 lines kept, a
-# repeated skip logged once) and never changes the caller's exit status beyond
+# Every pass logs one line to state/.board-refresh.log (last 20 lines kept):
+# "rebuilt board", the failure, or the skip and its reason. A skip that repeats
+# the newest line replaces it, carrying the latest time and a count since the
+# first, so a quiet fleet keeps one line that still shows the refresher ran.
+# A failed build never changes the caller's exit status beyond
 # this script's own. A refused build's log line carries the build's reason,
 # which for a payload that breaks the board contract names the first failing
 # item and its fields, and the refused payload is kept, mode 0600, at
@@ -185,6 +203,25 @@ newest_line_asks_captain() {  # <status-file>
   return 1
 }
 
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+
+# 0 when <file> is missing or at least <seconds> old.
+older_than() {  # <file> <seconds>
+  [ -e "$1" ] || return 0
+  [ $(($(date +%s) - $(mtime "$1"))) -ge "$2" ]
+}
+
+# Kick when a pass is due because none has looked for a while (see header).
+kick_due() {
+  [ -f "$BOARD" ] || exit 0
+  # A held lock is a refresher at work; one past its TTL is stale, and the
+  # kicked refresher reclaims it.
+  older_than "$LOCK" "$LOCK_TTL" || exit 0
+  older_than "$INPUTS" "$MAX_AGE" || exit 0
+  older_than "$LOG" "$MIN_INTERVAL" || exit 0
+  kick
+}
+
 FORCE=0
 SERVE_PENDING=0
 case "${1:-}" in
@@ -196,6 +233,7 @@ case "${1:-}" in
     newest_line_asks_captain "$2" && kick
     exit 0
     ;;
+  --kick-due) kick_due ;;
   -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
   '') ;;
   *) echo "fm-board-refresh: unknown argument: $1" >&2; exit 2 ;;
@@ -211,8 +249,6 @@ if [ "$SERVE_PENDING" = 1 ]; then
 else
   : >"$PENDING" || exit 0
 fi
-
-mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
 take_lock() {
   mkdir "$LOCK" 2>/dev/null && return 0
@@ -281,12 +317,30 @@ Left: ${left:-none}"
   fi
 }
 
-# A skip repeats on every request, so it is logged only when it is news.
-log_once() {
-  local last
+# A skip repeats on every request, so one that repeats the newest line replaces
+# it with the latest time and a count since the first (see header).
+log_skip() {
+  local msg="$*" last body count=2 first
   last=$(tail -n 1 "$LOG" 2>/dev/null)
-  [ "${last#* }" != "$*" ] || return 0
-  log "$@"
+  body=${last#* }
+  first=${last%% *}
+  if [ "$body" != "$msg" ]; then
+    case "$body" in
+      "$msg (repeated "*) ;;
+      *) log "$msg"; return ;;
+    esac
+    [[ "${body#"$msg (repeated "}" =~ ^([0-9]+)\ times\ since\ ([^ ]+)\)$ ]] \
+      || { log "$msg"; return; }
+    count=$((BASH_REMATCH[1] + 1))
+    first=${BASH_REMATCH[2]}
+  fi
+  if { sed '$d' "$LOG" && printf '%s %s (repeated %s times since %s)\n' \
+       "$(date -u +%FT%TZ)" "$msg" "$count" "$first"; } >"$LOG.tmp" 2>/dev/null; then
+    mv "$LOG.tmp" "$LOG"
+  else
+    rm -f "$LOG.tmp"
+    log "$msg"
+  fi
 }
 
 # Make lavish-axi reachable for the build, or say it is not. A detached
@@ -381,15 +435,18 @@ refresh_once() {
   fi
   rm -f "$PENDING"
   if "$SCRIPT_DIR/fm-bearings-board.sh" ended >/dev/null 2>&1; then
-    log_once "skipped: the board session is ended"
+    log_skip "skipped: the board session is ended"
     return 0
   fi
   if ! lavish_reachable; then
-    log_once "skipped: lavish-axi is not on PATH and no earlier refresh recorded where it is"
+    log_skip "skipped: lavish-axi is not on PATH and no earlier refresh recorded where it is"
     return 1
   fi
   inputs=$(input_signature 2>/dev/null) || inputs=
-  [ "$FORCE" = 1 ] || ! inputs_unchanged "$inputs" || return 0
+  if [ "$FORCE" != 1 ] && inputs_unchanged "$inputs"; then
+    log_skip "skipped: no input changed since the last pass"
+    return 0
+  fi
   : >"$STAMP"
   tmp=$(mktemp "$STATE/.board-refresh.payload.XXXXXX") || return 1
   if ! "$PAYLOAD" >"$tmp" 2>>"$LOG"; then
@@ -403,6 +460,7 @@ refresh_once() {
     | cksum | awk '{print $1 "-" $2}')
   if [ "$FORCE" != 1 ] && [ -f "$SUM" ] && [ "$(cat "$SUM")" = "$sum" ]; then
     rm -f "$tmp"
+    log_skip "skipped: the board data has not changed"
     return 0
   fi
   printf '%s\n' "$sum" >"$SUM"
