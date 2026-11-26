@@ -1506,6 +1506,53 @@ test_build_flags_a_heading_that_packs_several_calls() {
   pass "the board holds back a heading that packs several calls, not one question with its calls as options or body"
 }
 
+# The aegis-885 worker line asks its question only in a clause after a long
+# lead and a "(a) ... or (b) ...?" run: the payload cut its heading mid-way
+# ("...report:…?") and left its background ending "should the captain?". The
+# card the real payload builder makes from that line is held back naming both,
+# and the watcher bounce check names it too; the same call asked as its own
+# sentence first passes.
+test_build_flags_a_cut_heading_and_a_dangling_background() {
+  local home data line good snapshot card out rc
+  home=$(make_home cut-heading)
+  data="$home/payload.json"
+  line="MR https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/885 has nothing blocking left (14/15 threads resolved, report: /home/rob/repos/firstmate/data/aegis-885-recheck-2/report.md); for the open thread #13, where an imported Paid claim's status history shows Closed from the backdated month while closed_date is its payment date, should the captain (a) accept the caveat and resolve #13, or (b) ask Ali to make the history match by running the close after the backdate step?"
+  good='Should the captain accept the caveat on MR https://gitlab.descartesunderwriting.com/descartes-underwriting/app/aegis/-/merge_requests/885 thread #13? (a) accept the caveat and resolve #13, or (b) ask Ali to make the history match by running the close after the backdate step.'
+  # shellcheck disable=SC2016  # jq program text.
+  snapshot='{schema:"fm-bearings.v1",prs:"unchecked",
+    decisions_open:[{id:"aegis-885-recheck-2",key:"status.aegis-885-recheck-2.mr885-thread13",verb:"needs-decision",
+      source:"status",task:"aegis-885-recheck-2",decision_key:"mr885-thread13",mate:null,
+      title:"aegis-885-recheck-2",title_full:"aegis-885-recheck-2",reason:$n,reason_full:$n,
+      summary:$n,question:$n,owner:"(main)"}],
+    in_flight:[],landed:[],recorded_prs:[],contributions:{captain:[]},gates:[],secondmates:[]}'
+  card=$(jq -cn --arg n "$line" "$snapshot" \
+    | FM_BEARINGS_BOARD_PR_CHECK=0 FM_BEARINGS_BOARD_MR_CHECK=0 "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot - \
+    | jq -c '.captains_call[] | select(.key == "status.aegis-885-recheck-2.mr885-thread13")') \
+    || fail "the payload builder did not make a card from the aegis-885 line"
+  [ -n "$card" ] || fail "the payload builder made no card from the aegis-885 line"
+  write_valid_payload "$data"
+  jq --argjson c "$card" '.captains_call += [$c]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" status.aegis-885-recheck-2.mr885-thread13 question \
+    "the aegis-885 card with a cut heading" "heading cut short"
+  out=$(cat "$home/state/board-cards-to-fix")
+  assert_contains "$out" "background ends in a dangling fragment (\"should the captain?\"" \
+    "the held-back card does not name its dangling background: $out"
+
+  set +e
+  out=$(bash -c '. "$1/bin/fm-bearings-card-check-lib.sh"; fm_bearings_status_decision_problem aegis-885-recheck-2 mr885-thread13 "$2"' _ "$ROOT" "$line")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "the bounce check passed the aegis-885 line (rc=$rc): $out"
+  assert_contains "$out" "heading cut short" "the bounce check did not name the cut heading: $out"
+
+  set +e
+  out=$(bash -c '. "$1/bin/fm-bearings-card-check-lib.sh"; fm_bearings_status_decision_problem aegis-885-recheck-2 mr885-thread13 "$2"' _ "$ROOT" "$good")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the bounce check held back the call asked as its own sentence (rc=$rc): $out"
+  pass "the board holds back a card whose heading was cut and whose background lost its choices"
+}
+
 # A card whose reason lists two or more "Option x:" marks but which offers no
 # options, or only a default yes/no, is a reason the option reader could not
 # read: it is held back naming the marks, even as a worker status card, so the
@@ -1942,6 +1989,7 @@ test_a_card_that_names_a_page_title_links_that_page
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
 test_build_reads_a_question_anywhere_in_the_reason
 test_build_flags_a_heading_that_packs_several_calls
+test_build_flags_a_cut_heading_and_a_dangling_background
 test_build_accepts_explicit_decisions_and_in_person_actions
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_a_refusal_names_the_first_failing_item_and_its_fields
