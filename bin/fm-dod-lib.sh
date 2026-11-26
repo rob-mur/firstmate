@@ -153,7 +153,7 @@ _FM_DOD_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=
 # The one CI-wait instruction for a worker that waits on its own PR's checks:
 # bin/fm-ci-wait.sh owns the wait, its verdict line, and its exit codes.
 fm_dod_ci_wait_line() {
-  printf '%s\n' "Wait for the PR's CI with one \`$_FM_DOD_LIB_DIR/fm-ci-wait.sh <PR URL>\` call and a ten-minute shell timeout, never a polling loop, sleep, or scheduled wake-up: exit 0 is passed, 1 is failed with each failed job's log tail, and 3 is still running, so run it again; a second \`no CI has reported yet\` means the project has no CI, which needs no fix."
+  printf '%s\n' "Wait for the PR's CI with one \`$_FM_DOD_LIB_DIR/fm-ci-wait.sh <PR URL>\` call and your shell tool's largest timeout (in Claude Code a Bash \`timeout\` of 2700000 ms, which it cuts to the session's own cap), never a polling loop, sleep, or scheduled wake-up: exit 0 is passed, 1 is failed with each failed job's log tail, and 3 is still running, so run it again; a second \`no CI has reported yet\` means the project has no CI, which needs no fix."
 }
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
