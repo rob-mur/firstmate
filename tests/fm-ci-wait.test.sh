@@ -92,7 +92,7 @@ OUT=
 run_wait() {
   local fix=$1
   shift
-  OUT=$(FIX="$fix" FM_HOME="$TMP_ROOT/home" PATH="$FAKEBIN:$PATH" \
+  OUT=$(FIX="$fix" FM_HOME="$TMP_ROOT/home" PATH="$FAKEBIN:$PATH" BASH_MAX_TIMEOUT_MS="${CI_WAIT_SHELL_MAX:-}" \
     FM_CI_WAIT_POLL_MIN=1 FM_CI_WAIT_POLL_MAX=1 FM_CI_WAIT_GITLAB="$FAKEBIN/ci-wait" \
     bash "$SCRIPT" "$@" 2>&1)
   RC=$?
@@ -316,6 +316,45 @@ test_gitlab_delegation() {
   pass "fm-ci-wait: GitLab waits through the forge-gitlab ci-wait script and adds failed-job traces"
 }
 
+test_shell_bound_default() {
+  local fix url=https://gitlab.example/g/p/-/merge_requests/3 bound want
+  fix=$(new_fix gl-bound)
+  echo success > "$fix/gitlab-verdict"
+  for bound in ":540" "600000:540" "700000:640" "2700000:2640" "9000000:2640" "soon:540"; do
+    want=${bound#*:}
+    CI_WAIT_SHELL_MAX=${bound%%:*} run_wait "$fix" "$url"
+    assert_equals 0 "$RC" "the wait must still run with BASH_MAX_TIMEOUT_MS='${bound%%:*}'"
+    assert_equals "g/p 3 $want 1" "$(cat "$fix/ci-wait.args")" "BASH_MAX_TIMEOUT_MS='${bound%%:*}' must give a default timeout of $want"
+  done
+  CI_WAIT_SHELL_MAX=2700000 run_wait "$fix" --timeout 120 "$url"
+  assert_equals "g/p 3 120 1" "$(cat "$fix/ci-wait.args")" "an explicit --timeout must win over the shell bound"
+  pass "fm-ci-wait: the default timeout follows the shell's command bound, capped at 2640 seconds"
+}
+
+test_no_ci_cutoff() {
+  local fix
+  fix=$(new_fix never-long)
+  echo "no checks reported on the 'fm/x' branch" > "$fix/checks.1.err"
+  OUT=$(FIX="$fix" FM_HOME="$TMP_ROOT/home" PATH="$FAKEBIN:$PATH" \
+    FM_CI_WAIT_POLL_MIN=1 FM_CI_WAIT_POLL_MAX=1 FM_CI_WAIT_NO_CI_AFTER=2 \
+    bash "$SCRIPT" --timeout 60 "$PR" 2>&1)
+  RC=$?
+  assert_equals 3 "$RC" "CI that never starts must end a long wait early"
+  assert_equals "timed out: $PR after 2s (no CI has reported yet)" "$OUT" "the early end must say no CI reported"
+
+  fix=$(new_fix late-long)
+  echo "no checks reported on the 'fm/x' branch" > "$fix/checks.1.err"
+  echo '[{"name":"build","bucket":"pending","link":""}]' > "$fix/checks.2"
+  echo '[{"name":"build","bucket":"pass","link":""}]' > "$fix/checks.5"
+  OUT=$(FIX="$fix" FM_HOME="$TMP_ROOT/home" PATH="$FAKEBIN:$PATH" \
+    FM_CI_WAIT_POLL_MIN=1 FM_CI_WAIT_POLL_MAX=1 FM_CI_WAIT_NO_CI_AFTER=2 \
+    bash "$SCRIPT" --timeout 60 "$PR" 2>&1)
+  RC=$?
+  assert_equals 0 "$RC" "CI that has reported must be waited for past the no-CI cutoff"
+  assert_equals "passed: $PR (1 checks)" "$OUT" "a run that reported before the cutoff must pass"
+  pass "fm-ci-wait: a long wait still ends early when no CI has reported"
+}
+
 test_usage() {
   run_wait "$TMP_ROOT" https://example.com/not-a-pr
   assert_equals 2 "$RC" "an unsupported URL must be a usage error"
@@ -345,4 +384,6 @@ test_forgejo
 test_forgejo_run_url
 test_forgejo_run_ref
 test_gitlab_delegation
+test_shell_bound_default
+test_no_ci_cutoff
 test_usage

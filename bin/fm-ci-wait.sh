@@ -28,8 +28,14 @@
 # new run's URL instead.
 #
 # --timeout defaults to 540 seconds, under the ten-minute cap most agent shells
-# put on one command; on a timeout run the same command again. --tail (default
-# 40) bounds how many log lines each failed job prints.
+# put on one command; on a timeout run the same command again. When the agent
+# shell allows a longer command - Claude Code exports the BASH_MAX_TIMEOUT_MS a
+# home sets in its Claude settings - the default is that bound less 60 seconds,
+# capped at 2640 so one call stays under the watcher's 3600-second busy-turn
+# bound and inside the one-hour prompt cache. A CI that has not reported at all
+# still ends the call after 540 seconds (FM_CI_WAIT_NO_CI_AFTER), so a project
+# with no CI costs no longer wait than before. --tail (default 40) bounds how
+# many log lines each failed job prints.
 #
 # Output: the first line is the verdict, one of
 #   passed: <target> (<n> checks)
@@ -73,6 +79,10 @@ usage() {
 }
 
 TIMEOUT=540
+if [[ ${BASH_MAX_TIMEOUT_MS:-} =~ ^[0-9]{1,9}$ ]] && [ $((BASH_MAX_TIMEOUT_MS / 1000 - 60)) -gt "$TIMEOUT" ]; then
+  TIMEOUT=$((BASH_MAX_TIMEOUT_MS / 1000 - 60))
+  [ "$TIMEOUT" -le 2640 ] || TIMEOUT=2640
+fi
 TAIL=40
 COMMIT=
 RUN_REF=
@@ -96,6 +106,8 @@ case $TIMEOUT in ''|*[!0-9]*) echo "fm-ci-wait: --timeout must be whole seconds"
 case $TAIL in ''|*[!0-9]*) echo "fm-ci-wait: --tail must be a line count" >&2; exit 2 ;; esac
 POLL_MIN=${FM_CI_WAIT_POLL_MIN:-10}
 POLL_MAX=${FM_CI_WAIT_POLL_MAX:-60}
+NO_CI_AFTER=${FM_CI_WAIT_NO_CI_AFTER:-540}
+case $NO_CI_AFTER in ''|*[!0-9]*) echo "fm-ci-wait: FM_CI_WAIT_NO_CI_AFTER must be whole seconds" >&2; exit 2 ;; esac
 
 die_error() {  # <why>
   printf 'error: %s: %s\n' "$TARGET" "$1"
@@ -363,6 +375,11 @@ COUNTS
     [ "$fails" -lt 3 ] || die_error "the CI state could not be read: $(head -c 300 "$ERR" | tr '\n' ' ')"
   fi
   now=$(date +%s)
+  if [ -z "$rows" ] && [ "$NO_CI_AFTER" -lt "$TIMEOUT" ] && [ "$now" -ge $((START + NO_CI_AFTER)) ]; then
+    printf 'timed out: %s after %ss (no CI has reported yet)
+' "$TARGET" "$NO_CI_AFTER"
+    exit 3
+  fi
   if [ "$now" -ge "$DEADLINE" ]; then
     if [ -z "$rows" ]; then
       printf 'timed out: %s after %ss (no CI has reported yet)\n' "$TARGET" "$TIMEOUT"

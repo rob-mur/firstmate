@@ -1248,6 +1248,8 @@ Pi's native bash tool has no default timeout, so the worker brief asks for at mo
 For sessions loading Firstmate's primary extension, see the [opt-in Bash timeout cap](../configuration.md#pi-bash-timeout-cap).
 Codex yields a still-running command back to the model, and one empty `write_stdin` poll then waits up to 300000 ms.
 Claude Code's Bash tool defaults to 120000 ms and accepts at most 600000 ms; `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` override those two values.
+A larger requested `timeout` is cut to that maximum, not refused: in Claude session logs from 2026-11-22 to 2026-11-26, 295 foreground calls asked for more than 600000 ms, none ran past 603 seconds, and none was refused.
+A home that sets `BASH_MAX_TIMEOUT_MS` in its Claude settings `env` raises the cap for every worker shell, and `bin/fm-ci-wait.sh` reads the same variable for its default timeout.
 
 Claude Code also constrains the shape of a wait, not only its length, so the brief has to name the shape that is allowed rather than only forbid the ones that are not.
 Run as separate Bash tool calls on 2026-09-14 with Claude Code 2.1.268:
