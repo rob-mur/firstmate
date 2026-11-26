@@ -250,7 +250,11 @@
 # {id, title, href} row per live page registered through bin/fm-board-page.sh
 # (its header owns registration, the page folders, and the one refresh policy of
 # the board app), read from state/pages/*/page.json at build time. The board
-# lists them and shows each in place inside its own tab. href is the page
+# lists them and shows each in place inside its own tab. A page folder with no
+# record (a skill that drew its page straight into $FM_HOME/.lavish/pages/<id>/,
+# as the understand skill's markdown form does) is listed too, after the
+# registered pages, when a card links it as `{page: <id>}`; its title is that
+# link's label. href is the page
 # folder's page.html, or its page.md when the folder holds only that markdown
 # page, which the frame shows as plain text. A payload never
 # authors `pages`; the validator refuses one that does.
@@ -553,11 +557,13 @@ publish_cards_to_fix() {  # <state-dir>  (payload on stdin)
 }
 
 # Every live page registered through bin/fm-board-page.sh, oldest first, as the
-# board data's `pages` array. A record that does not parse or carries a bad id
-# is left out rather than failing the build; href follows PAGES SHOWN IN PLACE.
-live_pages_json() {
-  local f folder entry
-  for f in "$STATE"/pages/*/page.json; do
+# board data's `pages` array, then every unregistered page folder a card of the
+# effective payload links as `{page: <id>}` (PAGES SHOWN IN PLACE). A record
+# that does not parse or carries a bad id is left out rather than failing the
+# build; href follows PAGES SHOWN IN PLACE.
+live_pages_json() {  # <effective-payload>
+  local f folder entry id registered
+  registered=$(for f in "$STATE"/pages/*/page.json; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
     folder="${f%/page.json}"
     folder="$FM_HOME/.lavish/pages/${folder##*/}"
@@ -571,7 +577,23 @@ live_pages_json() {
            | {id, title, opened: (.opened // ""), href: ("pages/" + .id + "/" + $entry),
               replaces: ([.replaces // [] | arrays | .[] | strings]),
               task: (.task | if type == "string" and length > 0 then . else null end)}' "$f" 2>/dev/null
-  done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))' | pages_named_by_status
+  done | jq -s -c 'sort_by(.opened, .id) | map(del(.opened))') || registered='[]'
+  jq -r '[.captains_call[]?.links[]? | objects | .page | strings
+          | select(test("^[a-z0-9][a-z0-9-]{0,63}$"))] | unique[]' "$1" 2>/dev/null \
+    | while IFS= read -r id; do
+        [ ! -e "$STATE/pages/$id/page.json" ] && [ ! -L "$STATE/pages/$id/page.json" ] || continue
+        folder="$FM_HOME/.lavish/pages/$id"
+        [ -d "$folder" ] && [ ! -L "$folder" ] || continue
+        if [ -f "$folder/page.html" ] && [ ! -L "$folder/page.html" ]; then entry=page.html
+        elif [ -f "$folder/page.md" ] && [ ! -L "$folder/page.md" ]; then entry=page.md
+        else continue; fi
+        jq -n -c --arg id "$id" --arg entry "$entry" \
+          '{id: $id, href: ("pages/" + $id + "/" + $entry), replaces: [], task: null}'
+      done | jq -s -c --argjson registered "$registered" --slurpfile payload "$1" '
+        [$payload[0].captains_call[]?.links[]? | objects | select(.page | type == "string")] as $links
+        | $registered + map(.id as $id
+            | {id, title: ([$links[] | select(.page == $id) | .label | strings | select(length > 0)][0] // $id)} + .)' \
+    | pages_named_by_status
 }
 
 # Add `named_by` to each page in the pages JSON on stdin: the task ids whose own
@@ -880,7 +902,7 @@ command_build() {
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
   fi
-  pages=$(live_pages_json)
+  pages=$(live_pages_json "$effective")
   if ! json=$(attach_page_links "$pages" < "$effective") || ! printf '%s\n' "$json" > "$effective"; then
     rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot link the board pages: $data"
   fi
