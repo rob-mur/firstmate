@@ -847,6 +847,35 @@ test_build_keeps_a_card_whose_page_was_rebuilt_at_its_workers_last_report() {
   pass "build keeps a card whose linked page was rebuilt at its worker's last report"
 }
 
+# A page a skill drew straight into its folder (the understand skill's md form
+# writes .lavish/pages/mr885-understand/page.md and session.json there) has no
+# page record, because registration needs a page.html. A card that links it as
+# page:<id> must still open it in place, and the board lists it under the
+# card's link label; a recordless folder no card links stays off the board.
+test_build_lists_a_recordless_page_folder_a_card_links() {
+  local home data out
+  home=$(make_home recordless-page)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call[0].links = [{"page":"mr885-understand","label":"MR 885 understand page"},
+                                 {"page":"never-drawn","label":"Missing page"}] + .captains_call[0].links' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  mkdir -p "$home/.lavish/pages/mr885-understand" "$home/.lavish/pages/stray-understand"
+  printf '# Understand: MR !885\n' > "$home/.lavish/pages/mr885-understand/page.md"
+  printf '{"version":1,"subject":"MR !885"}\n' > "$home/.lavish/pages/mr885-understand/session.json"
+  printf '# Understand: stray\n' > "$home/.lavish/pages/stray-understand/page.md"
+  run_board "$home" build "$data" >/dev/null || fail "a board linking a recordless page folder did not build"
+  out=$(extract_payload "$home/.lavish/bearings-board.html")
+  printf '%s\n' "$out" | jq -e '
+    .pages == [{"id":"mr885-understand","title":"MR 885 understand page","href":"pages/mr885-understand/page.md"}]' \
+    >/dev/null || fail "the board did not list exactly the linked recordless page: $(printf '%s\n' "$out" | jq -c .pages)"
+  printf '%s\n' "$out" | jq -e '
+    .captains_call[0].links[:2] == [{"page":"mr885-understand","label":"MR 885 understand page"},
+                                    {"label":"Missing page","not_in_board":true}]' \
+    >/dev/null || fail "the card link to the recordless page did not open it in place: $(printf '%s\n' "$out" | jq -c '.captains_call[0].links')"
+  pass "build lists a recordless page folder a card links, and opens the card link in place"
+}
+
 # --- part 1: never arm a poll on an ended session ---------------------------
 
 test_build_reopens_a_session_the_captain_ended() {
@@ -1997,6 +2026,7 @@ test_charted_kind_is_optional_and_accepts_both_values
 test_an_underway_row_may_link_its_mr
 test_build_lists_live_pages_and_refuses_payload_pages
 test_build_links_a_markdown_only_page_to_its_page_md
+test_build_lists_a_recordless_page_folder_a_card_links
 test_build_flags_a_card_whose_page_missed_its_workers_last_report
 test_build_keeps_a_card_whose_page_was_rebuilt_at_its_workers_last_report
 test_build_injects_binds_then_arms
