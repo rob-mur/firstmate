@@ -1294,7 +1294,7 @@ test_workers_wait_without_spending_turns() {
       "$id: an external wait must sleep in one blocking shell command"
     assert_grep "fm-ci-wait.sh <PR URL>" "$brief" "$id: the CI wait primitive is missing"
     assert_grep "a \`timeout\` of at most 2700 seconds" "$brief" "$id: the Pi ceiling is missing"
-    assert_grep "its maximum \`timeout\` of 600000 ms" "$brief" "$id: the Claude Code ceiling is missing"
+    assert_grep "a \`timeout\` of 2700000 ms" "$brief" "$id: the Claude Code ceiling is missing"
     assert_grep "empty \`write_stdin\` polls of up to 300000 ms" "$brief" "$id: the Codex ceiling is missing"
     assert_grep "is the sanctioned foreground wait" "$brief" \
       "$id: the wait a Claude Code worker may use is not named"
