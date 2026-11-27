@@ -20,7 +20,9 @@
 # even one after a colon list whose lead became the heading - and a way to answer it,
 # at least one option of its own besides the injected reconcile choice or a free-text answer. A card whose
 # options include `done` and `not-done` asks for an in-person action, so its
-# prompt may be an imperative sentence - unless it is a `from_status` card,
+# heading (its first prompt, else its title) may instead be the imperative
+# sentence that asks for it (is_action in bin/fm-bearings-question-lib.sh), but
+# never a statement whose request comes only later - unless it is a `from_status` card,
 # whose done/not-done options are the derived default (no hold recorded them),
 # so it still needs a prompt that asks and counts them as default options in
 # the Option-mark and lettered-choice checks below. A card also needs the decision's own
@@ -232,6 +234,9 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
     # a status-raised card it is the derived default, as generic as yes/no.
     | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $done_pair
     | ($done_pair and ($raised | not)) as $action
+    # It may stand in for the question only when its heading is the imperative
+    # itself ("Dismiss review 623 ..."), never a statement ("PR 1074 adds ...").
+    | ($action and (($prompts[0] // (.title | text)) | sentences | (first // "") | is_action)) as $action_asked
     | ((.options | length) == 0
        or all(.options[]; .value | IN("yes", "no", "approve", "decline"))
        or ($raised and all(.options[]; .value | IN("done", "not-done")))) as $generic
@@ -263,10 +268,10 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
           | map(select($states[.] != null) | "names \(.), already \($states[.]), and asks to review or merge it")
         else [] end ) as $over
     | [ (if $reason_asks then empty
-         elif ($prompts | length) == 0 and (.title | asks | not) and ($action | not)
+         elif ($prompts | length) == 0 and (.title | asks | not) and ($action_asked | not)
          then "question (no question or decide prompt, and the title is not a question)"
          elif ($prompts | length) > 0 and (any($prompts[]; asks) | not)
-              and ($raised or (.title | asks | not)) and ($action | not)
+              and ($raised or (.title | asks | not)) and ($action_asked | not)
          then "question (\($prompts[0] | if length > 80 then .[:79] + "…" else . end) is not a question)"
          else empty end),
         (if (.options | length) == 0 and .allow_freeform != true and ($raised | not)
