@@ -96,14 +96,17 @@
 #     backlog, stored priority, secondmate registry, reports, contribution
 #     records and their config, the board code and template, and each local
 #     secondmate home's task records, statuses, inboxes, reconcile requests,
-#     and summary less its generation, observation and expiry stamps), by
+#     and summary less its generation, observation and expiry stamps, and the
+#     bearings Broken verdicts in state/board-broken.json), by
 #     path, size, and mtime, so a deleted file counts as a change. The payload
 #     also reads live inputs no file shows (worker liveness, PR and MR state on
 #     the forge, and the date), so a matching signature skips the pass only
 #     while it is younger than FM_BOARD_REFRESH_MAX_AGE seconds (default 300);
 #     state/.board-refresh.inputs holds it.
-#   - the fingerprint covers the payload, less its `generated` stamp, and the
-#     board template, so updated board code is installed on the next pass even
+#   - the fingerprint covers the payload, less its `generated` stamp, the
+#     board template, and the bearings verdicts build would merge
+#     (`fm-bearings-board.sh broken-verdicts`, which turns to a note when that
+#     file goes stale), so updated board code is installed on the next pass even
 #     when fleet state has not moved; an attempt, even a failed one, records it
 #     and the input signature, so a refused payload is not retried until fleet
 #     state or the template changes again or the signature ages out.
@@ -129,6 +132,16 @@
 # the keys that joined and left. An unchanged set sends nothing; with no saved
 # set (the first rebuild) every key has joined. The set is saved after the send
 # is attempted, and only while a board-keeper is routed.
+# Each rebuilt board also sends every card fault build merged from the bearings
+# Broken verdicts (bin/fm-bearings-board.sh, BROKEN VERDICTS FROM BEARINGS)
+# whose owning home is not main to that home, the same bounded way through this
+# home's bin/fm-send.sh, once per card key and version: a send that succeeds is
+# recorded as a `<key>\t<version>` line in state/.board-refresh.broken-sent
+# (last 500 kept), so a later rebuild does not send it again, and a failed one
+# is logged and retried on the next rebuild. A main-owned fault stays with
+# board-keeper, which reads the board data's `cards_to_fix`. When build merged
+# nothing because the verdicts file is stale or malformed, the "rebuilt board"
+# log line carries its note.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -148,6 +161,7 @@ LAVISH_DIR="$STATE/.board-refresh.lavish-dir"
 LOG="$STATE/.board-refresh.log"
 NOTIFIED="$STATE/.board-refresh.failure-notified"
 CALLS="$STATE/.board-refresh.calls"
+BROKEN_SENT="$STATE/.board-refresh.broken-sent"
 REFUSED="$STATE/.board-refresh.refused.json"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
@@ -270,12 +284,25 @@ board_keeper_routed() {
   secondmate_registry_line_for_id "$DATA/secondmates.md" board-keeper >/dev/null 2>&1
 }
 
-# Send board-keeper <message>, bounded and with its outcome ignored.
-tell_board_keeper() {  # <message>
+# Send secondmate <id> <message> through this home's fm-send, bounded.
+tell_home() {  # <id> <message>
   # shellcheck source=bin/fm-timeout-lib.sh
-  . "$SCRIPT_DIR/fm-timeout-lib.sh" 2>/dev/null || return 0
-  FM_HOME="$FM_HOME" fm_run_timed "$NOTIFY_TIMEOUT" "$SEND" board-keeper "$1" \
-    </dev/null >/dev/null 2>&1 || true
+  . "$SCRIPT_DIR/fm-timeout-lib.sh" 2>/dev/null || return 1
+  FM_HOME="$FM_HOME" fm_run_timed "$NOTIFY_TIMEOUT" "$SEND" "$1" "$2" \
+    </dev/null >/dev/null 2>&1
+}
+
+# Send board-keeper <message>, with its outcome ignored.
+tell_board_keeper() {  # <message>
+  tell_home board-keeper "$1" || true
+}
+
+# The payload inside a built board data file.
+built_board_data() {  # <built board data file>
+  local data
+  data=$(cat -- "$1") || return 1
+  data=${data#"window.FM_BEARINGS_BOARD_DATA = "}
+  printf '%s\n' "${data%;}"
 }
 
 # A failed build: log it and, once per episode, tell board-keeper (see header).
@@ -296,9 +323,7 @@ notify_call_change() {  # <built board data file>
   local keys old joined left data
   board_keeper_routed || return 0
   [ -f "$1" ] || return 0
-  data=$(cat -- "$1") || return 0
-  data=${data#"window.FM_BEARINGS_BOARD_DATA = "}
-  data=${data%;}
+  data=$(built_board_data "$1") || return 0
   keys=$(printf '%s\n' "$data" | jq -r '.captains_call[]?.key // empty' 2>/dev/null | LC_ALL=C sort -u) \
     || return 0
   if [ -f "$CALLS" ]; then
@@ -315,6 +340,31 @@ Left: ${left:-none}"
   if ! { printf '%s\n' "$keys" >"$CALLS.tmp" && mv "$CALLS.tmp" "$CALLS"; } 2>/dev/null; then
     rm -f "$CALLS.tmp"
   fi
+}
+
+# After a rebuild, send each bearings Broken fault held by a home other than
+# main to that home, once per card key and version (see header).
+notify_broken_owners() {  # <built board data file>
+  local rows home key version problem sent=0
+  [ -f "$1" ] || return 0
+  rows=$(built_board_data "$1" | jq -r '.cards_to_fix[]?
+      | select((.home | type) == "string" and .home != "main" and (.version | type) == "string")
+      | [.home, .key, .version, .problem] | map(gsub("[[:cntrl:]]"; " ")) | join("\t")' 2>/dev/null) \
+    || return 0
+  while IFS=$'\t' read -r home key version problem; do
+    [[ "$home" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue
+    ! grep -qxF -- "$key"$'\t'"$version" "$BROKEN_SENT" 2>/dev/null || continue
+    if tell_home "$home" "The bearings board filed a decision card this home owns as Broken, so it is not reaching the captain as it stands.
+Card: $key (version $version)
+Fault: $problem
+Fix the card's text and re-post it as a clean keyed decision; the board drops it from its cards to fix once bearings passes it."; then
+      printf '%s\t%s\n' "$key" "$version" >>"$BROKEN_SENT" 2>/dev/null && sent=1
+    else
+      log "could not tell $home about its broken card $key (version $version); retrying on the next rebuild"
+    fi
+  done <<<"$rows"
+  [ "$sent" = 1 ] || return 0
+  tail -n 500 "$BROKEN_SENT" >"$BROKEN_SENT.tmp" 2>/dev/null && mv "$BROKEN_SENT.tmp" "$BROKEN_SENT"
 }
 
 # A skip repeats on every request, so one that repeats the newest line replaces
@@ -379,7 +429,7 @@ input_signature() {
     }
     add_tasks($state);
     add_globs($state, qw(procevent-inbox/lavish-*.result *.merge-authority
-                         .afk .afk-contract .afk-return-catchup));
+                         .afk .afk-contract .afk-return-catchup board-broken.json));
     add_globs($data, qw(backlog.md board-priority.txt secondmates.md
                         */report.md */contributions.json));
     add_globs($config, "contribution-review-bots");
@@ -428,7 +478,7 @@ wait_until() {  # <epoch>
 
 # One pass: consume the pending request, then rebuild if the payload moved.
 refresh_once() {
-  local tmp sum out inputs
+  local tmp sum out inputs built note
   if [ "$FORCE" != 1 ]; then
     wait_until $(($(mtime "$PENDING") + DEBOUNCE))
     [ ! -f "$STAMP" ] || wait_until $(($(mtime "$STAMP") + MIN_INTERVAL))
@@ -456,7 +506,8 @@ refresh_once() {
     return 1
   fi
   [ -z "$inputs" ] || printf '%s\n' "$inputs" >"$INPUTS"
-  sum=$( { jq -S -c 'del(.generated)' "$tmp"; cksum < "$TEMPLATE" 2>/dev/null; } \
+  sum=$( { jq -S -c 'del(.generated)' "$tmp"; cksum < "$TEMPLATE" 2>/dev/null
+           "$SCRIPT_DIR/fm-bearings-board.sh" broken-verdicts 2>/dev/null; } \
     | cksum | awk '{print $1 "-" $2}')
   if [ "$FORCE" != 1 ] && [ -f "$SUM" ] && [ "$(cat "$SUM")" = "$sum" ]; then
     rm -f "$tmp"
@@ -466,8 +517,11 @@ refresh_once() {
   printf '%s\n' "$sum" >"$SUM"
   if out=$("$SCRIPT_DIR/fm-bearings-board.sh" build --no-reopen "$tmp" 2>&1); then
     rm -f "$NOTIFIED"
-    log "rebuilt board"
-    notify_call_change "$(printf '%s\n' "$out" | sed -n 's/^data: //p' | head -n 1)"
+    built=$(printf '%s\n' "$out" | sed -n 's/^data: //p' | head -n 1)
+    note=$( { [ -f "$built" ] && built_board_data "$built" | jq -r '.cards_to_fix_note // empty'; } 2>/dev/null)
+    log "rebuilt board${note:+; $note}"
+    notify_call_change "$built"
+    notify_broken_owners "$built"
     rm -f "$tmp"
     return 0
   fi

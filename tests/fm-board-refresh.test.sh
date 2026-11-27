@@ -924,6 +924,11 @@ last_send() {  # <home>
   awk '/^--$/ { last = cur; cur = ""; next } { cur = cur $0 "\n" } END { printf "%s", last }' "$1/sends"
 }
 
+# The JSON the open board was last built from.
+extract_board_data() {  # <home>
+  sed -e '1s/^window\.FM_BEARINGS_BOARD_DATA = //' -e '$s/;$//' "$1/.lavish/bearings-board.data.js"
+}
+
 test_a_failure_episode_tells_board_keeper_once() {
   local home
   home=$(make_notify_home notify-once 1)
@@ -1017,6 +1022,59 @@ test_a_card_held_back_into_cards_to_fix_never_joins() {
   msg=$(last_send "$home")
   grep -qx 'Joined: call-a' <<<"$msg" || fail "the notice counts cards held back into cards to fix: $msg"
   pass "a card held back into cards to fix never joins Captain's Call in the notice"
+}
+
+# The live case: the bearings board filed runner-image's card under Broken
+# because it names PR 91 without linking it, yet main's cards to fix stayed
+# empty and runner-image, which owns the card, was never told.
+BROKEN_KEY="runner-image.captain-hold-runner-nix-lock-denied-rollout-1"
+
+write_broken() {  # <home> <as_of> <version>
+  jq -n --arg at "$2" --arg v "$3" --arg k "$BROKEN_KEY" '{as_of: $at, cards: [
+      {key: $k, reason: "no link for PR 91", owner_home_id: "runner-image", version: $v},
+      {key: "main.captain-hold-own-card-1", reason: "raw report path in the text",
+       owner_home_id: "main", version: "m1"}]}' > "$1/state/board-broken.json"
+}
+
+broken_notices() {  # <home>
+  if [ -f "$1/sends" ]; then grep -c "^Card: $BROKEN_KEY " "$1/sends"; else echo 0; fi
+}
+
+test_a_broken_card_another_home_holds_reaches_cards_to_fix_and_that_home_once() {
+  local home data msg
+  home=$(make_notify_home broken-route 0)
+  write_broken "$home" "$(date -u +%FT%TZ)" v1
+  notify_refresh "$home" || fail "the first rebuild failed: $(tail -3 "$home/state/.board-refresh.log")"
+  data=$(extract_board_data "$home")
+  jq -e --arg k "$BROKEN_KEY" '[.cards_to_fix[]? | select(.key == $k)]
+      == [{key: $k, task: $k, problem: "no link for PR 91", home: "runner-image", version: "v1"}]' \
+    <<<"$data" >/dev/null || fail "the broken card is not in the board's cards to fix with its reason and home: $(jq -c '.cards_to_fix' <<<"$data")"
+  grep -qxF "$BROKEN_KEY"$'\t'"$BROKEN_KEY"$'\tno link for PR 91\trunner-image' "$home/state/board-cards-to-fix" \
+    || fail "the home's cards-to-fix record does not name the card with its reason and home: $(cat "$home/state/board-cards-to-fix" 2>&1)"
+  assert_equals "1" "$(broken_notices "$home")" "the first rebuild did not send exactly one notice"
+  msg=$(last_send "$home")
+  grep -qx 'runner-image' <<<"$msg" || fail "the notice did not go to runner-image: $msg"
+  grep -qx "FM_HOME=$home" <<<"$msg" || fail "the notice was not sent through this home: $msg"
+  grep -qx 'Fault: no link for PR 91' <<<"$msg" || fail "the notice does not carry the reason: $msg"
+  if grep -qx 'main' "$home/sends"; then fail "a main-owned fault was sent as a home notice: $(cat "$home/sends")"; fi
+  notify_refresh "$home" || fail "the second rebuild failed"
+  assert_equals "2" "$(rebuilt_count "$home")" "the board was not rebuilt twice"
+  assert_equals "1" "$(broken_notices "$home")" "a second rebuild sent the same card version again"
+  write_broken "$home" "$(date -u +%FT%TZ)" v2
+  notify_refresh "$home" || fail "the rebuild with a new card version failed"
+  assert_equals "2" "$(broken_notices "$home")" "a new card version did not send exactly one more notice"
+  write_broken "$home" "$(date -u -d '-31 minutes' +%FT%TZ 2>/dev/null || date -u -v-31M +%FT%TZ)" v3
+  notify_refresh "$home" || fail "the rebuild with a stale verdicts file failed"
+  data=$(extract_board_data "$home")
+  jq -e '[.cards_to_fix[]? | select(.home != null)] == [] and (.cards_to_fix_note | test("stale"))' <<<"$data" >/dev/null \
+    || fail "a stale verdicts file was merged or not noted: $(jq -c '{cards_to_fix, cards_to_fix_note}' <<<"$data")"
+  if grep -qF "$BROKEN_KEY" "$home/state/board-cards-to-fix" 2>/dev/null; then
+    fail "a stale verdict reached the home's cards-to-fix record: $(cat "$home/state/board-cards-to-fix")"
+  fi
+  grep -q 'rebuilt board; board-broken.json is stale' "$home/state/.board-refresh.log" \
+    || fail "the stale verdicts file was not logged: $(tail -3 "$home/state/.board-refresh.log")"
+  assert_equals "2" "$(broken_notices "$home")" "a stale verdicts file sent a notice"
+  pass "a broken card another home holds reaches cards to fix with its reason and home, and that home hears once per version"
 }
 
 test_no_call_change_message_without_a_board_keeper_route() {
@@ -1180,6 +1238,7 @@ fm_test_run \
   test_a_failing_send_never_changes_the_build_result \
   test_a_captain_call_change_tells_board_keeper_once \
   test_a_card_held_back_into_cards_to_fix_never_joins \
+  test_a_broken_card_another_home_holds_reaches_cards_to_fix_and_that_home_once \
   test_no_call_change_message_without_a_board_keeper_route \
   test_a_failing_call_change_send_never_fails_the_rebuild \
   test_every_skipped_pass_is_logged_and_repeats_collapse \

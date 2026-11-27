@@ -1410,6 +1410,59 @@ test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest() {
   pass "build holds back a Captain's Call card with no explicit question or no way to answer it, naming it, and builds every other card"
 }
 
+# The bearings board files a card it judges Broken in state/board-broken.json
+# (see BROKEN VERDICTS FROM BEARINGS in bin/fm-bearings-board.sh). Build merges
+# each fresh verdict into cards_to_fix with its reason and owning home, once per
+# key and never over a card this build already holds back, and a stale or
+# malformed file merges nothing but says so.
+test_build_merges_the_bearings_broken_verdicts_into_cards_to_fix() {
+  local home data out rc
+  home=$(make_home broken-verdicts)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"fos-pr20-merge-status","type":"decision","repo":"fos",
+    "title":"fos PR 20 merge status","about":"Merged upstream.",
+    "options":[{"value":"approve","label":"Approve"},{"value":"decline","label":"Decline"}]}]
+    | .cards_to_fix_note = "authored"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq -n --arg at "$(date -u +%FT%T.123456+00:00)" '{as_of: $at, cards: [
+      {key: "fos-pr20-merge-status", reason: "raw report path in the text", owner_home_id: "main", version: "a1"},
+      {key: "runner-image.rollout-1", reason: "no link for PR 91", owner_home_id: "runner-image", version: "b1"},
+      {key: "runner-image.rollout-1", reason: "a second verdict", owner_home_id: "runner-image", version: "b2"}]}' \
+    > "$home/state/board-broken.json"
+  run_board "$home" build "$data" >/dev/null 2>&1 || fail "a build with fresh broken verdicts failed"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    ([.cards_to_fix[] | select(.key == "fos-pr20-merge-status")] | length == 1 and (.[0].problem | startswith("missing question")) and (.[0] | has("home") | not))
+    and ([.cards_to_fix[] | select(.key == "runner-image.rollout-1")]
+         == [{key: "runner-image.rollout-1", task: "runner-image.rollout-1", problem: "no link for PR 91", home: "runner-image", version: "b1"}])
+    and (has("cards_to_fix_note") | not)' >/dev/null \
+    || fail "the fresh verdicts were not merged once each beside the build's own: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '{cards_to_fix, cards_to_fix_note}')"
+  grep -qxF $'runner-image.rollout-1\trunner-image.rollout-1\tno link for PR 91\trunner-image' "$home/state/board-cards-to-fix" \
+    || fail "the cards-to-fix record does not carry the verdict's home: $(cat "$home/state/board-cards-to-fix")"
+  assert_equals "2" "$(wc -l < "$home/state/board-cards-to-fix" | tr -d ' ')" "the cards-to-fix record does not hold exactly the two cards"
+
+  jq --arg at "$(date -u -d '-31 minutes' +%FT%TZ 2>/dev/null || date -u -v-31M +%FT%TZ)" '.as_of = $at' \
+    "$home/state/board-broken.json" > "$home/state/board-broken.json.tmp" && mv "$home/state/board-broken.json.tmp" "$home/state/board-broken.json"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -eq 0 ] || fail "a stale verdicts file stopped the build: $out"
+  assert_contains "$out" "board-broken.json is stale" "the build did not say the verdicts file was stale: $out"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '([.cards_to_fix[] | select(.home != null)] == []) and (.cards_to_fix_note | test("stale"))' >/dev/null \
+    || fail "a stale verdicts file was merged or not noted: $(extract_payload "$home/.lavish/bearings-board.html" | jq -c '{cards_to_fix, cards_to_fix_note}')"
+
+  printf '{"as_of":"%s","cards":[{"key":"k","reason":"r"}]}\n' "$(date -u +%FT%TZ)" > "$home/state/board-broken.json"
+  run_board "$home" build "$data" >/dev/null 2>&1 || fail "a malformed verdicts file stopped the build"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '([.cards_to_fix[] | select(.home != null)] == []) and (.cards_to_fix_note | test("not the agreed"))' >/dev/null \
+    || fail "a malformed verdicts file was merged or not noted"
+
+  rm -f "$home/state/board-broken.json"
+  run_board "$home" build "$data" >/dev/null 2>&1 || fail "a build with no verdicts file failed"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '([.cards_to_fix[] | select(.home != null)] == []) and (has("cards_to_fix_note") | not)' >/dev/null \
+    || fail "a missing verdicts file left a verdict or a note"
+  pass "build merges each fresh bearings broken verdict into cards to fix once with its home, and notes a stale or malformed file instead"
+}
+
 test_build_accepts_explicit_decisions_and_in_person_actions() {
   local home data
   home=$(make_home explicit-decision)
@@ -2016,6 +2069,7 @@ test_a_linked_page_token_leaves_the_card_text
 test_a_page_its_task_status_names_links_the_hold_card
 test_a_card_that_names_a_page_title_links_that_page
 test_build_flags_a_card_with_no_explicit_decision_and_builds_the_rest
+test_build_merges_the_bearings_broken_verdicts_into_cards_to_fix
 test_build_reads_a_question_anywhere_in_the_reason
 test_build_flags_a_heading_that_packs_several_calls
 test_build_flags_a_cut_heading_and_a_dangling_background
