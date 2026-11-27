@@ -55,7 +55,8 @@
 # mentions firstmate stays.
 #
 # sentences: a text split into its sentences, each without leading space. A
-# sentence ends at ".", "?" or "!" before a space or the end of the text, but
+# sentence ends at "." or "?" before a space or the end of the text, and at "!"
+# only before a space and a capital or at the end of the text, but
 # never at the "." of an abbreviation - e.g., i.e., etc. or vs. (any case) -
 # nor inside a quoted string (straight or curly quotes) or a backtick code span, so a
 # shell argument such as -var="a. b" stays in its sentence.
@@ -146,8 +147,9 @@ FM_BEARINGS_QUESTION_JQ_DEFS='
   def sentences:
     # A quoted string or a backtick code span is one piece: a ".", "?" or "!"
     # inside it never ends the sentence (-var="a. b", `x. y`).
+    # A "!" ends one only before a capital or the end ("prefix ! to do?").
     "\"[^\"\n]*\"|\u201c[^\u201d\n]*\u201d|`[^`\n]*`" as $span
-    | [ scan("(?:" + $span + "|[^[:space:]])(?:" + $span + "|.)*?(?:(?:[?!]|(?<!\\b[eE]\\.g)(?<!\\b[iI]\\.e)(?<!\\b[eE]tc)(?<!\\b[vV]s)\\.)(?=[[:space:]]|$)|$)") ];
+    | [ scan("(?:" + $span + "|[^[:space:]])(?:" + $span + "|.)*?(?:(?:[?]|(?<!\\b[eE]\\.g)(?<!\\b[iI]\\.e)(?<!\\b[eE]tc)(?<!\\b[vV]s)\\.)(?=[[:space:]]|$)|!(?=[[:space:]]+[A-Z]|[[:space:]]*$)|$)") ];
   def clean_reason:
     tostring
     | gsub("(?<![^[:space:]])corr=[0-9a-f]+(?:[[:space:]]+|$)"; "")

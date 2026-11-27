@@ -1949,6 +1949,33 @@ test_an_abbreviation_never_ends_the_card_question() {
   pass "an abbreviation such as e.g. or i.e. never ends the card question"
 }
 
+# A bare "!" inside the text, such as a quoted operator, never ends a sentence:
+# "!" ends one only before a space and a capital, or at the end of the text, so
+# the card question keeps its words after the "!". The text is the board-keeper's
+# "prefix !" hold.
+test_a_bare_bang_never_ends_the_card_question() {
+  local snap="$TMP_ROOT/bang.json" p card reason
+  reason='captain hold prefix-bang: What did you expect prefix ! to do? (a) run the command (b) negate the match'
+  fresh_homes bang
+  write_snapshot "$TMP_ROOT/bang-base.json"
+  jq --arg r "$reason" --arg s "Stop! Should the prefix stay?" '.decisions_open = [
+        {id: "kp", key: "status.kp.captain-hold-prefix-bang", verb: "needs-decision", source: "status",
+         task: "kp", decision_key: "captain-hold-prefix-bang", owner: "kp", title: "prefix bang", reason: $r},
+        {id: "kp", key: "status.kp.captain-hold-prefix-stop", verb: "needs-decision", source: "status",
+         task: "kp", decision_key: "captain-hold-prefix-stop", owner: "kp", title: "prefix stop", reason: $s}]' \
+    "$TMP_ROOT/bang-base.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  card=$(jq -c '.captains_call[] | select(.key == "status.kp.captain-hold-prefix-bang")' <<<"$p")
+  assert_equals "What did you expect prefix ! to do?" \
+    "$(jq -r .question <<<"$card")" "a bare ! does not end the card question: $card"
+  card=$(jq -c '.captains_call[] | select(.key == "status.kp.captain-hold-prefix-stop")' <<<"$p")
+  assert_equals "Should the prefix stay?" \
+    "$(jq -r .question <<<"$card")" "a ! before a capital still ends the sentence: $card"
+  printf '%s\n' "$p" > "$TMP_ROOT/bang-payload.json"
+  validates "$TMP_ROOT/bang-payload.json" || fail "the payload did not satisfy the board validator"
+  pass "a bare ! never ends the card question"
+}
+
 # A sentence a worker addresses to firstmate ("Firstmate: ...", "Firstmate, ...")
 # is not for the captain: the card drops it from its question and body, and it
 # never sticks to the last option. A sentence that only mentions firstmate stays.
@@ -2916,6 +2943,7 @@ fm_test_run \
   test_a_rec_letter_equals_option_line_gets_buttons_and_a_free_text_answer \
   test_a_numbered_recommended_option_line_gets_buttons \
   test_an_abbreviation_never_ends_the_card_question \
+  test_a_bare_bang_never_ends_the_card_question \
   test_a_sentence_addressed_to_firstmate_never_reaches_the_card \
   test_a_link_label_right_before_a_question_mark_keeps_no_space \
   test_a_link_label_never_doubles_its_kind_word \
