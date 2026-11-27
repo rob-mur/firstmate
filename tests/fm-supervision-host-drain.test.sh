@@ -156,6 +156,48 @@ test_captain_report_holds_only_an_asked_question() {
 }
 
 
+# A secondmate that holds its own captain call publishes it on its parent
+# channel as an open captain-hold-<id>-<n> decision, so the board already
+# shows it. An --ask outcome that relays that call must not mint a second
+# <task>-captain hold in this home; the stored summary names the mate's hold.
+# Once the mate's hold resolves, a new question holds here as before.
+test_captain_report_skips_a_call_already_held_in_the_mate_home() {
+  local home state out rc ask
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skip: tasks-axi not found"; return 0; }
+  home="$TMP_ROOT/report-mate-held"
+  state="$home/state"
+  mkdir -p "$state" "$home/data" "$home/config"
+  fm_test_tasks_toml "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  printf 'turn=t1\nrows=4\ntasks=cd\nunscoped=0\nwake=signal: cd.status\nposture=away\n' \
+    > "$state/.supervision-host-turn"
+  ask='Will you dismiss the pipeline-path reviews so PR 1074 merges?'
+  printf 'needs-decision [key=captain-hold-cd-1067-ack-1]: captain hold cd-1067-ack: %s\n' "$ask" \
+    > "$state/cd.status"
+
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
+    --task cd --verdict captain --summary 'PR 1074 waits on the pipeline-path reviews' --ask "$ask" 2>&1); rc=$?
+  expect_code 0 "$rc" "a question the mate already holds must still be recorded: $out"
+  assert_not_contains "$out" "held for the captain" "a call the mate already holds minted a main hold"
+  assert_contains "$out" "already held in the cd home as cd-1067-ack" "the report did not name the mate's hold"
+  assert_not_contains "$(cat "$home/data/backlog.md")" "cd-captain" \
+    "a call the mate already holds minted a main captain hold: $(cat "$home/data/backlog.md")"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list)" \
+    "(held in the cd home as cd-1067-ack)" "the stored outcome does not record where the call is held"
+
+  printf 'resolved [key=captain-hold-cd-1067-ack-1]: captain hold cd-1067-ack: answered\n' >> "$state/cd.status"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
+    --task cd --verdict captain --summary 'PR 1074 waits again' \
+    --ask 'Will you clear review 672 so PR 1074 merges?' 2>&1); rc=$?
+  expect_code 0 "$rc" "a new question after the mate's hold resolved must be recorded: $out"
+  assert_contains "$out" "held for the captain as cd-captain" \
+    "a question the mate no longer holds was not held in this home: $out"
+  pass "a captain question the mate already holds in its own home mints no main hold and names the mate's hold"
+}
+
+
 # The return brief is rendered after the record is archived, so a non-silent
 # report made after that may be missing from it: the report queues its relay
 # for main, while a report made during the away window only waits for the brief.
@@ -675,6 +717,7 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair() {
 fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
   test_captain_report_holds_only_an_asked_question \
+  test_captain_report_skips_a_call_already_held_in_the_mate_home \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_branch_outcomes_only_on_a_host_home_off_pi \

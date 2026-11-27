@@ -14,6 +14,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 | Why does cleanup of finished work leave a captain call open? | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
 | How does a keyed answer from chat or a board reach the call? | [Answer-time resolution](#answer-time-resolution) |
 | How is a call closed when it stopped being a question? | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
+| How is a hold firstmate minted by mistake closed? | [Withdrawing a mistaken hold](#withdrawing-a-mistaken-hold) |
 | Why did a decision card disappear from the board? | [Card hygiene](#card-hygiene-a-landed-subject-is-not-a-live-call) |
 | Where does a hold appear in snapshots and Bearings? | [Structured read surfaces](#structured-read-surfaces) |
 | What does a `RECORD DIVERGENCE` section mean? | [Record divergence](#record-divergence) |
@@ -43,6 +44,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | `bind`, `unbind`, `binding` | Record that a captured-answer source feeds the keyed-answer intake. | [Source bindings](#source-bindings) |
 | `reconcile-requests` | Internal intake that records a reconcile request from a board selection. | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
 | `reconcile close`, `reconcile note`, `reconcile list` | Retire or list pending reconcile requests. | [Verifying and retiring a request](#verifying-and-retiring-a-request) |
+| `withdraw` | Closes a hold firstmate minted by mistake, on an evidence file and a reason. | [Withdrawing a mistaken hold](#withdrawing-a-mistaken-hold) |
 | `diverged` | Read-only report of a call whose two records disagree. | [Record divergence](#record-divergence) |
 | `pr-policy`, `settle-pr` | Declare and apply opt-in forge settlement. | [PR settlement](#pr-settlement) |
 
@@ -238,6 +240,8 @@ Teardown asks the read-only `covered` subcommand:
 `bin/fm-branch-report.sh --verdict captain --ask '<question?>'` applies the same rule at report time, for an outcome that needs the captain's decision or a step only the captain can take.
 Unless a hold already covers the task, it holds `<task>-captain` (or `fleet-captain-<epoch>` for a fleet report) with the question as its reason, a free-text answer, and the question's https URLs as its links, so the question shows on the board as a card ready to answer.
 An `--ask` that does not end in `?` is refused, and a captain outcome without `--ask` holds nothing, because a statement makes a card with no question to answer.
+It also holds nothing when the task's secondmate already holds the call in its own home, shown by an open `captain-hold-<id>-<n>` decision on the task's parent-channel status file.
+The stored outcome then names that hold as `(held in the <task> home as <ids>)`, so the call keeps one card and one answer path.
 
 ## Answer-time resolution
 
@@ -367,6 +371,34 @@ A successful normal answer also retires any pending request, because an answered
 Every retirement is checked.
 If request removal fails after an answer, close, or note is already durable, the durable outcome stands, but the command fails and leaves the pending request visible for retry.
 Board-requested reconciliation remains separate from the opt-in forge path below.
+
+## Withdrawing a mistaken hold
+
+`withdraw <task-id> --evidence <file> --reason <why>` closes a captain hold that firstmate minted by mistake.
+Examples are a duplicate of a call another home already holds, or a hold whose reason is a status note that asks the captain nothing.
+It is not a way to settle a real call: a real call is answered with the captain's words or reconciled on a board request.
+
+The command needs no captain words and no board request, so the evidence file carries the claim.
+It refuses without `--reason`, and without an `--evidence` file that exists, is readable, and is not empty.
+A refusal leaves the hold open and unchanged.
+
+It writes a resolution record whose mode is `withdrawn`, with this text under a `Withdrawal evidence:` label:
+
+- the reason;
+- the evidence file's absolute path;
+- the evidence file's sha256, so a later reader can check the file was not changed.
+
+Then it closes the task and publishes the resolution on a secondmate's parent channel, as an answer does.
+The next board build drops the card because the task is no longer an open hold.
+
+The distinct mode and label keep the record from reading as a captain ruling:
+
+- `answered` skips a withdrawn record, so a status decision that the hold mirrored is not closed as answered;
+- the fleet snapshot's hold answers show only captain decisions and reconciliation evidence;
+- `answer` refuses to replay over a withdrawn record.
+
+An exact retry with the same reason and evidence finishes an interrupted withdrawal and is otherwise a no-op.
+A different reason or changed evidence on a closed task is refused.
 
 ## PR settlement
 
@@ -724,6 +756,18 @@ The captured-source coverage proves:
 - The generic runner creates a request only through a verified bound source.
 - Chat reconcile text creates none.
 - The resulting board request authorizes evidence-backed closure.
+
+### Withdraw coverage
+
+`test_withdraw_closes_a_mistaken_hold_on_evidence_only` in `tests/fm-captain-hold-lifecycle.test.sh` proves these points:
+
+- A withdrawal is refused with no evidence file, a missing file, an empty file, or no reason, and the hold stays open.
+- With evidence, the hold closes with a `withdrawn` record under `Withdrawal evidence:` that keeps the reason and the evidence path.
+- `answered` does not read the withdrawn hold as a captain answer, and `answer` refuses to replay over it.
+- An exact retry succeeds.
+- The card that the board payload built for the open hold is gone from the next build.
+
+`test_captain_report_skips_a_call_already_held_in_the_mate_home` in `tests/fm-supervision-host-drain.test.sh` proves that a captain report with `--ask` adds no main hold while the task's secondmate holds an open call, and holds again once that call is resolved.
 
 ### Board suite
 

@@ -2285,6 +2285,82 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   pass "reconcile closes a moot call with evidence and keeps an active one open with a note"
 }
 
+test_withdraw_closes_a_mistaken_hold_on_evidence_only() {
+  local home id show out rc opened card
+  home=$(make_home withdraw-mistaken)
+  id=sample-dup-captain
+  opened=$(date +%s)
+  run_captain "$home" hold "$id" --title "Duplicate of a mate-home call" \
+    --reason "which admission order?" --repo sample --origin sample >/dev/null \
+    || fail "could not hold the mistaken call"
+  card=$(run_bearings "$home" \
+    | FM_HOME="$home" FM_BEARINGS_BOARD_PR_CHECK=0 FM_BEARINGS_BOARD_MR_CHECK=0 \
+      "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot - \
+    | jq -c --arg id "$id" '[.captains_call[] | select(.key == $id)] | length')
+  assert_equals "$card" 1 "the held call had no board card before the withdrawal"
+
+  set +e
+  out=$(run_captain "$home" withdraw "$id" --reason "duplicate of the mate-home call" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a withdrawal was accepted with no evidence file"
+  assert_contains "$out" "evidence" "the refusal did not name the missing evidence: $out"
+  set +e
+  out=$(run_captain "$home" withdraw "$id" --evidence "$home/missing.txt" \
+    --reason "duplicate of the mate-home call" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a withdrawal was accepted with a missing evidence file"
+  : > "$home/empty.txt"
+  set +e
+  out=$(run_captain "$home" withdraw "$id" --evidence "$home/empty.txt" \
+    --reason "duplicate of the mate-home call" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a withdrawal was accepted with an empty evidence file"
+  printf 'The sample home holds this call as sample-admission.\n' > "$home/evidence.txt"
+  set +e
+  out=$(run_captain "$home" withdraw "$id" --evidence "$home/evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a withdrawal was accepted with no reason"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "held: yes" "a refused withdrawal released the hold"
+  assert_not_contains "$show" "state: done" "a refused withdrawal closed the hold"
+
+  run_captain "$home" withdraw "$id" --evidence "$home/evidence.txt" \
+    --reason "duplicate of the mate-home call" >/dev/null \
+    || fail "could not withdraw the mistaken call with evidence"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: done" "the withdrawn call did not close"
+  assert_contains "$show" "Resolution mode: withdrawn" "the withdrawal did not record how it closed"
+  assert_contains "$show" "Withdrawal evidence:" "the withdrawal did not record its evidence"
+  assert_contains "$show" "duplicate of the mate-home call" "the withdrawal reason was lost"
+  assert_contains "$show" "$home/evidence.txt" "the evidence path was lost"
+  case "$show" in
+    *"Captain decision:"*) fail "a withdrawal was recorded as the captain's own words" ;;
+    *"Selected answer:"*) fail "a withdrawal presented its reason as the captain's selected answer" ;;
+  esac
+  if run_captain "$home" answered sample "$id" --opened-at "$opened" >/dev/null 2>&1; then
+    fail "the withdrawn call was read as a captain answer"
+  fi
+  run_captain "$home" withdraw "$id" --evidence "$home/evidence.txt" \
+    --reason "duplicate of the mate-home call" >/dev/null \
+    || fail "an exact withdrawal retry was refused"
+  set +e
+  out=$(run_captain "$home" answer "$id" --decision-file "$home/evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a withdrawn call replayed as a captain answer"
+
+  card=$(run_bearings "$home" \
+    | FM_HOME="$home" FM_BEARINGS_BOARD_PR_CHECK=0 FM_BEARINGS_BOARD_MR_CHECK=0 \
+      "$ROOT/bin/fm-bearings-board-payload.sh" --snapshot - \
+    | jq -c --arg id "$id" '[.captains_call[] | select(.key == $id)] | length')
+  assert_equals "$card" 0 "the withdrawn call kept its board card"
+  pass "withdraw closes a mistaken hold on evidence only and is never read as a captain answer"
+}
+
 test_reconcile_outcomes_retry_partial_failures_once() {
   local home out show list rc
   home=$(make_home reconcile-partial-retry)
@@ -3371,6 +3447,7 @@ test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests
 test_reconcile_closes_with_evidence_or_keeps_the_call_open
+test_withdraw_closes_a_mistaken_hold_on_evidence_only
 test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
