@@ -318,6 +318,11 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-standing-mandate-lib.sh
 . "$SCRIPT_DIR/fm-standing-mandate-lib.sh"
+# Usage-limit waits: bin/fm-usage-limit-lib.sh owns reading the pane's limit
+# wording and reset time; usage_limit_stale_gate below owns the stale deferral
+# and the one reset nudge.
+# shellcheck source=bin/fm-usage-limit-lib.sh
+. "$SCRIPT_DIR/fm-usage-limit-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -2954,6 +2959,79 @@ stale_reason_naming_dialog() {  # <reason> [dialog-name]
   esac
 }
 
+# usage_limit_stale_gate <window> <task> <window-key> <hash> <tail40> <status-line>
+# A worker stopped by its plan's usage limit can only wait for the reset the
+# pane names, so re-waking firstmate about it before then buys nothing (the
+# 2026-11 limit days spent ~100k weighted tokens per day on such wakes), and
+# nobody presses Enter at the reset unless firstmate steers (every resumed
+# worker in that sample waited for a steer, 50 idle minutes median).
+# Returns 0 when it handled this stale poll, 1 when the ordinary stale path
+# must run. Per limit episode (one parsed reset epoch, in .usage-limit-<key>):
+#   first sight  -> one stale wake naming the limit and its reset, with a
+#                   demand-deep-inspection clause, because the status log may
+#                   lag real progress (a PR opened just before the limit);
+#   before reset -> absorbed silently, wedge timer cleared;
+#   at reset     -> one continue steer through fm-send's inbox plane, unless
+#                   the interactive limit menu is open (typed text would answer
+#                   it), then the ordinary path owns the pane again.
+# No parseable limit on the pane ends the episode and returns 1.
+FM_USAGE_LIMIT_NUDGE_GRACE_SECS=${FM_USAGE_LIMIT_NUDGE_GRACE_SECS:-60}
+FM_USAGE_LIMIT_NUDGE_TEXT=${FM_USAGE_LIMIT_NUDGE_TEXT:-The usage limit has reset. Continue where you stopped, and push your work as far as it can go.}
+usage_limit_stale_gate() {
+  local w=$1 task=$2 key=$3 h=$4 screen=$5 line=$6
+  local mf="$STATE/.usage-limit-$key" verdict state reset rec_reset rec_nudged now reason iso
+  [ -n "$task" ] || return 1
+  if ! verdict=$(fm_usage_limit_read "$screen"); then
+    rm -f "$mf"
+    return 1
+  fi
+  ! captain_held_silenced "$line" || return 1
+  state=${verdict%% *}
+  reset=${verdict#* }
+  rec_reset=; rec_nudged=
+  [ ! -e "$mf" ] || read -r rec_reset rec_nudged < "$mf" || true
+  now=$(date +%s)
+  if [ "$state" = limited ]; then
+    if [ "$rec_reset" = "$reset" ]; then
+      printf '%s' "$h" > "$STATE/.stale-$key"
+      wedge_episode_end "$key"
+      triage_log "absorbed stale (usage-limit wait until reset epoch $reset): $w"
+      return 0
+    fi
+    printf '%s 0\n' "$reset" > "$mf"
+    iso=$(date -u -d "@$reset" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$reset" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "$reset")
+    reason="stale: $w (usage-limit wait until $iso, demand-deep-inspection: first sight of this limit episode - check for work the status log has not recorded; later stale wakes defer to the reset, then one continue steer is sent)"
+    fm_wake_append stale "$w" "$reason" || exit 1
+    printf '%s' "$h" > "$STATE/.stale-$key"
+    wedge_episode_end "$key"
+    wake "$reason"
+    return 0
+  fi
+  # The pane says the limit has reset, or the parsed reset has passed.
+  [ "$rec_nudged" != 1 ] || return 1
+  if [ "$reset" != 0 ] && [ "$now" -lt $(( reset + FM_USAGE_LIMIT_NUDGE_GRACE_SECS )) ] \
+    && ! printf '%s' "$screen" | grep -q 'limit has reset'; then
+    printf '%s' "$h" > "$STATE/.stale-$key"
+    wedge_episode_end "$key"
+    triage_log "absorbed stale (usage-limit reset grace until epoch $(( reset + FM_USAGE_LIMIT_NUDGE_GRACE_SECS ))): $w"
+    return 0
+  fi
+  if fm_usage_limit_menu "$screen"; then
+    triage_log "usage-limit reset with the limit menu open, no steer sent: $w"
+    return 1
+  fi
+  printf '%s 1\n' "${rec_reset:-$reset}" > "$mf"
+  if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "${FM_USAGE_LIMIT_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}" \
+    "$task" "$FM_USAGE_LIMIT_NUDGE_TEXT" >/dev/null 2>&1; then
+    triage_log "usage-limit reset: sent one continue steer: $w"
+  else
+    triage_log "usage-limit reset: continue steer was not delivered, ordinary stale handling resumes: $w"
+  fi
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  wedge_episode_end "$key"
+  return 0
+}
+
 clear_pause_tracking() {  # <window-key>
   local key=$1 throttle="$STATE/.paused-resurfaced-$1" scope
   scope=$(cat "$throttle" 2>/dev/null || true)
@@ -5176,6 +5254,8 @@ EOF
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
+        elif usage_limit_stale_gate "$w" "$task" "$key" "$h" "$tail40" "$last"; then
+          :
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before,
           # except that a captain-held pane is never handed over while the
