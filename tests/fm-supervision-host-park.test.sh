@@ -580,6 +580,9 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
 
   export FM_FAKE_CREW_STATE_held='state: done · source: fake'
   export FM_INACTIVE_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" FM_INACTIVE_RECONCILE_SECS=60
+  # Each cadence below is opened by aging the scan's own marker, so the watcher
+  # must offer the scan on every poll instead of on its own reconcile cadence.
+  export FM_WATCH_RECONCILE_SECS=0
   start_host "$home"
   wait_until 250 captain_rows_at_least "$home" 1 \
     || fail "held: the first cadence never escalated the held outcome: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
@@ -605,7 +608,7 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
   [ "$(captain_rows "$home")" -eq 2 ] || fail "held: the decision escalated $(captain_rows "$home") rows, not one"
   [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1 | sed -n 's/.*"task":"\([^"]*\)".*"verdict":"\([a-z]*\)".*/\1 \2/p')" = 'held captain' ] \
     || fail "held: the decision was not recorded as a captain outcome for the held task: $(cat "$home/state/branch-outcomes.jsonl")"
-  unset FM_FAKE_CREW_STATE_held FM_INACTIVE_CREW_STATE_BIN FM_INACTIVE_RECONCILE_SECS
+  unset FM_FAKE_CREW_STATE_held FM_INACTIVE_CREW_STATE_BIN FM_INACTIVE_RECONCILE_SECS FM_WATCH_RECONCILE_SECS
   # Stop the host and its watcher here, so no cadence scan is still writing
   # into this home while the suite's cleanup removes it.
   pid=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
