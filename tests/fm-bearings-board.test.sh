@@ -1556,6 +1556,39 @@ test_build_flags_a_status_card_whose_done_options_are_only_defaults() {
   pass "the board holds back a status card whose done/not-done defaults stand in for a question or lettered choices"
 }
 
+# A hold's done/not-done options let its heading be the imperative that asks
+# for the in-person action, never a statement whose request comes later: a
+# hold reason that opens with a statement and has no "?" (the cd-1067-ack hold,
+# "PR 1074 adds gitleaks to the CD shell.") goes to cards_to_fix, while the
+# same request led by its imperative still builds.
+test_build_flags_an_action_hold_whose_heading_is_a_statement() {
+  local home data out
+  home=$(make_home action-statement-heading)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"cd-1067-ack","type":"decision","repo":"cd",
+    "title":"#1067: gitleaks in the CD shell","question":"PR 1074 adds gitleaks to the CD shell",
+    "about":"Please re-run the failed job.","allow_freeform":true,
+    "context":{"task":"cd-1067-ack","reason":"PR 1074 adds gitleaks to the CD shell. Please re-run the failed job."},
+    "options":[{"value":"done","label":"Done"},{"value":"not-done","label":"Not done (say why)","hint":"Say why in the answer box"}],
+    "links":[{"url":"https://forgejo.example/rob/cd/pulls/1074","label":"PR 1074"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" cd-1067-ack "question (PR 1074 adds gitleaks to the CD shell is not a question)" \
+    "an action hold whose heading is a statement"
+
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"cd-1067-rerun","type":"decision","repo":"cd",
+    "title":"#1067: gitleaks in the CD shell","question":"Please re-run the failed gitleaks job on PR 1074",
+    "about":"PR 1074 adds gitleaks to the CD shell.","allow_freeform":true,
+    "context":{"task":"cd-1067-rerun","reason":"Please re-run the failed gitleaks job on PR 1074. PR 1074 adds gitleaks to the CD shell."},
+    "options":[{"value":"done","label":"Done"},{"value":"not-done","label":"Not done (say why)","hint":"Say why in the answer box"}],
+    "links":[{"url":"https://forgejo.example/rob/cd/pulls/1074","label":"PR 1074"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "an action hold led by its imperative did not build: $out"
+  assert_not_contains "$out" "undecided-card: cd-1067-rerun" "an action hold led by its imperative was held back: $out"
+  pass "the board holds back an action hold whose heading is a statement, not one led by its imperative"
+}
+
 # A hold reason that leads with a colon list cuts its heading to the list's
 # lead ("Four calls"), but the question it ends on still asks: the card builds.
 # A reason that asks nowhere is still held back for its question.
@@ -2113,6 +2146,7 @@ test_build_reads_a_question_anywhere_in_the_reason
 test_build_flags_a_heading_that_packs_several_calls
 test_build_flags_a_cut_heading_and_a_dangling_background
 test_build_accepts_explicit_decisions_and_in_person_actions
+test_build_flags_an_action_hold_whose_heading_is_a_statement
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_a_refusal_names_the_first_failing_item_and_its_fields
 test_charted_kind_is_optional_and_accepts_both_values
