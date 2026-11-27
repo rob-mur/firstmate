@@ -287,6 +287,56 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
 }
 
 
+# A suspended machine keeps Bash's park counter running while Claude's hook
+# timer stops, so the counter alone ends every park at once on resume. The two
+# clock files below simulate a 600-second suspend: the park counter jumps by
+# 605 seconds while the awake clock moves only 5. Each file is replaced whole
+# so the host never reads a half-written clock.
+
+set_clock() {  # <file> <seconds>
+  printf '%s\n' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"
+}
+
+test_park_boundary_counts_awake_time_not_suspended_time() {
+  local home
+  home=$(make_home boundary-suspend attended)
+  set_clock "$home/awake-clock" 1000
+  set_clock "$home/park-clock" 0
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" \
+    FM_TEST_SUPERVISION_HOST_AWAKE_CLOCK="$home/awake-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary-suspend: the host never started a watcher cycle"
+  set_clock "$home/awake-clock" 1005
+  set_clock "$home/park-clock" 605
+  wait_until 150 sh -c 'grep -q "	awake-clock	park 605s by the process counter, 5s awake$" "$1" || [ -s "$2" ]' _ \
+    "$home/state/.supervision-host.log" "$home/host.rc" || fail "boundary-suspend: the host neither confirmed the awake clock nor exited"
+  sleep 3
+  host_exited "$home" && fail "the host ended its park after a simulated suspend with 5 awake seconds of 60: $(cat "$home/host.out")"
+  watcher_live "$home" || fail "the suspend stopped the parked watcher"
+  set_clock "$home/awake-clock" 1060
+  set_clock "$home/park-clock" 660
+  wait_until 150 host_exited "$home" || fail "boundary-suspend: the host did not end its park at 60 awake seconds"
+  assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the awake-time bound must reach main as a host line"
+  assert_re '	boundary	after 60s$' "$home/state/.supervision-host.log" "the boundary must be logged in awake seconds"
+  watcher_live "$home" && fail "the awake-time boundary left the watcher running"
+  pass "host: a suspend does not end the park, which still ends at its bound in awake time"
+}
+
+test_park_boundary_without_an_awake_clock_keeps_the_counter() {
+  local home
+  home=$(make_home boundary-no-awake attended)
+  set_clock "$home/awake-clock" unavailable
+  set_clock "$home/park-clock" 0
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" \
+    FM_TEST_SUPERVISION_HOST_AWAKE_CLOCK="$home/awake-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary-no-awake: the host never started a watcher cycle"
+  set_clock "$home/park-clock" 605
+  wait_until 150 host_exited "$home" || fail "boundary-no-awake: without an awake clock the counter must still end the park"
+  assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the counter's boundary must reach main as a host line"
+  assert_no_re 'awake-clock' "$home/state/.supervision-host.log" "no awake clock must mean no awake correction"
+  pass "host: without an awake clock the park counter alone ends the park"
+}
+
+
 # A close that lands while a turn is running can only wait: the host ends its
 # park at the bound regardless of how many closes are queued behind it. The
 # park runs on the test clock (FM_TEST_SUPERVISION_HOST_CLOCK), which the test
@@ -680,6 +730,8 @@ fm_test_run \
   test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted \
   test_compaction_abandoned_at_the_park_boundary_is_not_marked_done \
   test_park_boundary_ends_the_park_before_the_hook_timeout \
+  test_park_boundary_counts_awake_time_not_suspended_time \
+  test_park_boundary_without_an_awake_clock_keeps_the_counter \
   test_park_boundary_holds_under_back_to_back_closes \
   test_park_boundary_rechecked_just_before_the_engine_turn \
   test_park_test_clock_requires_the_marker \
