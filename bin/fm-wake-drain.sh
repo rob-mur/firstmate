@@ -4,7 +4,7 @@
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, the
-# board's held-back CARDS TO FIX, and on
+# board's held-back or Broken CARDS TO FIX, and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
@@ -893,21 +893,22 @@ print_status_sections() {
 }
 
 # CARDS TO FIX: the Captain's Call cards the board build held back because they
-# do not state their decision (bin/fm-bearings-board.sh owns the check and
-# writes state/board-cards-to-fix as <task>\t<key>\t<problem> lines). Main's
-# drain names each one by owning task and key on every drain until a rebuild
-# shows it, so it is re-posted as a clean keyed decision rather than reaching
-# the captain; it prints nothing when the build held no card back.
+# do not state their decision, and the cards the bearings board filed as Broken
+# (bin/fm-bearings-board.sh owns both and writes state/board-cards-to-fix as
+# <task>\t<key>\t<problem>[\t<home>] lines). Main's drain names each one by
+# owning task and key, and its owning home when the line names one, on every
+# drain until a rebuild shows it, so it is re-posted as a clean keyed decision
+# rather than reaching the captain; it prints nothing when no card needs a fix.
 print_cards_to_fix_section() {
-  local file="$STATE/board-cards-to-fix" task key problem printed=0
+  local file="$STATE/board-cards-to-fix" task key problem home printed=0
   [ "$ACTOR" = main ] && [ -s "$file" ] || return 0
-  while IFS=$'\t' read -r task key problem || [ -n "$task" ]; do
+  while IFS=$'\t' read -r task key problem home || [ -n "$task" ]; do
     [ -n "$task" ] && [ -n "$key" ] || continue
     if [ "$printed" = 0 ]; then
-      printf "CARDS TO FIX (held back from Captain's Call by the board build):\n"
+      printf "CARDS TO FIX (held back from Captain's Call or filed as Broken by the board build):\n"
       printed=1
     fi
-    fm_cap_line_var "  $task [key=$key]: $problem"
+    fm_cap_line_var "  $task [key=$key]${home:+ [home=$home]}: $problem"
     printf '%s\n' "$FM_LINE_CAP_LINE"
   done < "$file"
   [ "$printed" = 1 ] || return 0
