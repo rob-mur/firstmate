@@ -183,8 +183,17 @@
 # successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (3: seconds
 # between the arm identity refresh, park boundary, and warm-compaction checks).
 # Park duration uses Bash's process-relative SECONDS counter (including Bash
-# 3.2), while durable timestamps still use epoch time. This is not a portable
-# monotonic-clock guarantee. Arm exit probes use ordinary 1-second child sleeps
+# 3.2), while durable timestamps still use epoch time. That counter keeps
+# running while the machine is suspended, but Claude's hook timer does not, so
+# a counter reading that could end the park or refuse a turn is confirmed
+# against an awake clock read at host start and at that reading: Python's
+# time.monotonic (CLOCK_MONOTONIC on Linux, mach_absolute_time on macOS, both
+# stopped during suspend), at most once per minute of counter time. Suspended
+# seconds it proves are left out of the park, logged as an "awake-clock" line.
+# Without python3, and on a Cursor primary, whose stop-hook timer is not
+# verified to stop during suspend, the counter alone decides. Warm-cache
+# compaction still measures idleness by the counter, because the prompt cache
+# expires in wall time. Arm exit probes use ordinary 1-second child sleeps
 # within the POLL-cadence maintenance and boundary checks, and the first
 # status line is still checked after every probe until it streams; close
 # observation and a shell-only caught signal may wait that interval plus
@@ -193,6 +202,9 @@
 # FM_TEST_SUPERVISION_HOST_CLOCK names a file holding the park's elapsed
 # seconds, which the park and turn boundary checks read in place of SECONDS
 # only when FM_TEST_SEAM=1; tests/lib.sh arms the marker for isolated suites.
+# Under that marker FM_TEST_SUPERVISION_HOST_AWAKE_CLOCK names a file holding
+# the awake clock's reading; with the park clock set and no awake clock file,
+# the awake clock is unavailable.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -269,8 +281,34 @@ HEALTH_FILE="$STATE/.supervision-host-health"
 MIRROR_FEED="$STATE/.supervision-host-mirror"
 LEFT_RECORD="$STATE/.supervision-host-left"
 
+# Print whole seconds of a clock that stops while the machine is suspended, or
+# nothing when none is available (header, THE PARK BOUNDARY).
+awake_clock() {
+  local reading
+  if [ "${FM_TEST_SEAM:-}" = 1 ] && { [ -n "${FM_TEST_SUPERVISION_HOST_AWAKE_CLOCK:-}" ] || [ -n "${FM_TEST_SUPERVISION_HOST_CLOCK:-}" ]; }; then
+    [ -n "${FM_TEST_SUPERVISION_HOST_AWAKE_CLOCK:-}" ] || return 0
+    reading=$(cat "$FM_TEST_SUPERVISION_HOST_AWAKE_CLOCK" 2>/dev/null)
+  else
+    reading=$(python3 -I -c 'import time; print(int(time.monotonic()))' 2>/dev/null)
+  fi
+  case "$reading" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s\n' "$reading"
+}
+
 HOST_PID=$$
 HOST_STARTED_SECONDS=$SECONDS
+# Cursor's stop-hook timer is not verified to stop during suspend, so its
+# boundary stays on the process counter alone.
+HOST_STARTED_AWAKE=
+[ "$PRIMARY" = cursor ] || HOST_STARTED_AWAKE=$(awake_clock)
+# Park seconds the awake clock proved were spent suspended, the process-counter
+# reading at the last confirmation, and the first reading that needs one.
+PARK_SUSPENDED=0
+AWAKE_CONFIRMED_AT=
+AWAKE_RECHECK=60
+AWAKE_CANDIDATE=$((PARK_LIMIT - TURN_TIMEOUT - ENGINE_GRACE))
+[ "$AWAKE_CANDIDATE" -le "$PARK_SECONDS" ] || AWAKE_CANDIDATE=$PARK_SECONDS
+[ "$AWAKE_CANDIDATE" -ge 0 ] || AWAKE_CANDIDATE=0
 HOST_STARTED=$(date +%s)
 GEN="host-$HOST_PID-$HOST_STARTED"
 TURN_SEQ=0
@@ -517,12 +555,28 @@ start_arm() {  # <predecessor-arm-pid or empty> [--restart]; sets the started pi
   STARTED_ARM_OUT=$out
 }
 
-park_elapsed() {  # Sets PARK_ELAPSED without a production clock/helper fork.
+# Sets PARK_WALL (the process counter's park seconds) and PARK_ELAPSED (those
+# less any suspended time the awake clock proved). The awake clock is read only
+# from the first reading that could end the park or refuse a turn, and then at
+# most once per AWAKE_RECHECK counter seconds, so an ordinary pass forks nothing.
+park_elapsed() {
+  local now awake
   if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_TEST_SUPERVISION_HOST_CLOCK:-}" ]; then
-    PARK_ELAPSED=$(numeric_or "$(cat "$FM_TEST_SUPERVISION_HOST_CLOCK" 2>/dev/null)" 0)
-    return
+    PARK_WALL=$(numeric_or "$(cat "$FM_TEST_SUPERVISION_HOST_CLOCK" 2>/dev/null)" 0)
+  else
+    PARK_WALL=$((SECONDS - HOST_STARTED_SECONDS))
   fi
-  PARK_ELAPSED=$((SECONDS - HOST_STARTED_SECONDS))
+  PARK_ELAPSED=$((PARK_WALL - PARK_SUSPENDED))
+  [ -n "$HOST_STARTED_AWAKE" ] && [ "$PARK_ELAPSED" -ge "$AWAKE_CANDIDATE" ] || return 0
+  [ -z "$AWAKE_CONFIRMED_AT" ] || [ $((PARK_WALL - AWAKE_CONFIRMED_AT)) -ge "$AWAKE_RECHECK" ] || return 0
+  AWAKE_CONFIRMED_AT=$PARK_WALL
+  now=$(awake_clock)
+  [ -n "$now" ] || return 0
+  awake=$((now - HOST_STARTED_AWAKE))
+  { [ "$awake" -ge 0 ] && [ "$awake" -lt "$PARK_ELAPSED" ]; } || return 0
+  log_line "awake-clock	park ${PARK_WALL}s by the process counter, ${awake}s awake"
+  PARK_SUSPENDED=$((PARK_WALL - awake))
+  PARK_ELAPSED=$awake
 }
 
 boundary_reached() {
@@ -534,6 +588,9 @@ boundary_reached() {
     && [ "$PARK_ELAPSED" -ge "$PARK_SECONDS" ]; then
     log_line "quiet-boundary\tafter ${PARK_ELAPSED}s; watcher retained"
     HOST_STARTED_SECONDS=$SECONDS
+    [ -z "$HOST_STARTED_AWAKE" ] || HOST_STARTED_AWAKE=$(awake_clock)
+    PARK_SUSPENDED=0
+    AWAKE_CONFIRMED_AT=
     PARK_ELAPSED=0
     WARM_COMPACT_LAST_TICK=-1
     return 1
@@ -589,17 +646,19 @@ WARM_COMPACT_PRIMARY_DONE=0
 WARM_COMPACT_VERDICT=
 
 warm_compact_tick() {
-  local backend target verdict ended compacted
+  local backend target verdict ended compacted idle
   [ -f "$CONFIG/warm-compact" ] || return 0
   park_elapsed
-  if [ "$WARM_COMPACT_LAST_TICK" -ge 0 ] && [ $((PARK_ELAPSED - WARM_COMPACT_LAST_TICK)) -lt "$WARM_COMPACT_TICK" ]; then
+  # The prompt cache expires in wall time, so idleness counts suspended time.
+  idle=$PARK_WALL
+  if [ "$WARM_COMPACT_LAST_TICK" -ge 0 ] && [ $((idle - WARM_COMPACT_LAST_TICK)) -lt "$WARM_COMPACT_TICK" ]; then
     return 0
   fi
-  WARM_COMPACT_LAST_TICK=$PARK_ELAPSED
+  WARM_COMPACT_LAST_TICK=$idle
   turn_crosses_boundary && return 0
   if [ "$PRIMARY" = claude ] && [ "$WARM_COMPACT_PRIMARY_DONE" -eq 0 ] && [ -n "${FM_WARM_COMPACT_TRANSCRIPT:-}" ] \
     && target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend); then
-    verdict=$(fm_warm_compact_primary "$CONFIG" "$backend" "$target" "$PARK_ELAPSED" "$FM_WARM_COMPACT_TRANSCRIPT" 0)
+    verdict=$(fm_warm_compact_primary "$CONFIG" "$backend" "$target" "$idle" "$FM_WARM_COMPACT_TRANSCRIPT" 0)
     case "$verdict" in sent | failed) WARM_COMPACT_PRIMARY_DONE=1; log_line "warm-compact	primary	$verdict" ;; esac
   fi
   if fm_supervision_host_config "$CONFIG" "$PRIMARY" && [ -n "$FM_SUPERVISION_ENGINE" ] && engine_record_resumable; then

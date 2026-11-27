@@ -332,6 +332,7 @@ But a host absorbs its own wakes, so it ends its park itself before that registr
 `FM_SUPERVISION_HOST_PARK_SECONDS` sets that boundary (default 27,000).
 A value that is not a positive integer below 28,800 is treated as the default.
 The OpenCode, omp, and Grok owners have no hook timeout and keep the same default, so their parks end on the same cadence.
+Claude's hook timer does not count time the machine spends suspended, so the host measures the boundary in awake time where a clock that stops during suspend is available; `bin/fm-supervision-host.sh`'s header owns that mechanism and its fallback.
 
 ### At the boundary
 
