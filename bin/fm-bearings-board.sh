@@ -15,6 +15,7 @@
 #   fm-bearings-board.sh path
 #   fm-bearings-board.sh url
 #   fm-bearings-board.sh ended
+#   fm-bearings-board.sh broken-verdicts
 #
 # build      Validate the payload, drop the Captain's Call cards whose subject
 #            already landed, give every surviving decision card the standard
@@ -66,6 +67,9 @@
 #            answers not ended, so the refresh keeps working if Lavish changes
 #            that file. Verified against lavish-axi 0.1.96, whose session
 #            statuses are open, feedback, ended, and user-ended.
+# broken-verdicts
+#            Print the bearings Broken verdicts build would merge into
+#            `cards_to_fix` (see BROKEN VERDICTS FROM BEARINGS below).
 #
 # THE URL IS STABLE BUT NOT ALWAYS SERVED. Lavish names a session by the first
 # 16 hex digits of sha256(realpath of the board file), so the stable board path
@@ -119,11 +123,31 @@
 # (the key is absent when no card was held back), so
 # no consumer counts or shows it as the captain's while every other card still
 # builds. The page does not render `cards_to_fix`. The build also publishes
-# the list as `<task>\t<key>\t<problem>` lines at <state>/board-cards-to-fix
+# the list as `<task>\t<key>\t<problem>` lines, with a fourth `<home>` field
+# for a card another builder judged (below), at <state>/board-cards-to-fix
 # (removed when empty), which bin/fm-wake-drain.sh presents to main as CARDS
 # TO FIX so the owner re-posts the card as a clean keyed decision.
-# `cards_to_fix` and a card's `problem` are the build's own: authored ones are
-# cleared.
+# `cards_to_fix`, `cards_to_fix_note`, and a card's `problem` are the build's
+# own: authored ones are cleared.
+#
+# BROKEN VERDICTS FROM BEARINGS. The bearings board, a separate project with
+# card rules of its own, publishes the cards it files under Broken at
+# <state>/board-broken.json as {"as_of": <ISO-8601 UTC>, "cards": [{"key",
+# "reason", "owner_home_id", "version"}]}, replaced whole on each of its runs.
+# Right after the hold-back above, build merges each entry into `cards_to_fix`
+# as {key, task, problem, home, version} - task the key, problem the reason,
+# home the owner_home_id - skipping a key the build already holds back, so the
+# fault reaches main's CARDS TO FIX with its owning home, and
+# bin/fm-board-refresh.sh sends one held by another home to that home. The card
+# stays in `captains_call`, because bearings' keys are not the payload's and
+# this script does not own bearings' rules. A missing file merges nothing. A
+# file whose as_of is more than FM_BOARD_BROKEN_MAX_AGE seconds old (default
+# 1800), or that is not that shape, merges nothing: build sets the payload's
+# `cards_to_fix_note` to say so and prints it on stderr, so its verdicts are
+# never dropped silently. `broken-verdicts` prints what build would merge, as
+# {"cards": [...]} plus a "note" when it merges nothing for that reason; the
+# refresher folds it into its fingerprint, so a new or stale file rebuilds the
+# board.
 #
 # The validator's reservation scope must equal the adapter's reconcile
 # classification scope, which is all card types because the captured payload
@@ -537,12 +561,52 @@ hold_back_undecided() {  # <undecided-lines>  (payload on stdin)
     | if .cards_to_fix == [] then del(.cards_to_fix) else . end'
 }
 
-# Publish the held-back cards as `<task>\t<key>\t<problem>` lines at
+# The bearings verdicts build merges, as {"cards": [...]} plus a "note" when a
+# present file is stale or not the agreed shape (see BROKEN VERDICTS FROM
+# BEARINGS in the header).
+broken_verdicts() {
+  local file="$STATE/board-broken.json" max="${FM_BOARD_BROKEN_MAX_AGE:-1800}"
+  if [ ! -e "$file" ]; then
+    printf '{"cards":[]}\n'
+    return 0
+  fi
+  case "$max" in ''|*[!0-9]*) max=1800 ;; esac
+  jq -c --argjson now "$(date +%s)" --argjson max "$max" '
+    def field: type == "string" and length > 0;
+    def entry: type == "object" and ([.key, .reason, .owner_home_id, .version] | all(field));
+    def epoch: try (sub("\\.[0-9]+"; "") | sub("(\\+00:?00)$"; "Z") | fromdateiso8601) catch null;
+    if type == "object" and (.cards | type) == "array" and (.cards | all(entry))
+        and (.as_of | type) == "string" and (.as_of | epoch) != null then
+      if $now - (.as_of | epoch) > $max then
+        {cards: [], note: "board-broken.json is stale (as_of \(.as_of), more than \($max) seconds old), so its \(.cards | length) broken card verdict(s) were not merged"}
+      else {cards: [.cards[] | {key, reason, owner_home_id, version}]} end
+    else {cards: [], note: "board-broken.json is not the agreed {as_of, cards: [{key, reason, owner_home_id, version}]} shape, so its broken card verdicts were not merged"} end
+  ' "$file" 2>/dev/null \
+    || printf '{"cards":[],"note":"board-broken.json is not readable JSON, so its broken card verdicts were not merged"}\n'
+}
+
+# Merge <verdicts> (broken_verdicts output) into `cards_to_fix`, once per key
+# and never over a card the build itself held back, and set or clear
+# `cards_to_fix_note`.
+merge_broken_verdicts() {  # <verdicts-json>  (payload on stdin)
+  jq -c --argjson v "$1" '
+    [.cards_to_fix[]?.key] as $own
+    | ( reduce ($v.cards[] | select(.key as $k | $own | index($k) | not)) as $c ([];
+          if any(.[]; .key == $c.key) then .
+          else . + [{key: $c.key, task: $c.key, problem: $c.reason,
+                     home: $c.owner_home_id, version: $c.version}] end) ) as $external
+    | .cards_to_fix = ((.cards_to_fix // []) + $external)
+    | if .cards_to_fix == [] then del(.cards_to_fix) else . end
+    | if $v.note then .cards_to_fix_note = $v.note else del(.cards_to_fix_note) end'
+}
+
+# Publish the held-back cards as `<task>\t<key>\t<problem>[\t<home>]` lines at
 # <state>/board-cards-to-fix, which bin/fm-wake-drain.sh presents to main as
 # CARDS TO FIX, or remove that file when no card was held back.
 publish_cards_to_fix() {  # <state-dir>  (payload on stdin)
   local dest="$1/board-cards-to-fix" tmp lines
-  lines=$(jq -r '.cards_to_fix[]? | [.task, .key, .problem] | map(gsub("[[:cntrl:]]"; " ")) | join("\t")') \
+  lines=$(jq -r '.cards_to_fix[]? | [.task, .key, .problem] + (if .home then [.home] else [] end)
+    | map(gsub("[[:cntrl:]]"; " ")) | join("\t")') \
     || return 1
   if [ -z "$lines" ]; then
     rm -f -- "$dest"
@@ -867,7 +931,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data board board_data board_app board_stamp json tmp extracted effective pages code stamp stage undecided errors more reopen=1
+  local data board board_data board_app board_stamp json tmp extracted effective pages code stamp stage undecided verdicts note errors more reopen=1
   if [ "${1-}" = --no-reopen ]; then reopen=0; shift; fi
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   data=$1
@@ -915,6 +979,12 @@ command_build() {
   fi
   if ! json=$(hold_back_undecided "$undecided" < "$effective") || ! printf '%s\n' "$json" > "$effective"; then
     rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot hold back the Captain's Call cards: $data"
+  fi
+  verdicts=$(broken_verdicts)
+  note=$(printf '%s\n' "$verdicts" | jq -r '.note // empty')
+  [ -z "$note" ] || printf 'fm-bearings-board: %s\n' "$note" >&2
+  if ! json=$(merge_broken_verdicts "$verdicts" < "$effective") || ! printf '%s\n' "$json" > "$effective"; then
+    rm -f -- "$effective"; rm -rf -- "$stage"; fail "cannot merge the bearings broken card verdicts: $data"
   fi
   # Only a card that links a Lavish page needs the server's session listing.
   sessions='{}'
@@ -1135,6 +1205,7 @@ case "${1-}" in
   path) board_path ;;
   url) shift; command_url "$@" ;;
   ended) shift; command_ended "$@" ;;
+  broken-verdicts) broken_verdicts ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

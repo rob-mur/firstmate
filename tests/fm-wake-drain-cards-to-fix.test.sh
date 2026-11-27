@@ -41,6 +41,21 @@ test_a_held_back_card_is_named_by_task_and_key() {
   pass "every held-back card is named by task and key on each drain until the board shows it"
 }
 
+test_a_card_another_builder_filed_names_its_home() {
+  local dir state out
+  dir=$(make_case broken-home)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'alpha-fix\talpha-fix\tmissing options\nrunner-image.rollout-1\trunner-image.rollout-1\tno link for PR 91\trunner-image\n' \
+    > "$state/board-cards-to-fix"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "the drain failed with a card another builder filed: $(cat "$out")"
+  grep -F 'runner-image.rollout-1 [key=runner-image.rollout-1] [home=runner-image]: no link for PR 91' "$out" >/dev/null \
+    || fail "the drain did not name the card's owning home: $(cat "$out")"
+  grep -F 'alpha-fix [key=alpha-fix]: missing options' "$out" >/dev/null \
+    || fail "the drain changed how it names a card with no home: $(cat "$out")"
+  pass "a card another builder filed as broken is named with its owning home"
+}
+
 test_no_section_when_nothing_is_held_back() {
   local dir state out
   dir=$(make_case none-held-back)
@@ -72,5 +87,6 @@ test_a_branch_drain_leaves_cards_to_main() {
 }
 
 test_a_held_back_card_is_named_by_task_and_key
+test_a_card_another_builder_filed_names_its_home
 test_no_section_when_nothing_is_held_back
 test_a_branch_drain_leaves_cards_to_main
