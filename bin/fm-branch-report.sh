@@ -17,7 +17,7 @@
 # Usage:
 #   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
 #       --summary <text> [--silent true|false] [--inform true|false] \
-#       [--wake <text>]
+#       [--ask <question?>] [--wake <text>]
 #
 # The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
 # or captain"); --silent true is legal only for a routine outcome.
@@ -28,15 +28,20 @@
 # outcome store, so the stored row and its delivery are those of any captain
 # row.
 # --wake defaults to the wake reason the host recorded for the turn.
-# A captain outcome MAIN must act on (no --inform true) is also something the
-# captain may have to do or decide, so before it is recorded this script makes
-# sure an open captain hold carries it (bin/fm-captain-hold.sh `covered`): an
-# existing hold on the task, or one gating or originating from it, is enough;
-# otherwise it holds a new `<task>-captain` row (`fleet-captain-<epoch>` for
-# the fleet) with the summary as its reason and the task as its origin, so the
-# outcome reaches the board and not only the return brief. A home with no
-# automatic backlog skips this; a hold that cannot be read or created refuses
-# with exit 1 and records nothing.
+# --ask <question?> marks a captain outcome that needs the captain's decision
+# or a step only the captain can take; it is legal only for a captain outcome
+# MAIN acts on (not --inform true) and must end in "?", or the report is
+# refused with exit 2 and nothing recorded. Only an --ask outcome holds a
+# captain call; every other outcome, captain or routine, holds nothing. Before
+# an --ask outcome is recorded this script makes sure an open captain hold
+# carries it (bin/fm-captain-hold.sh `covered`): an existing hold on the task,
+# or one gating or originating from it, is enough; otherwise it holds a new
+# `<task>-captain` row (`fleet-captain-<epoch>` for the fleet) with the
+# question as its reason, the task as its origin, a free-text answer, and the
+# question's https URLs as its links (no link when it names none), so the
+# card reaches the board ready to answer. A home with no automatic backlog
+# skips this; a hold that cannot be read or created refuses with exit 1 and
+# records nothing.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
 # must be "branch" and FM_BRANCH_REPORT_TURN must name the host's current turn
@@ -81,7 +86,7 @@ refuse() {
   exit 3
 }
 
-TASK='' VERDICT='' SUMMARY='' SILENT=false INFORM=false WAKE='' WAKE_SET=0
+TASK='' VERDICT='' SUMMARY='' SILENT=false INFORM=false ASK='' ASK_SET=0 WAKE='' WAKE_SET=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --task) TASK=${2:-}; shift 2 || usage ;;
@@ -89,6 +94,7 @@ while [ "$#" -gt 0 ]; do
     --summary) SUMMARY=${2:-}; shift 2 || usage ;;
     --silent) SILENT=${2:-}; shift 2 || usage ;;
     --inform) INFORM=${2:-}; shift 2 || usage ;;
+    --ask) ASK=${2:-}; ASK_SET=1; shift 2 || usage ;;
     --wake) WAKE=${2:-}; WAKE_SET=1; shift 2 || usage ;;
     -h|--help) usage ;;
     *) usage ;;
@@ -97,6 +103,7 @@ done
 
 TASK=$(printf '%s' "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+ASK=$(printf '%s' "$ASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
 case "$INFORM" in true|false) ;; *) usage ;; esac
@@ -111,6 +118,19 @@ fi
 if [ "$INFORM" = true ] && [ "$VERDICT" != captain ]; then
   echo "invalid report: --inform true requires the captain verdict" >&2
   exit 2
+fi
+if [ "$ASK_SET" -eq 1 ]; then
+  if [ "$VERDICT" != captain ] || [ "$INFORM" = true ]; then
+    echo "invalid report: --ask requires the captain verdict without --inform true" >&2
+    exit 2
+  fi
+  case "$ASK" in
+    *'?') ;;
+    *)
+      echo "invalid report: --ask must be the question the captain answers, ending in '?'" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 [ "${FM_SUPERVISION_ACTOR:-}" = branch ] \
@@ -146,9 +166,18 @@ captain_hold() {  # <captain-hold args...>
     FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" "$@"
 }
 
-# Make sure an open captain hold carries this captain outcome (see the header).
+# The distinct https URLs the question names, trailing punctuation trimmed,
+# one per line and at most the 8 a card shows.
+ask_links() {
+  printf '%s\n' "$ASK" | grep -oE "https://[^[:space:]<>\"'()]+" \
+    | sed -E 's/[].,;:!?]+$//' \
+    | grep -E '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^[:space:]]*)?$' \
+    | awk '!seen[$0]++' | head -n 8
+}
+
+# Make sure an open captain hold carries this --ask outcome (see the header).
 ensure_captain_hold() {
-  local rc=0 id title out
+  local rc=0 id title out links url
   [ -d "$DATA" ] || return 0
   # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$SCRIPT_DIR/fm-tasks-axi-lib.sh" || return 1
@@ -166,7 +195,7 @@ ensure_captain_hold() {
   if [ "$TASK" = fleet ]; then
     id="fleet-captain-$(date +%s)"
     title="Captain call from fleet supervision"
-    set -- hold "$id" --title "$title" --reason "$SUMMARY"
+    set -- hold "$id" --title "$title" --reason "$ASK"
   else
     rc=0
     out=$(captain_hold covered "$TASK" 2>&1) || rc=$?
@@ -182,7 +211,16 @@ ensure_captain_hold() {
     rc=0
     captain_hold open "$id" --distinguish-absent >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq 3 ] || id="$TASK-captain-$(date +%s)"
-    set -- hold "$id" --title "Captain call from $TASK" --origin "$TASK" --reason "$SUMMARY"
+    set -- hold "$id" --title "Captain call from $TASK" --origin "$TASK" --reason "$ASK"
+  fi
+  set -- "$@" --free-text
+  links=$(ask_links)
+  if [ -n "$links" ]; then
+    while IFS= read -r url; do set -- "$@" --link "$url"; done <<EOF
+$links
+EOF
+  else
+    set -- "$@" --no-link
   fi
   if ! out=$(captain_hold "$@" 2>&1); then
     printf 'the captain outcome could not be held for the captain as %s (nothing recorded)\n%s\n' "$id" "$out" >&2
@@ -192,7 +230,7 @@ ensure_captain_hold() {
 }
 
 CAPTAIN_HOLD_ID=
-if [ "$VERDICT" = captain ] && [ "$INFORM" != true ]; then
+if [ "$ASK_SET" -eq 1 ]; then
   ensure_captain_hold || exit 1
 fi
 

@@ -235,8 +235,9 @@ Teardown asks the read-only `covered` subcommand:
 
 `--force` does not lift this refusal either, for the same reason as above.
 
-`bin/fm-branch-report.sh --verdict captain` applies the same rule at report time.
-Unless `--inform true` marks the outcome as relay-only, or a hold already covers the task, it holds `<task>-captain` (or `fleet-captain-<epoch>` for a fleet report) with the outcome as its reason, so the outcome shows on the board.
+`bin/fm-branch-report.sh --verdict captain --ask '<question?>'` applies the same rule at report time, for an outcome that needs the captain's decision or a step only the captain can take.
+Unless a hold already covers the task, it holds `<task>-captain` (or `fleet-captain-<epoch>` for a fleet report) with the question as its reason, a free-text answer, and the question's https URLs as its links, so the question shows on the board as a card ready to answer.
+An `--ask` that does not end in `?` is refused, and a captain outcome without `--ask` holds nothing, because a statement makes a card with no question to answer.
 
 ## Answer-time resolution
 

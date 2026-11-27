@@ -76,14 +76,14 @@ test_report_surface_enforces_actor_turn_and_scope() {
 }
 
 
-# The dotfiles DNS rollout: while the captain was away, the branch reported the
-# ship's captain-only enablement steps as a captain outcome, and they reached
-# only the return brief, never a card. A captain outcome MAIN must act on now
-# leaves an open captain hold linked to the task before it is recorded; a
-# repeat reuses that hold, an informational outcome holds nothing, a task the
-# captain already holds is not held twice, and a fleet outcome gets its own.
-test_captain_report_leaves_an_open_captain_hold() {
-  local home state out rc show steps
+# Only a captain outcome that asks the captain a question holds a captain call.
+# PR 1068 green with the mate merging under yolo is a statement: it reached the
+# board as a Broken card with no question, so it must hold nothing. An --ask
+# question becomes the hold's reason and its card passes the board's card
+# check; a repeat reuses that hold, an --ask that is not a question is
+# refused with nothing recorded, and a fleet question gets its own hold.
+test_captain_report_holds_only_an_asked_question() {
+  local home state out rc show ask payload undecided
   command -v tasks-axi >/dev/null 2>&1 || { pass "skip: tasks-axi not found"; return 0; }
   home="$TMP_ROOT/report-hold"
   state="$home/state"
@@ -92,43 +92,67 @@ test_captain_report_leaves_an_open_captain_hold() {
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
   FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet' >/dev/null 2>&1 \
     || fail "fixture: could not record the away posture"
-  printf 'turn=t1\nrows=4\ntasks=dns-rollout\nunscoped=0\nwake=signal: dns-rollout.status\nposture=away\n' \
+  printf 'turn=t1\nrows=4\ntasks=cd\nunscoped=0\nwake=signal: cd.status\nposture=away\n' \
     > "$state/.supervision-host-turn"
-  steps='After merge you run snrs on each host, activate work-laptop with sudo, and do the Android Private DNS manual steps'
 
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
-    --task dns-rollout --verdict captain --summary "$steps" 2>&1); rc=$?
-  expect_code 0 "$rc" "a captain outcome with a backlog must be recorded: $out"
-  assert_contains "$out" "held for the captain as dns-rollout-captain" "the report did not name the captain hold"
-  show=$( (cd "$home" && tasks-axi show dns-rollout-captain --full) ) \
-    || fail "the captain outcome left no captain hold"
-  assert_contains "$show" "held: yes" "the captain outcome's hold is not open"
-  assert_contains "$show" "hold_kind: captain" "the captain outcome's hold is not a captain hold"
-  assert_contains "$show" "Captain hold origin: dns-rollout" "the hold is not linked to the task"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" covered dns-rollout) \
-    || fail "the task is not covered by an open captain hold"
-  [ "$out" = dns-rollout-captain ] || fail "the task is covered by the wrong hold: $out"
-
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
-    --task dns-rollout --verdict captain --summary "$steps (again)" 2>&1); rc=$?
-  expect_code 0 "$rc" "a repeat captain outcome must be recorded: $out"
-  assert_not_contains "$out" "held for the captain" "a repeat captain outcome minted a second hold"
-  [ "$(grep -c 'dns-rollout-captain' "$home/data/backlog.md")" = 1 ] \
-    || fail "a repeat captain outcome added a second hold row: $(cat "$home/data/backlog.md")"
-
-  printf 'turn=t2\nrows=5\ntasks=other\nunscoped=0\nwake=signal: other.status\nposture=away\n' \
-    > "$state/.supervision-host-turn"
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t2 "$REPORT" \
-    --task other --verdict captain --inform true --summary 'cleanup finished' 2>&1); rc=$?
+    --task cd --verdict captain \
+    --summary 'PR 1068 is green at 7 of 7 checks; the mate merges it under yolo' 2>&1); rc=$?
   expect_code 0 "$rc" "an informational captain outcome must be recorded: $out"
-  assert_not_contains "$(cat "$home/data/backlog.md")" "other-captain" "an informational outcome was held for the captain"
+  assert_not_contains "$out" "held for the captain" "an informational captain outcome was held for the captain"
+  assert_not_contains "$(cat "$home/data/backlog.md")" "cd-captain" \
+    "an informational captain outcome minted a captain hold: $(cat "$home/data/backlog.md")"
+  assert_contains "$(tail -n 1 "$state/.supervision-host-receipts")" "captain"$'\t'"cd"$'\t'"act" \
+    "an unmarked captain outcome no longer opens a MAIN turn"
+
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
+    --task cd --verdict captain --summary 'PR 1068 needs the captain' \
+    --ask 'Merge PR 1068 now that it is green' 2>&1); rc=$?
+  expect_code 2 "$rc" "an --ask that is not a question must be refused: $out"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed | grep -c 'needs the captain')" = 0 ] \
+    || fail "a refused --ask was recorded in the outcome store"
+  assert_not_contains "$(cat "$home/data/backlog.md")" "cd-captain" "a refused --ask minted a captain hold"
+
+  ask='Will you clear review 671 on https://forgejo.example/rob/cd/pulls/1068 so I can merge it?'
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
+    --task cd --verdict captain --summary 'PR 1068 waits on review 671' --ask "$ask" 2>&1); rc=$?
+  expect_code 0 "$rc" "a captain question must be recorded: $out"
+  assert_contains "$out" "held for the captain as cd-captain" "the report did not name the captain hold"
+  show=$( (cd "$home" && tasks-axi show cd-captain --full) ) \
+    || fail "the captain question left no captain hold"
+  assert_contains "$show" "held: yes" "the captain question's hold is not open"
+  assert_contains "$show" "hold_kind: captain" "the captain question's hold is not a captain hold"
+  assert_contains "$show" "Captain hold origin: cd" "the hold is not linked to the task"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" covered cd) \
+    || fail "the task is not covered by an open captain hold"
+  [ "$out" = cd-captain ] || fail "the task is covered by the wrong hold: $out"
+  payload="$home/payload.json"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+    FM_BEARINGS_BOARD_PR_CHECK=0 FM_BEARINGS_BOARD_MR_CHECK=0 \
+    "$ROOT/bin/fm-bearings-board-payload.sh" > "$payload" 2>/dev/null \
+    || fail "the board payload could not be built"
+  [ "$(jq '[.captains_call[] | select(.key == "cd-captain")] | length' "$payload")" = 1 ] \
+    || fail "the captain question did not reach the board: $(jq -c '.captains_call' "$payload")"
+  assert_equals "$ask" "$(jq -r '.captains_call[] | select(.key == "cd-captain") | .context.reason' "$payload")" \
+    "the card's reason is not the captain's question"
+  undecided=$(bash -c '. "$1/bin/fm-bearings-card-check-lib.sh" && fm_bearings_undecided_cards "$2"' \
+    _ "$ROOT" "$payload" 2>&1) || fail "the card check could not read the payload: $undecided"
+  assert_not_contains "$undecided" "cd-captain" "the captain question's card failed the card check: $undecided"
+
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
+    --task cd --verdict captain --summary 'PR 1068 still waits on review 671' --ask "$ask" 2>&1); rc=$?
+  expect_code 0 "$rc" "a repeat captain question must be recorded: $out"
+  assert_not_contains "$out" "held for the captain" "a repeat captain question minted a second hold"
+  [ "$(grep -c 'cd-captain' "$home/data/backlog.md")" = 1 ] \
+    || fail "a repeat captain question added a second hold row: $(cat "$home/data/backlog.md")"
 
   printf 'turn=t3\nrows=6\ntasks=\nunscoped=1\nwake=heartbeat\nposture=away\n' > "$state/.supervision-host-turn"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t3 "$REPORT" \
-    --task fleet --verdict captain --summary 'the runner store is full' 2>&1); rc=$?
-  expect_code 0 "$rc" "a fleet captain outcome must be recorded: $out"
-  assert_contains "$out" "held for the captain as fleet-captain-" "a fleet captain outcome left no captain hold"
-  pass "a captain outcome MAIN must act on leaves an open captain hold linked to its task"
+    --task fleet --verdict captain --summary 'the runner store is full' \
+    --ask 'Which runner cache should I clear to free the store?' 2>&1); rc=$?
+  expect_code 0 "$rc" "a fleet captain question must be recorded: $out"
+  assert_contains "$out" "held for the captain as fleet-captain-" "a fleet captain question left no captain hold"
+  pass "only a captain outcome that asks a question holds a captain call, and its card passes the card check"
 }
 
 
@@ -650,7 +674,7 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair() {
 
 fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
-  test_captain_report_leaves_an_open_captain_hold \
+  test_captain_report_holds_only_an_asked_question \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_branch_outcomes_only_on_a_host_home_off_pi \
