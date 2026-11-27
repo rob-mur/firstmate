@@ -31,6 +31,7 @@ Run the command in the originating work's authoritative `FM_HOME`; secondmate-ow
 Do not close a captain-held task merely because the originating investigation completed, its report was archived, its visual review ended, or its task was torn down.
 Holding the work item the question gates is safe for exactly that reason: cleanup keeps such a row open with the finished work's deliverable recorded and returns it to the queue, so it still reads as the captain's own call.
 Only `answer` with the captain's words, an evidence-backed `reconcile close`, or the declared PR settlement policy below may resolve it.
+A hold firstmate minted by mistake - a duplicate of a call another home already holds, or a note that asks the captain nothing - is never a captain call; close it with `bin/fm-captain-hold.sh withdraw <id> --evidence <file> --reason <why>` ([Withdrawing a mistaken hold](../../../docs/captain-hold-lifecycle.md#withdrawing-a-mistaken-hold)), never with `answer`.
 
 When [PR hold settlement](../../../docs/configuration.md#pr-hold-settlement-confighold-pr-settle) is enabled, declare a `pr-policy` only when its specified forge event answers the whole held question.
 Use `close` only for a decision-only task, and `release` when the task still contains unfinished work.

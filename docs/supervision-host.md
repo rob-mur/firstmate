@@ -90,7 +90,7 @@ A non-silent row an away turn records after the captain returned is also queued 
 Silent outcomes remain in the store but are not queued or relayed as notes.
 An attended turn queues nothing: its actionable captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine and informational rows stay in the store.
 `--inform true` marks a captain outcome that leaves main nothing to do but relay it; the mark lives only in the turn's receipt, never in the store row.
-A `--verdict captain` report holds an open captain call for the task only when `--ask` gives the captain's question, unless one already covers it, so the question shows on the board; [Cleanup never drops a captain-only follow-up](captain-hold-lifecycle.md#cleanup-never-drops-a-captain-only-follow-up) owns the rule.
+A `--verdict captain` report holds an open captain call for the task only when `--ask` gives the captain's question, unless one already covers it or the task's secondmate already holds the call, so the question shows on the board once; [Cleanup never drops a captain-only follow-up](captain-hold-lifecycle.md#cleanup-never-drops-a-captain-only-follow-up) owns the rule.
 
 ### Leases and authority
 

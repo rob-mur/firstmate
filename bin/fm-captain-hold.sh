@@ -43,6 +43,7 @@
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
 #   fm-captain-hold.sh reconcile note <task-id> --note-file <path>
+#   fm-captain-hold.sh withdraw <task-id> --evidence <file> --reason <why>
 #
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
@@ -172,6 +173,17 @@
 # `list` is the read-only enumeration.
 # docs/captain-hold-lifecycle.md owns the semantics.
 #
+# `withdraw` closes a hold firstmate minted by mistake, such as a duplicate of
+# a call another home already holds or a status note that asks nothing. It
+# needs no captain words and no board request, but it refuses without
+# `--reason` and an existing, readable, non-empty `--evidence` file. It writes
+# a `withdrawn` resolution record under a `Withdrawal evidence:` label (the
+# reason, the evidence file's absolute path, and its sha256) and closes the
+# task. `answered` and the snapshot's hold answers skip that record, so a
+# withdrawal is never read as the captain's ruling. An exact retry is
+# idempotent. docs/captain-hold-lifecycle.md "Withdrawing a mistaken hold"
+# owns when it applies.
+#
 # A channel's ONLY job is to turn whatever it received into those keyed lines
 # and pipe them here. It must never map keys to tasks, build decision records,
 # choose a close mode beyond what its card declared, or close anything itself.
@@ -244,8 +256,8 @@
 # backlog close and, on 0, returns the row to Queued with its deliverable
 # recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
 # holding the very work item a question gates is safe; only `answer` with the
-# captain's words, evidence-backed `reconcile close`, or the opt-in PR policy
-# below settles the call.
+# captain's words, evidence-backed `reconcile close` or `withdraw`, or the
+# opt-in PR policy below settles the call.
 # bin/fm-watch.sh asks it when an ordinary
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
@@ -320,7 +332,7 @@
 #
 # Resolution records: the block written into the body names this script, the
 # decision digest, and a `Resolution mode:` of answered, released, repaired,
-# reconciled, forge-closed, or forge-released.
+# reconciled, withdrawn, forge-closed, or forge-released.
 # Records written by the retired fm-decision-hold.sh (routed,
 # declined, answered, repaired) are recognized everywhere a record is read, so
 # nothing already closed needs rewriting.
@@ -667,6 +679,7 @@ body_has_resolution_record() {  # <task-body>
     *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
     *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
     *"Resolution recorded by fm-captain-hold."*"Reconciliation evidence:"*) return 0 ;;
+    *"Resolution recorded by fm-captain-hold."*"Withdrawal evidence:"*) return 0 ;;
   esac
   return 1
 }
@@ -712,20 +725,21 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
   return 1
 }
 
-# The record's label is what keeps an evidence-backed reconciliation from
-# reading as the captain's own words. Reconciliation modes carry evidence;
-# answer modes carry what the captain said.
+# The record's label is what keeps an evidence-backed reconciliation or a
+# withdrawal from reading as the captain's own words. Reconciliation and
+# withdrawal modes carry evidence; answer modes carry what the captain said.
 resolution_block() {  # <mode>
   local label='Captain decision:'
   local selected='' lines
   case "$1" in
     reconciled|forge-closed|forge-released) label='Reconciliation evidence:' ;;
+    withdrawn) label='Withdrawal evidence:' ;;
   esac
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\nResolved at: %s\n\n%s\n%s\n' \
     "$DECISION_DIGEST" "$1" "${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$label" "$DECISION_TEXT"
   [ -f "$CONFIG/hold-answer-words" ] || return 0
   case "$1" in
-    reconciled|forge-closed|forge-released) return 0 ;;
+    reconciled|forge-closed|forge-released|withdrawn) return 0 ;;
   esac
   # The leading newline lets one pattern find a marker that opens the text.
   lines=$'\n'$DECISION_TEXT
@@ -2453,6 +2467,83 @@ reconcile_note() {
   printf 'still-open: %s\n' "$id"
 }
 
+# --- withdraw: close a captain hold firstmate minted by mistake ---------------
+#
+# docs/captain-hold-lifecycle.md "Withdrawing a mistaken hold" owns when this
+# applies. The evidence file is what closes the hold, and the `withdrawn` mode
+# with its `Withdrawal evidence:` label is what keeps the record from reading
+# as the captain's answer. The record carries the reason, the evidence file's
+# absolute path, and its sha256, so the evidence can be re-read and checked.
+command_withdraw() {
+  local id=${1:-} evidence='' reason='' reason_set=0 show state hold_kind body occurrence recorded_mode
+  local digest
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --evidence) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; evidence=$2; shift ;;
+      --reason) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; reason=$2; reason_set=1; shift ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  [ -n "$evidence" ] || fail "--evidence is required; a mistaken hold is withdrawn on evidence, never on assertion"
+  if [ "$reason_set" != 1 ] || is_blank "$reason"; then fail "--reason is required"; fi
+  validate_one_line reason "$reason"
+  [ -f "$evidence" ] && [ -r "$evidence" ] || fail "evidence file does not exist or cannot be read: $evidence"
+  [ -s "$evidence" ] || fail "evidence file must not be empty: $evidence"
+  case "$evidence" in
+    /*) ;;
+    *) evidence="$(cd "$(dirname -- "$evidence")" && pwd)/${evidence##*/}" \
+         || fail "cannot resolve the evidence file path: $evidence" ;;
+  esac
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256 < "$evidence") || fail "cannot read the evidence file: $evidence"
+  else
+    digest=$(sha256sum < "$evidence") || fail "cannot read the evidence file: $evidence"
+  fi
+  digest=${digest%% *}
+  DECISION_TEXT=$(printf 'Withdrawn because: %s\nEvidence file: %s\nEvidence sha256: %s' "$reason" "$evidence" "$digest")
+  DECISION_DIGEST=$(sha256_text "$DECISION_TEXT")
+  acquire_task_control_lock "$id"
+  require_tasks_axi
+  task_show_or_fail "$id" "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+  state=$(show_field "$show" state)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  body=$(show_field "$show" body)
+  occurrence=$(( $(resolution_record_count "$body") + 1 ))
+  if [ "$state" = "done" ]; then
+    # An exact retry finishes an interrupted withdrawal and stays idempotent.
+    [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+      && [ "$(recorded_resolution_mode "$body" || true)" = withdrawn ] \
+      || fail "task $id is already closed and was not withdrawn with this reason and evidence"
+    occurrence=$(resolution_record_count "$body")
+    remove_interrupted_answer_stamp "$id"
+    publish_parent_resolution_then_retire "$id" "$occurrence" withdrawn
+    printf 'withdrawn: %s\n' "$id"
+    return 0
+  fi
+  [ "$hold_kind" = captain ] \
+    || fail "task $id is not held for the captain; there is no captain hold to withdraw"
+  if body_has_resolution_record "$body" \
+    && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+    recorded_mode=$(recorded_resolution_mode "$body" || true)
+    [ "$recorded_mode" = withdrawn ] \
+      || fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a withdrawal retry"
+    occurrence=$(resolution_record_count "$body")
+  else
+    write_resolution_record "$id" withdrawn "$body"
+  fi
+  close_answered "$id" 0 || fail "could not close withdrawn captain-held task $id"
+  remove_interrupted_answer_stamp "$id"
+  task_show_or_fail "$id" "task $id disappeared after closing"
+  body_has_resolution_record "$(show_field "$show" body)" \
+    || fail "captain-held task $id did not retain its durable withdrawal record"
+  publish_parent_resolution_then_retire "$id" "$occurrence" withdrawn
+  printf 'withdrawn: %s\n' "$id"
+}
+
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
   local resolved_how attested_by_prefix='' origin_state unrecorded_origin='' tmp
@@ -2849,6 +2940,8 @@ command_answered() {  # <origin-task-id> <decision-key> --opened-at <epoch>
     show=$TASK_SHOW_OUTPUT
     body=$(show_field "$show" body)
     body_has_resolution_record "$body" || continue
+    # A withdrawn hold was firstmate's mistake, never the captain's answer.
+    [ "$(recorded_resolution_mode "$body" || true)" != withdrawn ] || continue
     decoded=$(decode_shown_value "$body") || return 1
     origins=$(printf '%s\n' "$decoded" | sed -n 's/^Captain hold origin: //p')
     if [ -n "$origins" ] && ! printf '%s\n' "$origins" | grep -Fxq -- "$origin"; then
@@ -2963,10 +3056,10 @@ run_then_refresh_home_summary() {  # <command-function> <args...>
 }
 
 case "${1:-}" in
-  hold|answer|answers|reconcile|reconcile-requests) KICK_BOARD=1 ;;
+  hold|answer|answers|reconcile|reconcile-requests|withdraw) KICK_BOARD=1 ;;
 esac
 case "${1:-}" in
-  reconcile|reconcile-requests|settle-pr) REFRESH_SUMMARY=1 ;;
+  reconcile|reconcile-requests|settle-pr|withdraw) REFRESH_SUMMARY=1 ;;
   answers) REFRESH_SUMMARY=2 ;;
 esac
 case "${1:-}" in
@@ -2987,6 +3080,7 @@ case "${1:-}" in
   settled) shift; command_settled "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
+  withdraw) shift; command_withdraw "$@" ;;
   pr-policy) shift; command_pr_policy "$@" ;;
   settle-pr) shift; command_settle_pr "$@" ;;
   -h|--help) usage ;;

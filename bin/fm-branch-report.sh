@@ -35,7 +35,10 @@
 # captain call; every other outcome, captain or routine, holds nothing. Before
 # an --ask outcome is recorded this script makes sure an open captain hold
 # carries it (bin/fm-captain-hold.sh `covered`): an existing hold on the task,
-# or one gating or originating from it, is enough; otherwise it holds a new
+# or one gating or originating from it, is enough, and so is a call the task's
+# secondmate already holds in its own home (an open `captain-hold-<id>-<n>`
+# decision on the task's parent-channel status file), which the stored summary
+# then names as "(held in the <task> home as <ids>)"; otherwise it holds a new
 # `<task>-captain` row (`fleet-captain-<epoch>` for the fleet) with the
 # question as its reason, the task as its origin, a free-text answer, and the
 # question's https URLs as its links (no link when it names none), so the
@@ -175,6 +178,28 @@ ask_links() {
     | awk '!seen[$0]++' | head -n 8
 }
 
+# The captain holds a secondmate already keeps open in its own home for this
+# task, comma-separated: each one publishes an open
+# `needs-decision [key=captain-hold-<id>-<n>]` on its parent-channel status
+# file here (bin/fm-captain-hold.sh `hold`), so the call is already on the
+# board and a main hold would only repeat it.
+mate_home_holds() {
+  local open key ids=''
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$SCRIPT_DIR/fm-classify-lib.sh" || return 1
+  open=$(status_open_decisions "$STATE/$TASK.status" secondmate) || return 1
+  while IFS= read -r key; do
+    key=${key%%$'\t'*}
+    case "$key" in captain-hold-?*-[0-9]*) ;; *) continue ;; esac
+    key=${key#captain-hold-}
+    key=${key%-*}
+    case ",$ids," in *",$key,"*) ;; *) ids=${ids:+$ids,}$key ;; esac
+  done <<EOF
+$open
+EOF
+  printf '%s' "$ids"
+}
+
 # Make sure an open captain hold carries this --ask outcome (see the header).
 ensure_captain_hold() {
   local rc=0 id title out links url
@@ -207,6 +232,11 @@ ensure_captain_hold() {
         return 1
         ;;
     esac
+    MATE_HOLDS=$(mate_home_holds) || {
+      printf 'whether the %s home already holds this call could not be read (nothing recorded)\n' "$TASK" >&2
+      return 1
+    }
+    [ -z "$MATE_HOLDS" ] || return 0
     id="$TASK-captain"
     rc=0
     captain_hold open "$id" --distinguish-absent >/dev/null 2>&1 || rc=$?
@@ -229,10 +259,11 @@ EOF
   CAPTAIN_HOLD_ID=$id
 }
 
-CAPTAIN_HOLD_ID=
+CAPTAIN_HOLD_ID='' MATE_HOLDS=''
 if [ "$ASK_SET" -eq 1 ]; then
   ensure_captain_hold || exit 1
 fi
+[ -z "$MATE_HOLDS" ] || SUMMARY="$SUMMARY (held in the $TASK home as $MATE_HOLDS)"
 
 set -- append --task "$TASK" --verdict "$VERDICT" --summary "$SUMMARY" --silent "$SILENT"
 [ -z "$WAKE" ] || set -- "$@" --wake "$WAKE"
@@ -247,6 +278,7 @@ printf '%s\t%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" "$MARK" >> "$REC
   exit 1
 }
 [ -z "$CAPTAIN_HOLD_ID" ] || printf 'held for the captain as %s, so the outcome shows on the board\n' "$CAPTAIN_HOLD_ID"
+[ -z "$MATE_HOLDS" ] || printf 'already held in the %s home as %s, so no main captain hold was added\n' "$TASK" "$MATE_HOLDS"
 if [ "$SILENT" = true ]; then
   printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
   exit 0
