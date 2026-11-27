@@ -1518,6 +1518,44 @@ test_build_flags_a_card_whose_lettered_choices_were_not_read() {
   pass "the board holds back a question whose lettered choices were not read, not one that only refers back"
 }
 
+# A status-key fallback card (an open blocked or needs-decision status line
+# with no captain hold) gets done/not-done as its derived default, not as a
+# recorded in-person action: it still needs a prompt that asks, and those
+# defaults do not answer lettered choices, so a bad one goes to cards_to_fix.
+test_build_flags_a_status_card_whose_done_options_are_only_defaults() {
+  local home data out
+  home=$(make_home status-done-defaults)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"status.lane.blocked","type":"decision","repo":null,
+    "title":"lane: the prod migration needs your SSO sess…","question":"Please run the prod migration from your laptop",
+    "about":"It needs your SSO session, which workers cannot reach.","from_status":true,"allow_freeform":true,
+    "context":{"task":"lane","reason":"Please run the prod migration from your laptop. It needs your SSO session, which workers cannot reach."},
+    "options":[{"value":"done","label":"Done"},{"value":"not-done","label":"Not done"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" status.lane.blocked "question (Please run the prod migration from your laptop is not a question)" \
+    "a status card whose done/not-done options are only defaults"
+
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"status.lane.pick","type":"decision","repo":null,
+    "title":"lane","question":"Run it (a) tonight or (b) tomorrow?","from_status":true,"allow_freeform":true,
+    "context":{"task":"lane","reason":"Run it (a) tonight or (b) tomorrow?"},
+    "options":[{"value":"done","label":"Done"},{"value":"not-done","label":"Not done"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  expect_flagged_build "$home" "$data" status.lane.pick "options (the question offers lettered (a)/(b) choices but the card offers only a default done/not done" \
+    "a status card whose lettered choices became done/not-done defaults"
+
+  write_valid_payload "$data"
+  jq '.captains_call += [{"key":"status.lane.ask","type":"decision","repo":null,
+    "title":"lane","question":"Can you run the prod migration from your laptop?","from_status":true,"allow_freeform":true,
+    "context":{"task":"lane","reason":"Can you run the prod migration from your laptop?"},
+    "options":[{"value":"done","label":"Done"},{"value":"not-done","label":"Not done"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "a status card that asks did not build: $out"
+  assert_not_contains "$out" "undecided-card: status.lane.ask" "a status card that asks was held back: $out"
+  pass "the board holds back a status card whose done/not-done defaults stand in for a question or lettered choices"
+}
+
 # A hold reason that leads with a colon list cuts its heading to the list's
 # lead ("Four calls"), but the question it ends on still asks: the card builds.
 # A reason that asks nowhere is still held back for its question.
@@ -2064,6 +2102,7 @@ test_build_retries_once_when_a_binary_vanishes
 test_build_does_not_retry_an_ordinary_failure
 test_build_flags_a_card_whose_option_marks_were_not_read
 test_build_flags_a_card_whose_lettered_choices_were_not_read
+test_build_flags_a_status_card_whose_done_options_are_only_defaults
 test_a_page_about_a_task_links_its_card_and_context_in_place
 test_a_linked_page_token_leaves_the_card_text
 test_a_page_its_task_status_names_links_the_hold_card

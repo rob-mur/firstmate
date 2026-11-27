@@ -20,7 +20,10 @@
 # even one after a colon list whose lead became the heading - and a way to answer it,
 # at least one option of its own besides the injected reconcile choice or a free-text answer. A card whose
 # options include `done` and `not-done` asks for an in-person action, so its
-# prompt may be an imperative sentence. A card also needs the decision's own
+# prompt may be an imperative sentence - unless it is a `from_status` card,
+# whose done/not-done options are the derived default (no hold recorded them),
+# so it still needs a prompt that asks and counts them as default options in
+# the Option-mark and lettered-choice checks below. A card also needs the decision's own
 # values and something to click: its options must be recorded ones - not empty
 # and not `options_inferred`, the payload mark for a hold that recorded none -
 # unless it carries `free_text: true` (a hold that declared a free-text
@@ -34,7 +37,8 @@
 # one carrying `off_board` or with no options and a Lavish page link, whose
 # decision is on that page. Any card whose reason (its `context.reason`, else
 # its `about`) carries two or more "Option x ...:" marks must offer options
-# other than none or a default yes/no (yes, no, approve, decline): those marks
+# other than none or a default yes/no (yes, no, approve, decline; for a
+# `from_status` card also done/not-done): those marks
 # list choices the option reader could not turn into options, so the card is
 # named until the reader learns the form or the reason is rewritten. The same
 # holds for a reason sentence that asks (carries a `?`) and marks two or more
@@ -223,8 +227,16 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
     | select(($page_backed | not) or ($stale | length) > 0)
     | .key as $key
     | ([.question, .decide] | map(text) | map(select(length > 0))) as $prompts
-    | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $action
     | (.from_status == true) as $raised
+    # Done/not-done marks an in-person action only when a hold recorded it: on
+    # a status-raised card it is the derived default, as generic as yes/no.
+    | (any(.options[]; .value == "done") and any(.options[]; .value == "not-done")) as $done_pair
+    | ($done_pair and ($raised | not)) as $action
+    | ((.options | length) == 0
+       or all(.options[]; .value | IN("yes", "no", "approve", "decline"))
+       or ($raised and all(.options[]; .value | IN("done", "not-done")))) as $generic
+    | (if (.options | length) == 0 then "no options"
+       elif $done_pair then "only a default done/not done" else "only a default yes/no" end) as $offers
     # A reason that asks anywhere outside its option items, even after a
     # colon list whose lead became the heading ("Four calls: 1) ... 4) ....
     # Do you accept all four?"), states its question; an asking sentence
@@ -263,15 +275,11 @@ fm_bearings_undecided_cards() {  # <data.json> [<link-states.json>]
               and ((.options | length) == 0 or .options_inferred == true)
          then "options (no recorded choices: re-hold with --option <value>=<label> or --free-text)"
          else empty end),
-        (if ($marks >= 2)
-              and ((.options | length) == 0
-                   or all(.options[]; .value | IN("yes", "no", "approve", "decline")))
-         then "options (the reason lists \($marks) Option marks but the card offers \(if (.options | length) == 0 then "no options" else "only a default yes/no" end): write each as \"Option a: ...\")"
+        (if ($marks >= 2) and $generic
+         then "options (the reason lists \($marks) Option marks but the card offers \($offers): write each as \"Option a: ...\")"
          else empty end),
-        (if ($marks < 2) and ($letters >= 2)
-              and ((.options | length) == 0
-                   or all(.options[]; .value | IN("yes", "no", "approve", "decline")))
-         then "options (the question offers lettered (a)/(b) choices but the card offers \(if (.options | length) == 0 then "no options" else "only a default yes/no" end): write each as \"Option a: ...\")"
+        (if ($marks < 2) and ($letters >= 2) and $generic
+         then "options (the question offers lettered (a)/(b) choices but the card offers \($offers): write each as \"Option a: ...\")"
          else empty end),
         (if ($raised | not) and ($linked | not)
          then "link (no link: re-hold with --link <url|page:id> or --no-link)" else empty end) ] as $missing
